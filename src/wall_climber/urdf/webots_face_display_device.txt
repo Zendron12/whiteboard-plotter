@@ -1,0 +1,9 @@
+# Webots Display device snippet
+# Add a Display node named exactly "face_display" to the screen assembly in Webots.
+# The custom Python plugin looks up this exact device name.
+
+Display {
+  name "face_display"
+  width 256
+  height 128
+}

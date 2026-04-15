@@ -17,7 +17,68 @@
   <xacro:property name="cable_mount_right_local_y" value="${-carriage_cfg['attachment_right_y']}"/>
   <xacro:property name="cable_mount_local_z" value="${chassis_root_local_z - (carriage_cfg['depth'] / 2.0) + 0.002}"/>
 
+  <xacro:property name="board_left_world_x" value="${board_cfg['center_x'] - (board_cfg['width'] / 2.0)}"/>
+  <xacro:property name="board_top_world_z" value="${board_cfg['center_z'] + (board_cfg['height'] / 2.0)}"/>
+  <xacro:property name="left_anchor_world_x" value="${board_left_world_x + anchor_cfg['left_x']}"/>
+  <xacro:property name="left_anchor_world_z" value="${board_top_world_z - anchor_cfg['left_y']}"/>
+  <xacro:property name="right_anchor_world_x" value="${board_left_world_x + anchor_cfg['right_x']}"/>
+  <xacro:property name="right_anchor_world_z" value="${board_top_world_z - anchor_cfg['right_y']}"/>
+
+  <xacro:macro name="board_anchor_visual" params="name world_x world_z x_sign">
+    <joint name="${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <origin xyz="${world_x} ${board_cfg['surface_y']} ${world_z}" rpy="0 0 0"/>
+    </joint>
+
+    <link name="${name}">
+      <visual>
+        <origin xyz="${0.016 * x_sign} 0.014 -0.016" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.036 0.006 0.036"/>
+        </geometry>
+        <material name="${name}_plate_mat">
+          <color rgba="0.14 0.16 0.19 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${0.010 * x_sign} 0.008 -0.010" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.020 0.012 0.020"/>
+        </geometry>
+        <material name="${name}_body_mat">
+          <color rgba="0.22 0.25 0.30 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+        <geometry>
+          <cylinder radius="0.0095" length="0.010"/>
+        </geometry>
+        <material name="${name}_roller_mat">
+          <color rgba="0.74 0.77 0.82 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+        <geometry>
+          <cylinder radius="0.0022" length="0.015"/>
+        </geometry>
+        <material name="${name}_axle_mat">
+          <color rgba="0.18 0.20 0.24 1.0"/>
+        </material>
+      </visual>
+      <inertial>
+        <mass value="0.04"/>
+        <inertia ixx="2.0e-5" ixy="0.0" ixz="0.0" iyy="2.0e-5" iyz="0.0" izz="2.0e-5"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
   <link name="base_link"/>
+
+  <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="1"/>
+  <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="-1"/>
 
   <webots>
     <plugin type="wall_climber.cable_supervisor_plugin.CableSupervisorPlugin">
