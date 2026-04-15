@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="cable_supervisor">
+  <xacro:property name="robot_cfg" value="${xacro.load_yaml('$(find wall_climber)/config/cable_robot.yaml')}"/>
+  <xacro:property name="board_cfg" value="${robot_cfg['board']}"/>
+  <xacro:property name="anchor_cfg" value="${robot_cfg['anchors']}"/>
+  <xacro:property name="workspace_cfg" value="${robot_cfg['workspace']}"/>
+  <xacro:property name="carriage_cfg" value="${robot_cfg['carriage']}"/>
+  <xacro:property name="pen_cfg" value="${robot_cfg['pen']}"/>
+  <xacro:property name="visual_cfg" value="${robot_cfg['visuals']}"/>
+
+  <xacro:property name="safe_x_min" value="${board_cfg['margin_left'] + workspace_cfg['safety_margin_side']}"/>
+  <xacro:property name="safe_x_max" value="${board_cfg['width'] - board_cfg['margin_right'] - workspace_cfg['safety_margin_side']}"/>
+  <xacro:property name="safe_y_min" value="${board_cfg['margin_top'] + workspace_cfg['top_clearance']}"/>
+  <xacro:property name="safe_y_max" value="${board_cfg['height'] - board_cfg['margin_bottom'] - workspace_cfg['safety_margin_bottom']}"/>
+  <xacro:property name="chassis_root_local_z" value="${carriage_cfg['root_to_chassis_z']}"/>
+  <xacro:property name="cable_mount_left_local_y" value="${-carriage_cfg['attachment_left_y']}"/>
+  <xacro:property name="cable_mount_right_local_y" value="${-carriage_cfg['attachment_right_y']}"/>
+  <xacro:property name="cable_mount_local_z" value="${chassis_root_local_z - (carriage_cfg['depth'] / 2.0) + 0.002}"/>
+
+  <link name="base_link"/>
+
+  <webots>
+    <plugin type="wall_climber.cable_supervisor_plugin.CableSupervisorPlugin">
+      <target_robot>wall_climber</target_robot>
+      <board_center_x>${board_cfg['center_x']}</board_center_x>
+      <board_center_z>${board_cfg['center_z']}</board_center_z>
+      <board_width>${board_cfg['width']}</board_width>
+      <board_height>${board_cfg['height']}</board_height>
+      <board_surface_y>${board_cfg['surface_y']}</board_surface_y>
+      <carriage_plane_y>${carriage_cfg['plane_y']}</carriage_plane_y>
+      <margin_left>${board_cfg['margin_left']}</margin_left>
+      <margin_right>${board_cfg['margin_right']}</margin_right>
+      <margin_top>${board_cfg['margin_top']}</margin_top>
+      <margin_bottom>${board_cfg['margin_bottom']}</margin_bottom>
+      <line_height>${board_cfg['line_height']}</line_height>
+      <safe_x_min>${safe_x_min}</safe_x_min>
+      <safe_x_max>${safe_x_max}</safe_x_max>
+      <safe_y_min>${safe_y_min}</safe_y_min>
+      <safe_y_max>${safe_y_max}</safe_y_max>
+      <corner_keepout_radius>${workspace_cfg['corner_keepout_radius']}</corner_keepout_radius>
+      <anchor_left_x>${anchor_cfg['left_x']}</anchor_left_x>
+      <anchor_left_y>${anchor_cfg['left_y']}</anchor_left_y>
+      <anchor_right_x>${anchor_cfg['right_x']}</anchor_right_x>
+      <anchor_right_y>${anchor_cfg['right_y']}</anchor_right_y>
+      <carriage_attachment_left_x>${carriage_cfg['attachment_left_x']}</carriage_attachment_left_x>
+      <carriage_attachment_left_y>${carriage_cfg['attachment_left_y']}</carriage_attachment_left_y>
+      <carriage_attachment_right_x>${carriage_cfg['attachment_right_x']}</carriage_attachment_right_x>
+      <carriage_attachment_right_y>${carriage_cfg['attachment_right_y']}</carriage_attachment_right_y>
+      <cable_mount_left_local_x>${carriage_cfg['attachment_left_x']}</cable_mount_left_local_x>
+      <cable_mount_left_local_y>${cable_mount_left_local_y}</cable_mount_left_local_y>
+      <cable_mount_right_local_x>${carriage_cfg['attachment_right_x']}</cable_mount_right_local_x>
+      <cable_mount_right_local_y>${cable_mount_right_local_y}</cable_mount_right_local_y>
+      <cable_mount_local_z>${cable_mount_local_z}</cable_mount_local_z>
+      <pen_offset_x>${carriage_cfg['pen_offset_x']}</pen_offset_x>
+      <pen_offset_y>${carriage_cfg['pen_offset_y']}</pen_offset_y>
+      <initial_center_x>${carriage_cfg['initial_center_x']}</initial_center_x>
+      <initial_center_y>${carriage_cfg['initial_center_y']}</initial_center_y>
+      <pen_contact_engage_gap>${pen_cfg['contact_engage_gap']}</pen_contact_engage_gap>
+      <pen_contact_release_gap>${pen_cfg['contact_release_gap']}</pen_contact_release_gap>
+      <trail_half_width>${visual_cfg['trail_half_width']}</trail_half_width>
+      <trail_round_segments>${visual_cfg['trail_round_segments']}</trail_round_segments>
+      <trail_min_spacing>${visual_cfg['trail_min_spacing']}</trail_min_spacing>
+      <trail_max>${visual_cfg['trail_max']}</trail_max>
+    </plugin>
+  </webots>
+</robot>

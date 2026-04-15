@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="wall_climber">
+
+    <material name="robot_orange"> <color rgba="1.0 0.35 0.05 1"/> </material>
+    <material name="robot_black"> <color rgba="0.06 0.06 0.06 1"/> </material>
+    <material name="robot_screen"> <color rgba="0.05 0.95 1.0 1"/> </material>
+    <material name="robot_dark_grey"> <color rgba="0.30 0.34 0.40 1"/> </material>
+
+    <xacro:include filename="$(find wall_climber)/urdf/base_body.xacro"/>
+    <xacro:include filename="$(find wall_climber)/urdf/robot_face_screen.xacro"/>
+    <xacro:include filename="$(find wall_climber)/urdf/simple_pen_mount.xacro"/>
+    <xacro:property name="robot_cfg" value="${xacro.load_yaml('$(find wall_climber)/config/cable_robot.yaml')}"/>
+    <xacro:property name="pen_cfg" value="${robot_cfg['pen']}"/>
+
+    <xacro:base_body/>
+    <xacro:robot_face_screen/>
+    <xacro:simple_pen_mount/>
+
+    <webots>
+        <controller type="extern"/>
+        <plugin type="wall_climber.cable_robot_plugin.CableRobotPlugin">
+            <pen_joint_name>pen_slide_joint</pen_joint_name>
+            <gripper_left_joint_name>gripper_left_joint</gripper_left_joint_name>
+            <gripper_right_joint_name>gripper_right_joint</gripper_right_joint_name>
+            <pen_slide_velocity>${pen_cfg['slide_velocity']}</pen_slide_velocity>
+            <pen_up_position>${pen_cfg['up_position']}</pen_up_position>
+            <pen_down_position>${pen_cfg['down_position']}</pen_down_position>
+            <gripper_velocity>${pen_cfg['gripper_velocity']}</gripper_velocity>
+            <gripper_closed_position>${pen_cfg['gripper_closed_position']}</gripper_closed_position>
+            <gripper_open_position>${pen_cfg['gripper_open_position']}</gripper_open_position>
+        </plugin>
+    </webots>
+
+    </robot>

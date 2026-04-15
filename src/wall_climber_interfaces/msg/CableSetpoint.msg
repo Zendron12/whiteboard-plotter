@@ -1,0 +1,6 @@
+geometry_msgs/Pose2D carriage_pose
+float64 left_cable_length
+float64 right_cable_length
+bool pen_down
+int32 active_segment_index
+float64 progress

@@ -1,0 +1,592 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="simple_pen_mount" params="">
+        <xacro:property name="robot_cfg" value="${xacro.load_yaml('$(find wall_climber)/config/cable_robot.yaml')}"/>
+        <xacro:property name="carriage_cfg" value="${robot_cfg['carriage']}"/>
+        <xacro:property name="pen_cfg" value="${robot_cfg['pen']}"/>
+
+        <!-- After the launch rotation, URDF -Z faces the board and URDF +X points right. -->
+        <xacro:property name="pen_local_y" value="${-carriage_cfg['pen_offset_y']}"/>
+        <!-- Arm mount: right side, flush with chassis front face -->
+        <xacro:property name="arm_mount_x" value="${(carriage_cfg['width'] / 2.0) + 0.006}"/>
+        <xacro:property name="arm_mount_z" value="${-(carriage_cfg['depth'] / 2.0) + 0.003}"/>
+        <xacro:property name="slide_origin_z" value="-0.003"/>
+
+        <!-- ════════════════  SHOULDER (arm_mount)  ════════════════ -->
+        <xacro:property name="shoulder_size_x" value="0.034"/>
+        <xacro:property name="shoulder_size_y" value="0.042"/>
+        <xacro:property name="shoulder_size_z" value="0.028"/>
+        <xacro:property name="shoulder_flange_x" value="0.038"/>
+        <xacro:property name="shoulder_flange_y" value="0.046"/>
+        <xacro:property name="shoulder_flange_z" value="0.004"/>
+        <xacro:property name="bolt_radius" value="0.002"/>
+        <xacro:property name="bolt_length" value="0.003"/>
+
+        <!-- ════════════════  LIFT STAGE  ════════════════ -->
+        <xacro:property name="lift_block_x" value="0.024"/>
+        <xacro:property name="lift_block_y" value="0.030"/>
+        <xacro:property name="lift_block_z" value="0.022"/>
+        <xacro:property name="rail_radius" value="${pen_cfg['support_radius'] * 0.50}"/>
+        <xacro:property name="rail_length" value="0.028"/>
+        <xacro:property name="rail_offset_y" value="0.008"/>
+
+        <!-- ════════════════  FOREARM (shortened)  ════════════════ -->
+        <xacro:property name="forearm_joint_x" value="0.020"/>
+        <xacro:property name="forearm_size_x" value="0.028"/>
+        <xacro:property name="forearm_size_y" value="0.018"/>
+        <xacro:property name="forearm_size_z" value="0.016"/>
+
+        <!-- ════════════════  WRIST (shortened)  ════════════════ -->
+        <xacro:property name="wrist_joint_x" value="0.020"/>
+        <xacro:property name="wrist_size_x" value="0.020"/>
+        <xacro:property name="wrist_size_y" value="0.026"/>
+        <xacro:property name="wrist_size_z" value="0.020"/>
+
+        <!-- ════════════════  GRIPPER (linkage style)  ════════════════ -->
+        <xacro:property name="pen_holder_x" value="0.012"/>
+        <xacro:property name="pen_holder_z" value="0.002"/>
+        <!-- Back plate -->
+        <xacro:property name="grip_plate_x" value="0.026"/>
+        <xacro:property name="grip_plate_y" value="0.028"/>
+        <xacro:property name="grip_plate_z" value="0.004"/>
+        <!-- Linkage bars -->
+        <xacro:property name="link_bar_x" value="0.016"/>
+        <xacro:property name="link_bar_y" value="0.004"/>
+        <xacro:property name="link_bar_z" value="0.004"/>
+        <xacro:property name="link_bar_offset_z" value="-0.006"/>
+        <!-- Jaw fingers -->
+        <xacro:property name="jaw_body_size_x" value="0.016"/>
+        <xacro:property name="jaw_body_size_y" value="0.004"/>
+        <xacro:property name="jaw_body_size_z" value="0.018"/>
+        <xacro:property name="jaw_finger_x" value="0.006"/>
+        <xacro:property name="jaw_finger_y" value="0.004"/>
+        <xacro:property name="jaw_finger_z" value="0.010"/>
+        <xacro:property name="jaw_closed_offset_y" value="${pen_cfg['radius'] + (jaw_body_size_y / 2.0) + 0.0002}"/>
+        <xacro:property name="jaw_open_travel" value="0.0036"/>
+        <xacro:property name="jaw_velocity" value="0.12"/>
+        <xacro:property name="jaw_pivot_r" value="0.003"/>
+        <!-- Gripper origin offsets (applied via fixed joints to avoid Webots Pose bug) -->
+        <xacro:property name="grip_origin_x" value="0.008"/>
+        <xacro:property name="grip_origin_z" value="-0.003"/>
+
+        <!-- ════════════════  MARKER PEN (clean, like pantograph)  ════════════════ -->
+        <xacro:property name="marker_r" value="${pen_cfg['radius']}"/>
+        <xacro:property name="marker_h" value="${pen_cfg['mount_length']}"/>
+        <xacro:property name="marker_body_center_z" value="-0.002"/>
+        <xacro:property name="marker_cap_band_length" value="0.006"/>
+        <xacro:property name="marker_cap_band_z" value="${-(marker_h) + 0.003 + 0.03}"/>
+
+        <!-- ════════════════  PEN TIP (from pantograph — simple)  ════════════════ -->
+        <xacro:property name="marker_tip_r" value="0.0035"/>
+        <xacro:property name="marker_tip_h" value="0.010"/>
+        <xacro:property name="marker_tip_contact_r" value="${pen_cfg['tip_radius']}"/>
+        <xacro:property name="tip_contact_z" value="-0.009"/>
+        <xacro:property name="marker_tip_front_z"
+            value="${tip_contact_z - marker_tip_contact_r}"/>
+        <xacro:property name="marker_tip_cylinder_z"
+            value="${marker_tip_front_z + marker_tip_contact_r + (marker_tip_h / 2.0)}"/>
+        <xacro:property name="support_center_z"
+            value="${tip_contact_z + marker_tip_contact_r + 0.0010}"/>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--                 SHOULDER JOINT & LINK                  -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="arm_mount_joint" type="fixed">
+            <parent link="chassis"/>
+            <child link="arm_mount"/>
+            <origin xyz="${arm_mount_x} ${pen_local_y} ${arm_mount_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="arm_mount">
+            <!-- Main housing -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${shoulder_size_x} ${shoulder_size_y} ${shoulder_size_z}"/>
+                </geometry>
+                <material name="arm_mount_housing">
+                    <color rgba="0.14 0.16 0.20 1.0"/>
+                </material>
+            </visual>
+            <!-- Mounting flange -->
+            <visual>
+                <origin xyz="0 0 ${(shoulder_size_z / 2.0) - (shoulder_flange_z / 2.0)}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${shoulder_flange_x} ${shoulder_flange_y} ${shoulder_flange_z}"/>
+                </geometry>
+                <material name="arm_mount_flange">
+                    <color rgba="0.30 0.33 0.38 1.0"/>
+                </material>
+            </visual>
+            <!-- Corner bolts (4) -->
+            <visual>
+                <origin xyz="${shoulder_flange_x * 0.38} ${shoulder_flange_y * 0.38} ${(shoulder_size_z / 2.0) + 0.001}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${bolt_radius}" length="${bolt_length}"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <visual>
+                <origin xyz="${-shoulder_flange_x * 0.38} ${shoulder_flange_y * 0.38} ${(shoulder_size_z / 2.0) + 0.001}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${bolt_radius}" length="${bolt_length}"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <visual>
+                <origin xyz="${shoulder_flange_x * 0.38} ${-shoulder_flange_y * 0.38} ${(shoulder_size_z / 2.0) + 0.001}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${bolt_radius}" length="${bolt_length}"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <visual>
+                <origin xyz="${-shoulder_flange_x * 0.38} ${-shoulder_flange_y * 0.38} ${(shoulder_size_z / 2.0) + 0.001}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${bolt_radius}" length="${bolt_length}"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <!-- Highlight strip -->
+            <visual>
+                <origin xyz="0 0 ${shoulder_size_z * 0.18}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${shoulder_size_x * 0.55} ${shoulder_size_y * 0.65} ${shoulder_size_z * 0.15}"/>
+                </geometry>
+                <material name="arm_mount_highlight">
+                    <color rgba="0.44 0.48 0.55 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${shoulder_size_x} ${shoulder_size_y} ${shoulder_size_z}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.05"/>
+                <inertia ixx="4.0e-5" ixy="0.0" ixz="0.0" iyy="4.0e-5" iyz="0.0" izz="4.0e-5"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--  PEN SLIDE: fixed offset link → prismatic (origin=0)   -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Fixed joint absorbs the slide_origin_z offset so the
+             prismatic joint has origin (0,0,0) — avoids the Webots
+             R2023b "Skipped unknown Pose field in SliderJoint" bug. -->
+        <joint name="pen_slide_origin_joint" type="fixed">
+            <parent link="arm_mount"/>
+            <child link="pen_slide_origin"/>
+            <origin xyz="0 0 ${slide_origin_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="pen_slide_origin">
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.001"/>
+                <inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/>
+            </inertial>
+        </link>
+
+        <joint name="pen_slide_joint" type="prismatic">
+            <parent link="pen_slide_origin"/>
+            <child link="arm_lift_stage"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-0.012" upper="0.006" effort="12.0" velocity="0.35"/>
+            <dynamics damping="0.16" friction="0.01"/>
+        </joint>
+
+        <link name="arm_lift_stage">
+            <!-- Slider block -->
+            <visual>
+                <origin xyz="0.004 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lift_block_x} ${lift_block_y} ${lift_block_z}"/>
+                </geometry>
+                <material name="arm_lift_block">
+                    <color rgba="0.18 0.21 0.26 1.0"/>
+                </material>
+            </visual>
+            <!-- Left rail -->
+            <visual>
+                <origin xyz="0.002 ${rail_offset_y} 0" rpy="0 1.5708 0"/>
+                <geometry>
+                    <cylinder radius="${rail_radius}" length="${rail_length}"/>
+                </geometry>
+                <material name="arm_rail_polished">
+                    <color rgba="0.70 0.73 0.78 1.0"/>
+                </material>
+            </visual>
+            <!-- Right rail -->
+            <visual>
+                <origin xyz="0.002 ${-rail_offset_y} 0" rpy="0 1.5708 0"/>
+                <geometry>
+                    <cylinder radius="${rail_radius}" length="${rail_length}"/>
+                </geometry>
+                <material name="arm_rail_polished">
+                    <color rgba="0.70 0.73 0.78 1.0"/>
+                </material>
+            </visual>
+            <!-- LED indicator -->
+            <visual>
+                <origin xyz="${lift_block_x * 0.30} ${lift_block_y * 0.35} ${lift_block_z * 0.28}" rpy="0 0 0"/>
+                <geometry><sphere radius="0.0015"/></geometry>
+                <material name="arm_led_green"><color rgba="0.10 0.90 0.30 1.0"/></material>
+            </visual>
+            <collision>
+                <origin xyz="0.004 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lift_block_x} ${lift_block_y} ${lift_block_z}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.04"/>
+                <inertia ixx="3.0e-5" ixy="0.0" ixz="0.0" iyy="3.0e-5" iyz="0.0" izz="3.0e-5"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--                       FOREARM                          -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="arm_forearm_joint" type="fixed">
+            <parent link="arm_lift_stage"/>
+            <child link="arm_forearm"/>
+            <origin xyz="${forearm_joint_x} 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="arm_forearm">
+            <!-- Main strut -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${forearm_size_x} ${forearm_size_y} ${forearm_size_z}"/>
+                </geometry>
+                <material name="arm_forearm_body">
+                    <color rgba="0.22 0.25 0.30 1.0"/>
+                </material>
+            </visual>
+            <!-- Top rib -->
+            <visual>
+                <origin xyz="0 0 ${forearm_size_z * 0.22}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${forearm_size_x * 0.80} 0.003 ${forearm_size_z * 0.50}"/>
+                </geometry>
+                <material name="arm_forearm_rib">
+                    <color rgba="0.38 0.42 0.48 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${forearm_size_x} ${forearm_size_y} ${forearm_size_z}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.03"/>
+                <inertia ixx="2.0e-5" ixy="0.0" ixz="0.0" iyy="2.0e-5" iyz="0.0" izz="2.0e-5"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--                        WRIST                           -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="arm_wrist_joint" type="fixed">
+            <parent link="arm_forearm"/>
+            <child link="arm_wrist"/>
+            <origin xyz="${wrist_joint_x} 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="arm_wrist">
+            <!-- Main housing -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${wrist_size_x} ${wrist_size_y} ${wrist_size_z}"/>
+                </geometry>
+                <material name="arm_wrist_body">
+                    <color rgba="0.12 0.14 0.18 1.0"/>
+                </material>
+            </visual>
+            <!-- Accent disc -->
+            <visual>
+                <origin xyz="0 0 ${-(wrist_size_z / 2.0) + 0.002}" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="0.010" length="0.004"/>
+                </geometry>
+                <material name="arm_wrist_disc">
+                    <color rgba="0.50 0.54 0.60 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${wrist_size_x} ${wrist_size_y} ${wrist_size_z}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.025"/>
+                <inertia ixx="1.5e-5" ixy="0.0" ixz="0.0" iyy="1.5e-5" iyz="0.0" izz="1.5e-5"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--  GRIPPER: fixed offset links → prismatic (origin=0)    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- LEFT JAW: fixed offset → prismatic -->
+        <joint name="gripper_left_origin_joint" type="fixed">
+            <parent link="arm_wrist"/>
+            <child link="gripper_left_origin"/>
+            <origin xyz="${grip_origin_x} ${jaw_closed_offset_y} ${grip_origin_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="gripper_left_origin">
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.001"/>
+                <inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/>
+            </inertial>
+        </link>
+
+        <joint name="gripper_left_joint" type="fixed">
+            <parent link="gripper_left_origin"/>
+            <child link="gripper_left_jaw"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="gripper_left_jaw">
+            <!-- Back plate piece -->
+            <visual>
+                <origin xyz="0 0 ${grip_plate_z / 2.0 + 0.004}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${grip_plate_x / 2.0} ${grip_plate_y / 2.0} ${grip_plate_z}"/>
+                </geometry>
+                <material name="grip_plate_dark">
+                    <color rgba="0.16 0.18 0.22 1.0"/>
+                </material>
+            </visual>
+            <!-- Linkage bar -->
+            <visual>
+                <origin xyz="0 ${-(jaw_body_size_y * 0.5)} ${link_bar_offset_z}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${link_bar_x} ${link_bar_y} ${link_bar_z}"/>
+                </geometry>
+                <material name="grip_linkage_cyan">
+                    <color rgba="0.35 0.78 0.82 1.0"/>
+                </material>
+            </visual>
+            <!-- Pivot bolt -->
+            <visual>
+                <origin xyz="${link_bar_x * 0.35} ${-(jaw_body_size_y * 0.5)} ${link_bar_offset_z}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${jaw_pivot_r}" length="0.005"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <!-- C-jaw finger body -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${jaw_body_size_x} ${jaw_body_size_y} ${jaw_body_size_z}"/>
+                </geometry>
+                <material name="grip_jaw_red">
+                    <color rgba="0.82 0.15 0.12 1.0"/>
+                </material>
+            </visual>
+        </link>
+
+        <!-- RIGHT JAW: fixed offset → prismatic -->
+        <joint name="gripper_right_origin_joint" type="fixed">
+            <parent link="arm_wrist"/>
+            <child link="gripper_right_origin"/>
+            <origin xyz="${grip_origin_x} ${-jaw_closed_offset_y} ${grip_origin_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="gripper_right_origin">
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.001"/>
+                <inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/>
+            </inertial>
+        </link>
+
+        <joint name="gripper_right_joint" type="fixed">
+            <parent link="gripper_right_origin"/>
+            <child link="gripper_right_jaw"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="gripper_right_jaw">
+            <!-- Back plate piece -->
+            <visual>
+                <origin xyz="0 0 ${grip_plate_z / 2.0 + 0.004}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${grip_plate_x / 2.0} ${grip_plate_y / 2.0} ${grip_plate_z}"/>
+                </geometry>
+                <material name="grip_plate_dark">
+                    <color rgba="0.16 0.18 0.22 1.0"/>
+                </material>
+            </visual>
+            <!-- Linkage bar -->
+            <visual>
+                <origin xyz="0 ${(jaw_body_size_y * 0.5)} ${link_bar_offset_z}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${link_bar_x} ${link_bar_y} ${link_bar_z}"/>
+                </geometry>
+                <material name="grip_linkage_cyan">
+                    <color rgba="0.35 0.78 0.82 1.0"/>
+                </material>
+            </visual>
+            <!-- Pivot bolt -->
+            <visual>
+                <origin xyz="${link_bar_x * 0.35} ${(jaw_body_size_y * 0.5)} ${link_bar_offset_z}" rpy="0 0 0"/>
+                <geometry><cylinder radius="${jaw_pivot_r}" length="0.005"/></geometry>
+                <material name="bolt_chrome"><color rgba="0.72 0.75 0.80 1.0"/></material>
+            </visual>
+            <!-- C-jaw finger body -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${jaw_body_size_x} ${jaw_body_size_y} ${jaw_body_size_z}"/>
+                </geometry>
+                <material name="grip_jaw_red">
+                    <color rgba="0.82 0.15 0.12 1.0"/>
+                </material>
+            </visual>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--          PEN / MARKER (clean, pantograph style)        -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="pen_holder_joint" type="fixed">
+            <parent link="arm_wrist"/>
+            <child link="pen_holder"/>
+            <origin xyz="${pen_holder_x} 0 ${pen_holder_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="pen_holder">
+            <!-- Grip collar -->
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${marker_r + 0.004}" length="0.008"/>
+                </geometry>
+                <material name="grip_dark">
+                    <color rgba="0.18 0.20 0.24 1.0"/>
+                </material>
+            </visual>
+            <!-- Marker body (clean red, no bands) -->
+            <visual>
+                <origin xyz="0 0 ${marker_body_center_z}" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${marker_r}" length="${marker_h}"/>
+                </geometry>
+                <material name="marker_red">
+                    <color rgba="0.90 0.10 0.10 1.0"/>
+                </material>
+            </visual>
+            <!-- Single cap band -->
+            <visual>
+                <origin xyz="0 0 ${marker_cap_band_z}" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${marker_r + 0.002}" length="${marker_cap_band_length}"/>
+                </geometry>
+                <material name="cap_band">
+                    <color rgba="0.15 0.15 0.15 1.0"/>
+                </material>
+            </visual>
+            <inertial>
+                <origin xyz="0 0 ${marker_body_center_z}" rpy="0 0 0"/>
+                <mass value="0.025"/>
+                <inertia ixx="4e-6" ixy="0" ixz="0" iyy="4e-6" iyz="0" izz="2e-6"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--                  PEN SUPPORT CASTER                    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="pen_support_mount" type="fixed">
+            <parent link="pen_holder"/>
+            <child link="pen_support_caster"/>
+            <origin xyz="0 0 ${support_center_z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="pen_support_caster">
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <sphere radius="${pen_cfg['support_radius']}"/>
+                </geometry>
+                <material name="caster_dark">
+                    <color rgba="0.16 0.16 0.18 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <sphere radius="${pen_cfg['support_radius']}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.003"/>
+                <inertia ixx="8e-8" ixy="0" ixz="0" iyy="8e-8" iyz="0" izz="8e-8"/>
+            </inertial>
+        </link>
+
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--          PEN TIP STAGE (from pantograph — simple)      -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <joint name="pen_tip_stage_joint" type="fixed">
+            <parent link="pen_holder"/>
+            <child link="pen_tip_stage"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="pen_tip_stage">
+            <!-- Tip cylinder -->
+            <visual>
+                <origin xyz="0 0 ${marker_tip_cylinder_z}" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${marker_tip_r}" length="${marker_tip_h}"/>
+                </geometry>
+                <material name="tip_dark">
+                    <color rgba="0.08 0.08 0.08 1.0"/>
+                </material>
+            </visual>
+            <!-- Contact sphere -->
+            <visual>
+                <origin xyz="0 0 ${tip_contact_z}" rpy="0 0 0"/>
+                <geometry>
+                    <sphere radius="${marker_tip_contact_r}"/>
+                </geometry>
+                <material name="tip_dark">
+                    <color rgba="0.08 0.08 0.08 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 ${tip_contact_z}" rpy="0 0 0"/>
+                <geometry>
+                    <sphere radius="${marker_tip_contact_r}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <origin xyz="0 0 ${marker_tip_cylinder_z}" rpy="0 0 0"/>
+                <mass value="0.002"/>
+                <inertia ixx="5e-8" ixy="0.0" ixz="0.0" iyy="5e-8" iyz="0.0" izz="5e-8"/>
+            </inertial>
+        </link>
+    </xacro:macro>
+</robot>

@@ -1,0 +1,14 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Do not upload compressed archives
+*.zip
+
+# Python cache artifacts
+**/__pycache__/
+**/*.pyc
+
+# Editor settings
+.vscode/

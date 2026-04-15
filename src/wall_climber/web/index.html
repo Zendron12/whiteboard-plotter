@@ -1,0 +1,2647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Two-Cable Robot Console</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #edf1f4;
+      --bg-warm: #f7f3eb;
+      --paper: rgba(255, 253, 249, 0.82);
+      --paper-strong: rgba(255, 253, 249, 0.95);
+      --paper-line: rgba(36, 51, 64, 0.08);
+      --ink: #18222b;
+      --muted: #667481;
+      --accent: #c95f38;
+      --accent-soft: rgba(201, 95, 56, 0.12);
+      --accent-strong: #9d4525;
+      --blue: #36566f;
+      --blue-soft: rgba(54, 86, 111, 0.12);
+      --success: #23835b;
+      --success-soft: rgba(35, 131, 91, 0.14);
+      --warning: #bb7331;
+      --warning-soft: rgba(187, 115, 49, 0.14);
+      --danger: #ba4657;
+      --danger-soft: rgba(186, 70, 87, 0.14);
+      --shadow-lg: 0 24px 90px rgba(29, 45, 58, 0.12);
+      --shadow-md: 0 18px 44px rgba(29, 45, 58, 0.08);
+      --radius-2xl: 30px;
+      --radius-xl: 22px;
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+      --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --sans: "Avenir Next", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      --header-h: 78px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
+    body {
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(201, 95, 56, 0.08), transparent 24%),
+        radial-gradient(circle at top right, rgba(54, 86, 111, 0.12), transparent 30%),
+        linear-gradient(180deg, var(--bg-warm) 0%, var(--bg) 52%, #e6edf2 100%);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1480px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 24px 0 28px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .masthead {
+      display: grid;
+      gap: 16px;
+      padding: 22px 24px 24px;
+      border-radius: var(--radius-2xl);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      background:
+        linear-gradient(140deg, rgba(255, 255, 255, 0.88), rgba(245, 239, 231, 0.82)),
+        var(--paper);
+      box-shadow: var(--shadow-lg);
+      animation: riseIn 360ms ease-out both;
+    }
+
+    .masthead-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .brand-lockup {
+      display: grid;
+      gap: 8px;
+      max-width: 820px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.78rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 1px;
+      background: currentColor;
+      opacity: 0.55;
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: clamp(2.2rem, 3.8vw, 3.9rem);
+      line-height: 0.95;
+      letter-spacing: -0.05em;
+      font-weight: 700;
+      max-width: 13ch;
+    }
+
+    .subtitle {
+      max-width: 66ch;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.62;
+    }
+
+    .headline-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+      align-self: flex-start;
+      max-width: 520px;
+    }
+
+    .status-pill,
+    .info-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 46px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+      white-space: nowrap;
+      font-size: 0.9rem;
+    }
+
+    .status-pill .dot,
+    .info-chip .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--warning);
+      box-shadow: 0 0 0 5px var(--warning-soft);
+      flex: 0 0 auto;
+    }
+
+    .status-pill.ready .dot,
+    .status-pill.connected .dot,
+    .info-chip.ok .dot {
+      background: var(--success);
+      box-shadow: 0 0 0 5px var(--success-soft);
+    }
+
+    .status-pill.error .dot,
+    .status-pill.disconnected .dot,
+    .info-chip.error .dot {
+      background: var(--danger);
+      box-shadow: 0 0 0 5px var(--danger-soft);
+    }
+
+    .status-pill.connecting .dot {
+      animation: softPulse 1.5s ease-in-out infinite;
+    }
+
+    .masthead-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .summary-card {
+      padding: 18px 20px;
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.58);
+      display: grid;
+      gap: 10px;
+      min-height: 132px;
+    }
+
+    .summary-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .summary-value {
+      font-size: 1.04rem;
+      line-height: 1.45;
+    }
+
+    .summary-value strong {
+      color: var(--ink);
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .notice {
+      display: none;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 16px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.74);
+      box-shadow: var(--shadow-md);
+      animation: riseIn 220ms ease-out both;
+    }
+
+    .notice.visible {
+      display: flex;
+    }
+
+    .notice::before {
+      content: "";
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 6px rgba(54, 86, 111, 0.12);
+      margin-top: 4px;
+      flex: 0 0 auto;
+    }
+
+    .notice.warning::before {
+      background: var(--warning);
+      box-shadow: 0 0 0 6px var(--warning-soft);
+    }
+
+    .notice.error::before {
+      background: var(--danger);
+      box-shadow: 0 0 0 6px var(--danger-soft);
+    }
+
+    .notice.success::before {
+      background: var(--success);
+      box-shadow: 0 0 0 6px var(--success-soft);
+    }
+
+    .notice-title {
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+
+    .notice-copy {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 0.92rem;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(360px, 440px);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .workspace,
+    .control-panel {
+      border-radius: var(--radius-2xl);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 244, 237, 0.76));
+      box-shadow: var(--shadow-lg);
+      animation: riseIn 420ms ease-out both;
+    }
+
+    .workspace {
+      overflow: hidden;
+    }
+
+    .workspace-head,
+    .control-head,
+    .section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 18px 22px 16px;
+      border-bottom: 1px solid var(--paper-line);
+    }
+
+    .workspace-title,
+    .section-title {
+      display: grid;
+      gap: 5px;
+    }
+
+    .workspace-title h2,
+    .section-title h3 {
+      font-size: 1.12rem;
+      letter-spacing: -0.03em;
+    }
+
+    .workspace-title p,
+    .section-title p {
+      color: var(--muted);
+      font-size: 0.91rem;
+      line-height: 1.5;
+    }
+
+    .workspace-body {
+      display: grid;
+      gap: 18px;
+      padding: 18px 22px 22px;
+    }
+
+    .board-stage {
+      position: relative;
+      min-height: 420px;
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background:
+        linear-gradient(180deg, rgba(234, 241, 246, 0.6), rgba(246, 239, 232, 0.65)),
+        #f7f3ed;
+    }
+
+    #board-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .board-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      pointer-events: none;
+    }
+
+    .overlay-card {
+      display: none;
+      max-width: 420px;
+      padding: 16px 18px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(252, 250, 246, 0.88);
+      backdrop-filter: blur(10px);
+      box-shadow: var(--shadow-md);
+      text-align: center;
+    }
+
+    .overlay-card.visible {
+      display: grid;
+      gap: 6px;
+    }
+
+    .overlay-title {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .overlay-copy {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 0.92rem;
+    }
+
+    .board-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .legend-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.66);
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+
+    .legend-mark {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+    }
+
+    .live-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .live-card {
+      padding: 14px 15px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.54);
+      display: grid;
+      gap: 7px;
+    }
+
+    .live-card .label {
+      color: var(--muted);
+      font-size: 0.73rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }
+
+    .live-card .value {
+      font-family: var(--mono);
+      font-size: 0.93rem;
+      line-height: 1.45;
+    }
+
+    .control-panel {
+      position: sticky;
+      top: 14px;
+      overflow: hidden;
+    }
+
+    .control-head {
+      padding-bottom: 14px;
+    }
+
+    .control-head h2 {
+      font-size: 1.08rem;
+      letter-spacing: -0.03em;
+    }
+
+    .control-head p {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+
+    .control-body {
+      display: grid;
+      gap: 16px;
+      padding: 16px 18px 18px;
+      max-height: calc(100vh - 28px);
+      overflow: auto;
+    }
+
+    .control-body::-webkit-scrollbar {
+      width: 10px;
+    }
+
+    .control-body::-webkit-scrollbar-thumb {
+      background: rgba(24, 34, 43, 0.14);
+      border-radius: 999px;
+    }
+
+    .section {
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.54);
+      overflow: hidden;
+    }
+
+    .section-body {
+      display: grid;
+      gap: 14px;
+      padding: 16px 18px 18px;
+    }
+
+    .mode-switch,
+    .tool-switch {
+      display: grid;
+      gap: 10px;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      padding: 6px;
+      border-radius: 999px;
+      background: rgba(24, 34, 43, 0.04);
+      border: 1px solid rgba(24, 34, 43, 0.06);
+    }
+
+    .segmented button,
+    .action-row button,
+    .quiet-btn,
+    .primary-btn,
+    .secondary-btn {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 14px;
+      cursor: pointer;
+      transition: transform 140ms ease, background 140ms ease, color 140ms ease, opacity 140ms ease;
+      font-weight: 700;
+      font-size: 0.9rem;
+      font-family: inherit;
+    }
+
+    .segmented button,
+    .quiet-btn,
+    .secondary-btn {
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .segmented button.active,
+    .tool-tabs button.active {
+      background: var(--paper-strong);
+      color: var(--ink);
+      box-shadow: 0 10px 22px rgba(24, 34, 43, 0.08);
+    }
+
+    .primary-btn {
+      background: linear-gradient(180deg, #d36b43, #bb4f28);
+      color: #fff7f2;
+      box-shadow: 0 14px 26px rgba(186, 82, 43, 0.22);
+    }
+
+    .secondary-btn {
+      background: rgba(54, 86, 111, 0.08);
+      color: var(--blue);
+      border: 1px solid rgba(54, 86, 111, 0.12);
+    }
+
+    .quiet-btn {
+      background: rgba(24, 34, 43, 0.04);
+      color: var(--ink);
+      border: 1px solid rgba(24, 34, 43, 0.06);
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .tool-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      padding: 6px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.06);
+      background: rgba(24, 34, 43, 0.04);
+    }
+
+    .tool-panel {
+      display: none;
+      gap: 14px;
+    }
+
+    .tool-panel.active {
+      display: grid;
+    }
+
+    textarea,
+    input[type="number"],
+    input[type="text"],
+    input[type="file"] {
+      width: 100%;
+      border: 1px solid rgba(24, 34, 43, 0.1);
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.7);
+      padding: 12px 14px;
+      color: var(--ink);
+      font: inherit;
+      outline: none;
+      transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    }
+
+    textarea {
+      min-height: 140px;
+      resize: vertical;
+      line-height: 1.58;
+    }
+
+    textarea:focus,
+    input:focus {
+      border-color: rgba(54, 86, 111, 0.34);
+      box-shadow: 0 0 0 4px rgba(54, 86, 111, 0.08);
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field label,
+    .helper-label {
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      font-weight: 700;
+    }
+
+    .helper-copy {
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 0.9rem;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .micro-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      align-items: center;
+    }
+
+    .micro-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(24, 34, 43, 0.07);
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .micro-pill strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .feed {
+      display: grid;
+      gap: 10px;
+      max-height: 260px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .feed-item {
+      padding: 10px 12px;
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.68);
+      display: grid;
+      gap: 5px;
+    }
+
+    .feed-item.info {
+      border-color: rgba(54, 86, 111, 0.14);
+    }
+
+    .feed-item.success {
+      border-color: rgba(35, 131, 91, 0.2);
+    }
+
+    .feed-item.error {
+      border-color: rgba(186, 70, 87, 0.24);
+    }
+
+    .feed-time {
+      font-family: var(--mono);
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+
+    .feed-copy {
+      font-size: 0.89rem;
+      line-height: 1.5;
+    }
+
+    details {
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.52);
+      padding: 12px 14px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--ink);
+      list-style: none;
+    }
+
+    summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .diag-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .diag-card {
+      padding: 12px;
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.72);
+      display: grid;
+      gap: 6px;
+      min-height: 78px;
+    }
+
+    .diag-card .label {
+      color: var(--muted);
+      font-size: 0.73rem;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      font-weight: 700;
+    }
+
+    .diag-card .value {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .footer {
+      padding: 0 6px;
+      color: rgba(24, 34, 43, 0.55);
+      font-size: 0.82rem;
+      text-align: center;
+    }
+
+    @keyframes riseIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes softPulse {
+      0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+      50% {
+        transform: scale(1.12);
+        opacity: 0.72;
+      }
+    }
+
+    @media (max-width: 1180px) {
+      .layout,
+      .masthead-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .control-panel {
+        position: static;
+      }
+
+      .control-body {
+        max-height: none;
+      }
+    }
+
+    @media (max-width: 900px) {
+      .live-grid,
+      .diag-grid,
+      .summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .field-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: min(calc(100vw - 14px), 1480px);
+        padding-top: 14px;
+      }
+
+      .masthead-top,
+      .workspace-head,
+      .control-head,
+      .section-head {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .headline-stats {
+        justify-content: flex-start;
+      }
+
+      .live-grid,
+      .diag-grid,
+      .summary-grid,
+      .segmented,
+      .tool-tabs {
+        grid-template-columns: 1fr;
+      }
+
+      .board-stage {
+        min-height: 320px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <div class="masthead-top">
+        <div class="brand-lockup">
+          <div class="eyebrow">Build Web Apps · Board Console</div>
+          <h1>Two-Cable Drawing Robot Control Surface</h1>
+          <p class="subtitle">
+            Board-first runtime view for text, SVG, and image drawing with live robot, pen, and validation feedback.
+          </p>
+        </div>
+        <div class="headline-stats">
+          <div id="backend-pill" class="status-pill connecting"><span class="dot"></span><span id="backend-text">Backend · connecting</span></div>
+          <div id="rosbridge-pill" class="status-pill connecting"><span class="dot"></span><span id="rosbridge-text">Rosbridge · connecting</span></div>
+          <div id="runtime-pill" class="status-pill connecting"><span class="dot"></span><span id="runtime-text">Runtime · waiting</span></div>
+        </div>
+      </div>
+
+      <div class="masthead-grid">
+        <div class="summary-card">
+          <div class="summary-label">Workflow</div>
+          <div class="summary-value">
+            <strong>Text</strong> starts from a board-aware writing origin and wraps within the safe width.
+            <strong>SVG</strong> and <strong>Image</strong> stay preview-first, then commit through the same draw-plan path.
+          </div>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-card">
+            <div class="summary-label">Board</div>
+            <div id="summary-board" class="summary-value">Waiting for board metadata.</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Preview</div>
+            <div id="summary-preview" class="summary-value">No preview loaded yet.</div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <section id="notice" class="notice">
+      <div>
+        <div id="notice-title" class="notice-title">Waiting</div>
+        <div id="notice-copy" class="notice-copy">Runtime state is still loading.</div>
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="workspace">
+        <div class="workspace-head">
+          <div class="workspace-title">
+            <h2>Board Workspace</h2>
+            <p>Top-left origin, safe/writable zones, live telemetry, preview strokes, local trail, and anchor layout in one place.</p>
+          </div>
+          <div class="micro-meta">
+            <div id="preview-chip" class="micro-pill"><strong>Preview</strong> none</div>
+            <div id="trail-chip" class="micro-pill"><strong>Trail</strong> 0 points</div>
+            <button id="clear-trail-btn" class="quiet-btn" type="button">Clear Local Trail</button>
+          </div>
+        </div>
+
+        <div class="workspace-body">
+          <div id="board-stage" class="board-stage">
+            <canvas id="board-canvas" aria-label="Board workspace view"></canvas>
+            <div class="board-overlay">
+              <div id="overlay-card" class="overlay-card visible">
+                <div id="overlay-title" class="overlay-title">Connecting</div>
+                <div id="overlay-copy" class="overlay-copy">Waiting for backend, rosbridge, and board-space telemetry.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="board-legend">
+            <div class="legend-chip"><span class="legend-mark" style="background:#36566f;"></span> Safe workspace</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#d48b63;"></span> Writable zone</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#c95f38;"></span> Vector preview</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#7f8c99;"></span> Carriage</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#1a2026;"></span> Pen / trail</div>
+          </div>
+
+          <div class="live-grid">
+            <div class="live-card">
+              <div class="label">Board</div>
+              <div id="metric-board" class="value">--</div>
+            </div>
+            <div class="live-card">
+              <div class="label">Writable</div>
+              <div id="metric-writable" class="value">--</div>
+            </div>
+            <div class="live-card">
+              <div class="label">Robot</div>
+              <div id="metric-robot" class="value">--</div>
+            </div>
+            <div class="live-card">
+              <div class="label">Pen</div>
+              <div id="metric-pen" class="value">--</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="control-panel">
+        <div class="control-head">
+          <div>
+            <h2>Command Deck</h2>
+            <p>Run the robot without fighting the runtime graph. The UI now handles preview, validation, and mode switching more directly.</p>
+          </div>
+        </div>
+
+        <div class="control-body">
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Runtime Mode</h3>
+                <p>Manual mode buttons stay available, but commit actions can also switch mode automatically when needed.</p>
+              </div>
+            </div>
+            <div class="section-body mode-switch">
+              <div class="segmented">
+                <button id="mode-off-btn" data-mode="off" type="button">Off</button>
+                <button id="mode-text-btn" data-mode="text" type="button">Text</button>
+                <button id="mode-draw-btn" data-mode="draw" type="button">Draw</button>
+              </div>
+              <div class="micro-meta">
+                <div class="micro-pill"><strong>Executor</strong> <span id="status-executor">--</span></div>
+                <div class="micro-pill"><strong>Supervisor</strong> <span id="status-supervisor">--</span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Arm & Grip Test</h3>
+                <p>Manual overrides for arm lift and gripper. Grip controls are <strong>test-only</strong> — no real pen detach in this phase.</p>
+              </div>
+            </div>
+            <div class="section-body mode-switch">
+              <div class="segmented">
+                <button id="manual-pen-auto-btn" data-manual-pen="auto" type="button">Auto</button>
+                <button id="manual-pen-up-btn" data-manual-pen="up" type="button">Arm Up</button>
+                <button id="manual-pen-down-btn" data-manual-pen="down" type="button">Arm Down</button>
+              </div>
+              <div class="segmented">
+                <button id="manual-grip-auto-btn" data-manual-grip="auto" type="button">Grip Auto</button>
+                <button id="manual-grip-closed-btn" data-manual-grip="closed" type="button">Grip Closed (test)</button>
+                <button id="manual-grip-open-btn" data-manual-grip="open" type="button">Grip Open (test)</button>
+              </div>
+              <div class="micro-meta">
+                <div class="micro-pill"><strong>Arm Test</strong> <span id="manual-pen-status">--</span></div>
+                <div class="micro-pill"><strong>Grip Test</strong> <span id="manual-grip-status">--</span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Placement</h3>
+                <p id="placement-copy">For text, X and Y define the top-left writing origin inside the board-safe region.</p>
+              </div>
+            </div>
+            <div class="section-body">
+              <div class="field-grid">
+                <div class="field">
+                  <label id="placement-x-label" for="placement-x">Start X (m)</label>
+                  <input id="placement-x" type="number" step="0.01">
+                </div>
+                <div class="field">
+                  <label id="placement-y-label" for="placement-y">Start Y (m)</label>
+                  <input id="placement-y" type="number" step="0.01">
+                </div>
+                <div class="field">
+                  <label for="placement-scale">Scale</label>
+                  <input id="placement-scale" type="number" step="0.05" min="0.05" value="1">
+                </div>
+              </div>
+              <div class="action-row">
+                <button id="placement-reset-btn" class="secondary-btn" type="button">Reset Placement</button>
+                <button id="clear-preview-btn" class="quiet-btn" type="button">Clear Preview</button>
+              </div>
+              <p id="placement-helper" class="helper-copy">The board overlay updates immediately. Validation errors stay visible before you commit.</p>
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Input</h3>
+                <p>One panel for text, SVG, and traced images. Preview first, then send through the active cable execution path.</p>
+              </div>
+            </div>
+            <div class="section-body">
+              <div class="tool-tabs">
+                <button id="tool-text-btn" data-tool="text" class="active" type="button">Text</button>
+                <button id="tool-svg-btn" data-tool="svg" type="button">SVG</button>
+                <button id="tool-image-btn" data-tool="image" type="button">Image</button>
+              </div>
+
+              <div id="tool-text-panel" class="tool-panel active">
+                <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping and board limits are handled by the backend, not guessed in the browser.</p>
+                <textarea id="text-input" placeholder="Write text here. Example: HELLO&#10;WORLD"></textarea>
+                <div class="action-row">
+                  <button id="text-preview-btn" class="secondary-btn" type="button">Preview Text</button>
+                  <button id="text-submit-btn" class="primary-btn" type="button">Write Text</button>
+                  <button id="text-hello-btn" class="quiet-btn" type="button">Send HELLO</button>
+                  <button id="text-clear-btn" class="quiet-btn" type="button">Clear</button>
+                </div>
+              </div>
+
+              <div id="tool-svg-panel" class="tool-panel">
+                <p class="helper-copy">SVG uses the draw-mode path. Placement is interpreted as a board-space center for the fitted vector.</p>
+                <textarea id="svg-input" spellcheck="false" placeholder='&lt;svg viewBox="0 0 100 50"&gt;&lt;path d="M10 25 C25 5 75 45 90 25"/&gt;&lt;/svg&gt;'></textarea>
+                <div class="action-row">
+                  <button id="svg-preview-btn" class="secondary-btn" type="button">Preview SVG</button>
+                  <button id="svg-submit-btn" class="primary-btn" type="button">Commit SVG</button>
+                  <button id="svg-clear-btn" class="quiet-btn" type="button">Clear</button>
+                </div>
+              </div>
+
+              <div id="tool-image-panel" class="tool-panel">
+                <p class="helper-copy">Upload line art, preview traced contours, then commit the saved upload through the draw path.</p>
+                <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp">
+                <div class="action-row">
+                  <button id="image-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
+                  <button id="image-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
+                  <button id="image-commit-btn" class="primary-btn" type="button">Commit Image</button>
+                </div>
+                <div id="image-meta" class="micro-pill"><strong>Upload</strong> none</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Activity</h3>
+                <p>Recent frontend and backend events.</p>
+              </div>
+            </div>
+            <div class="section-body">
+              <div id="activity-feed" class="feed"></div>
+            </div>
+          </section>
+
+          <section class="section">
+            <div class="section-head">
+              <div class="section-title">
+                <h3>Diagnostics</h3>
+                <p>Collapsed runtime details stay available for debugging without taking over the interface.</p>
+              </div>
+            </div>
+            <div class="section-body">
+              <details>
+                <summary>Show runtime details</summary>
+                <div class="diag-grid">
+                  <div class="diag-card">
+                    <div class="label">Active Mode</div>
+                    <div id="runtime-active-mode" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Ready</div>
+                    <div id="runtime-ready" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Board Frame</div>
+                    <div id="runtime-board-frame" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Safe Workspace</div>
+                    <div id="runtime-safe-workspace" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Not Ready Reason</div>
+                    <div id="runtime-not-ready" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Webots Trail</div>
+                    <div id="runtime-webots-trail" class="value">--</div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </main>
+
+    <div class="footer">
+      Board canvas is now the primary browser view: writable area, safe area, anchors, preview, telemetry, and local trail are rendered together without relying on Webots trail output.
+    </div>
+  </div>
+
+  <script src="/assets/vendor/roslib.min.js"></script>
+  <script>
+    (() => {
+      'use strict';
+
+      const WS_URL = `ws://${location.hostname}:9090`;
+      const RUNTIME_POLL_MS = 1500;
+      const DEFAULT_BOARD = {
+        width: 6.3,
+        height: 3.0,
+        writable_x_min: 0.1,
+        writable_x_max: 6.2,
+        writable_y_min: 0.1,
+        writable_y_max: 2.9,
+        safe_x_min: 0.16,
+        safe_x_max: 6.14,
+        safe_y_min: 0.32,
+        safe_y_max: 2.82,
+        line_height: 0.14,
+        corner_keepout_radius: 0.36,
+        anchors: {
+          left: { x: 0, y: 0 },
+          right: { x: 6.3, y: 0 },
+        },
+      };
+      const CARRIAGE = {
+        width: 0.29,
+        height: 0.20,
+        attachX: 0.104,
+        attachY: 0.075,
+        armBaseX: 0.151,
+        armOffsetY: 0.020,
+        penOffsetX: 0.203,
+        penOffsetY: 0.020,
+      };
+      const MAX_TRAIL_POINTS = 120000;
+      const MIN_TRAIL_POINT_DIST = 0.0015;
+
+      const TOPICS = {
+        boardInfo: '/wall_climber/board_info',
+        robotPose: '/wall_climber/robot_pose_board',
+        penPose: '/wall_climber/pen_pose_board',
+        penContact: '/wall_climber/pen_contact',
+      };
+
+      const dom = {
+        backendPill: document.getElementById('backend-pill'),
+        backendText: document.getElementById('backend-text'),
+        rosbridgePill: document.getElementById('rosbridge-pill'),
+        rosbridgeText: document.getElementById('rosbridge-text'),
+        runtimePill: document.getElementById('runtime-pill'),
+        runtimeText: document.getElementById('runtime-text'),
+        summaryBoard: document.getElementById('summary-board'),
+        summaryPreview: document.getElementById('summary-preview'),
+        notice: document.getElementById('notice'),
+        noticeTitle: document.getElementById('notice-title'),
+        noticeCopy: document.getElementById('notice-copy'),
+        boardStage: document.getElementById('board-stage'),
+        canvas: document.getElementById('board-canvas'),
+        overlayCard: document.getElementById('overlay-card'),
+        overlayTitle: document.getElementById('overlay-title'),
+        overlayCopy: document.getElementById('overlay-copy'),
+        previewChip: document.getElementById('preview-chip'),
+        trailChip: document.getElementById('trail-chip'),
+        clearTrailBtn: document.getElementById('clear-trail-btn'),
+        metricBoard: document.getElementById('metric-board'),
+        metricWritable: document.getElementById('metric-writable'),
+        metricRobot: document.getElementById('metric-robot'),
+        metricPen: document.getElementById('metric-pen'),
+        modeButtons: Array.from(document.querySelectorAll('[data-mode]')),
+        statusExecutor: document.getElementById('status-executor'),
+        statusSupervisor: document.getElementById('status-supervisor'),
+        manualPenButtons: Array.from(document.querySelectorAll('[data-manual-pen]')),
+        manualPenStatus: document.getElementById('manual-pen-status'),
+        manualGripButtons: Array.from(document.querySelectorAll('[data-manual-grip]')),
+        manualGripStatus: document.getElementById('manual-grip-status'),
+        placementX: document.getElementById('placement-x'),
+        placementY: document.getElementById('placement-y'),
+        placementScale: document.getElementById('placement-scale'),
+        placementResetBtn: document.getElementById('placement-reset-btn'),
+        clearPreviewBtn: document.getElementById('clear-preview-btn'),
+        placementCopy: document.getElementById('placement-copy'),
+        placementXLabel: document.getElementById('placement-x-label'),
+        placementYLabel: document.getElementById('placement-y-label'),
+        placementHelper: document.getElementById('placement-helper'),
+        toolButtons: Array.from(document.querySelectorAll('[data-tool]')),
+        toolTextPanel: document.getElementById('tool-text-panel'),
+        toolSvgPanel: document.getElementById('tool-svg-panel'),
+        toolImagePanel: document.getElementById('tool-image-panel'),
+        textInput: document.getElementById('text-input'),
+        textPreviewBtn: document.getElementById('text-preview-btn'),
+        textSubmitBtn: document.getElementById('text-submit-btn'),
+        textHelloBtn: document.getElementById('text-hello-btn'),
+        textClearBtn: document.getElementById('text-clear-btn'),
+        svgInput: document.getElementById('svg-input'),
+        svgPreviewBtn: document.getElementById('svg-preview-btn'),
+        svgSubmitBtn: document.getElementById('svg-submit-btn'),
+        svgClearBtn: document.getElementById('svg-clear-btn'),
+        imageInput: document.getElementById('image-input'),
+        imageUploadBtn: document.getElementById('image-upload-btn'),
+        imagePreviewBtn: document.getElementById('image-preview-btn'),
+        imageCommitBtn: document.getElementById('image-commit-btn'),
+        imageMeta: document.getElementById('image-meta'),
+        activityFeed: document.getElementById('activity-feed'),
+        runtimeActiveMode: document.getElementById('runtime-active-mode'),
+        runtimeReady: document.getElementById('runtime-ready'),
+        runtimeBoardFrame: document.getElementById('runtime-board-frame'),
+        runtimeSafeWorkspace: document.getElementById('runtime-safe-workspace'),
+        runtimeNotReady: document.getElementById('runtime-not-ready'),
+        runtimeWebotsTrail: document.getElementById('runtime-webots-trail'),
+      };
+
+      const ctx = dom.canvas.getContext('2d', { alpha: false });
+
+      const state = {
+        backend: 'connecting',
+        rosbridge: 'connecting',
+        runtime: null,
+        manualPenMode: 'auto',
+        manualGripMode: 'auto',
+        board: null,
+        robotPose: null,
+        penPose: null,
+        penContact: false,
+        activeTool: 'text',
+        placementTouched: false,
+        vectorPreview: null,
+        latestImageUploadId: null,
+        imageCommitDefaults: null,
+        trailSegments: [],
+        activeTrailSegment: null,
+        trailPointCount: 0,
+        lastTrailPoint: null,
+        feedItems: [],
+        reconnectTimer: null,
+        runtimeTimer: null,
+      };
+
+      function escapeHtml(text) {
+        return String(text)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function pushFeed(copy, kind = 'info') {
+        const item = {
+          copy,
+          kind,
+          time: new Date().toLocaleTimeString(),
+        };
+        state.feedItems.unshift(item);
+        state.feedItems = state.feedItems.slice(0, 18);
+        dom.activityFeed.innerHTML = state.feedItems.map((entry) => (
+          `<div class="feed-item ${entry.kind}">` +
+            `<div class="feed-time">${escapeHtml(entry.time)}</div>` +
+            `<div class="feed-copy">${escapeHtml(entry.copy)}</div>` +
+          `</div>`
+        )).join('');
+      }
+
+      function setNotice(kind, title, copy) {
+        dom.notice.className = `notice visible ${kind || ''}`.trim();
+        dom.noticeTitle.textContent = title;
+        dom.noticeCopy.textContent = copy;
+      }
+
+      function clearNotice() {
+        dom.notice.className = 'notice';
+        dom.noticeTitle.textContent = '';
+        dom.noticeCopy.textContent = '';
+      }
+
+      function setStatusPill(element, textElement, tone, text) {
+        element.className = `status-pill ${tone}`;
+        textElement.textContent = text;
+      }
+
+      function safeNumber(value) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+      }
+
+      function formatRange(min, max) {
+        if (!Number.isFinite(min) || !Number.isFinite(max)) {
+          return '--';
+        }
+        return `${min.toFixed(2)}..${max.toFixed(2)}`;
+      }
+
+      function formatPoint(x, y) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          return '--';
+        }
+        return `${x.toFixed(3)}, ${y.toFixed(3)}`;
+      }
+
+      function currentBoard() {
+        return state.board || (state.runtime && state.runtime.board_info) || DEFAULT_BOARD;
+      }
+
+      function writableBounds() {
+        const board = currentBoard();
+        return {
+          xMin: Number(board.writable_x_min),
+          xMax: Number(board.writable_x_max),
+          yMin: Number(board.writable_y_min),
+          yMax: Number(board.writable_y_max),
+        };
+      }
+
+      function safeBounds() {
+        const board = currentBoard();
+        return {
+          xMin: Number.isFinite(Number(board.safe_x_min)) ? Number(board.safe_x_min) : Number(board.writable_x_min),
+          xMax: Number.isFinite(Number(board.safe_x_max)) ? Number(board.safe_x_max) : Number(board.writable_x_max),
+          yMin: Number.isFinite(Number(board.safe_y_min)) ? Number(board.safe_y_min) : Number(board.writable_y_min),
+          yMax: Number.isFinite(Number(board.safe_y_max)) ? Number(board.safe_y_max) : Number(board.writable_y_max),
+        };
+      }
+
+      function defaultPlacementForTool(tool) {
+        const writable = writableBounds();
+        const safe = safeBounds();
+        if (tool === 'text') {
+          return {
+            x: safe.xMin + 0.02,
+            y: safe.yMin + 0.02,
+            scale: 1,
+          };
+        }
+        return {
+          x: writable.xMin + ((writable.xMax - writable.xMin) * 0.5),
+          y: writable.yMin + ((writable.yMax - writable.yMin) * 0.5),
+          scale: 1,
+        };
+      }
+
+      function syncPlacementLabels() {
+        if (state.activeTool === 'text') {
+          dom.placementXLabel.textContent = 'Start X (m)';
+          dom.placementYLabel.textContent = 'Start Y (m)';
+          dom.placementCopy.textContent = 'For text, X and Y define the top-left writing origin inside the board-safe region.';
+          dom.placementHelper.textContent = 'Text preview and commit use the board-aware text path. New lines are wrapped by the backend within the safe writing width.';
+        } else {
+          dom.placementXLabel.textContent = 'Center X (m)';
+          dom.placementYLabel.textContent = 'Center Y (m)';
+          dom.placementCopy.textContent = 'For SVG and Image, X and Y define the board-space center used for fitted vector placement.';
+          dom.placementHelper.textContent = 'Draw-mode previews show whether geometry leaves the writable area or exits the safe cable workspace before you commit.';
+        }
+      }
+
+      function setPlacementInputs(placement) {
+        dom.placementX.value = Number(placement.x).toFixed(3);
+        dom.placementY.value = Number(placement.y).toFixed(3);
+        dom.placementScale.value = Number(placement.scale).toFixed(2);
+      }
+
+      function syncPlacementDefaults(force = false) {
+        if (!force && state.placementTouched) {
+          return;
+        }
+        setPlacementInputs(defaultPlacementForTool(state.activeTool));
+        if (force) {
+          state.placementTouched = false;
+        }
+      }
+
+      function readPlacement() {
+        const x = Number(dom.placementX.value);
+        const y = Number(dom.placementY.value);
+        const scale = Number(dom.placementScale.value);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) {
+          throw new Error('Placement fields must contain valid numbers.');
+        }
+        if (scale <= 0) {
+          throw new Error('Placement scale must be greater than zero.');
+        }
+        return { x, y, scale };
+      }
+
+      function parseJsonResponse(response) {
+        return response.text().then((text) => {
+          if (!text) {
+            return {};
+          }
+          try {
+            return JSON.parse(text);
+          } catch (_error) {
+            return { detail: text };
+          }
+        });
+      }
+
+      async function apiRequest(url, options = {}) {
+        const response = await fetch(url, options);
+        const payload = await parseJsonResponse(response);
+        if (!response.ok) {
+          throw new Error(payload && payload.detail ? payload.detail : `${response.status} ${response.statusText}`);
+        }
+        return payload;
+      }
+
+      async function refreshRuntime() {
+        const runtime = await apiRequest('/api/runtime');
+        state.runtime = runtime;
+        state.manualPenMode = runtime.manual_pen_mode || 'auto';
+        state.manualGripMode = runtime.manual_grip_mode || 'auto';
+        state.board = runtime.board_info || state.board;
+
+        const backendTone = runtime.ready ? 'ready' : 'connecting';
+        setStatusPill(dom.backendPill, dom.backendText, backendTone, runtime.ready ? 'Backend · ready' : 'Backend · waiting');
+        setStatusPill(
+          dom.runtimePill,
+          dom.runtimeText,
+          runtime.ready ? 'ready' : 'connecting',
+          runtime.ready ? `Runtime · ${runtime.active_mode || 'ready'}` : 'Runtime · waiting'
+        );
+      }
+
+      async function setMode(mode) {
+        const payload = await apiRequest('/api/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        state.runtime = payload.runtime;
+        state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : 'auto';
+        state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : 'auto';
+        pushFeed(`Mode switched to ${mode}.`, 'success');
+        return payload.runtime;
+      }
+
+      async function setManualPenMode(mode) {
+        const payload = await apiRequest('/api/manual/pen', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        state.runtime = payload.runtime;
+        state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : mode;
+        pushFeed(`Arm test set to ${mode}.`, 'success');
+        return payload.runtime;
+      }
+
+      async function setManualGripMode(mode) {
+        const payload = await apiRequest('/api/manual/gripper', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        state.runtime = payload.runtime;
+        state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : mode;
+        pushFeed(`Grip test set to ${mode}.`, 'success');
+        return payload.runtime;
+      }
+
+      async function ensureMode(mode) {
+        if (state.runtime && state.runtime.active_mode === mode) {
+          return;
+        }
+        await setMode(mode);
+      }
+
+      function previewStrokeColor() {
+        if (!state.vectorPreview) {
+          return 'rgba(201, 95, 56, 0.95)';
+        }
+        if (state.vectorPreview.sourceType === 'svg') {
+          return 'rgba(54, 86, 111, 0.92)';
+        }
+        if (state.vectorPreview.sourceType === 'image') {
+          return 'rgba(86, 113, 58, 0.92)';
+        }
+        return 'rgba(201, 95, 56, 0.96)';
+      }
+
+      function clearVectorPreview(pushMessage = false) {
+        state.vectorPreview = null;
+        dom.previewChip.innerHTML = '<strong>Preview</strong> none';
+        dom.summaryPreview.textContent = 'No preview loaded yet.';
+        if (pushMessage) {
+          pushFeed('Preview cleared.', 'info');
+        }
+      }
+
+      function applyVectorPreview(sourceType, payload) {
+        state.vectorPreview = {
+          sourceType,
+          preview: payload.preview,
+          commitRequest: payload.commit_request || null,
+        };
+
+        const preview = payload.preview || {};
+        const strokeCount = Number(preview.stroke_count || 0);
+        const pointCount = Number(preview.point_count || 0);
+        const canCommit = Boolean(preview.can_commit);
+        dom.previewChip.innerHTML = `<strong>Preview</strong> ${escapeHtml(sourceType)} · ${strokeCount} strokes`;
+        dom.summaryPreview.textContent = canCommit
+          ? `${sourceType} preview is ready with ${strokeCount} strokes and ${pointCount} points.`
+          : `${sourceType} preview is invalid: ${preview.validation_error || 'unknown validation issue'}.`;
+
+        if (payload.commit_request && payload.commit_request.placement) {
+          setPlacementInputs(payload.commit_request.placement);
+        }
+
+        if (preview.validation_error) {
+          setNotice('warning', 'Preview requires adjustment', preview.validation_error);
+          pushFeed(`Preview warning: ${preview.validation_error}`, 'error');
+        } else {
+          clearNotice();
+          pushFeed(`Preview ready for ${sourceType}.`, 'success');
+        }
+      }
+
+      function updateSummary() {
+        const board = currentBoard();
+        dom.summaryBoard.textContent = `${board.width.toFixed(2)}m × ${board.height.toFixed(2)}m · writable ${formatRange(board.writable_x_min, board.writable_x_max)} / ${formatRange(board.writable_y_min, board.writable_y_max)}`;
+      }
+
+      function updateMetrics() {
+        const board = currentBoard();
+        dom.metricBoard.textContent = `${board.width.toFixed(3)} × ${board.height.toFixed(3)} m`;
+        dom.metricWritable.textContent = `${formatRange(board.writable_x_min, board.writable_x_max)} · ${formatRange(board.writable_y_min, board.writable_y_max)}`;
+        if (state.robotPose) {
+          dom.metricRobot.textContent = `${state.robotPose.x.toFixed(3)}, ${state.robotPose.y.toFixed(3)} · θ ${state.robotPose.theta.toFixed(3)}`;
+        } else {
+          dom.metricRobot.textContent = '--';
+        }
+        if (state.penPose) {
+          dom.metricPen.textContent = `${formatPoint(state.penPose.x, state.penPose.y)} · ${state.penContact ? 'contact' : 'up'}`;
+        } else {
+          dom.metricPen.textContent = '--';
+        }
+        dom.trailChip.innerHTML = `<strong>Trail</strong> ${state.trailPointCount} points`;
+        dom.statusExecutor.textContent = state.runtime && state.runtime.statuses ? (state.runtime.statuses.cable_executor_status || '--') : '--';
+        dom.statusSupervisor.textContent = state.runtime && state.runtime.statuses ? (state.runtime.statuses.cable_supervisor_status || '--') : '--';
+        dom.manualPenStatus.textContent = state.manualPenMode || '--';
+        dom.manualGripStatus.textContent = state.manualGripMode || '--';
+      }
+
+      function updateDiagnostics() {
+        const runtime = state.runtime;
+        if (!runtime) {
+          dom.runtimeActiveMode.textContent = '--';
+          dom.runtimeReady.textContent = '--';
+          dom.runtimeBoardFrame.textContent = '--';
+          dom.runtimeSafeWorkspace.textContent = '--';
+          dom.runtimeNotReady.textContent = '--';
+          dom.runtimeWebotsTrail.textContent = '--';
+          return;
+        }
+
+        dom.runtimeActiveMode.textContent = runtime.active_mode || '--';
+        dom.runtimeReady.textContent = runtime.ready ? 'ready' : 'not_ready';
+        dom.runtimeNotReady.textContent = runtime.not_ready_reason || 'none';
+        dom.runtimeWebotsTrail.textContent = runtime.enable_webots_trail ? 'enabled' : 'disabled';
+
+        if (runtime.board_info) {
+          const info = runtime.board_info;
+          dom.runtimeBoardFrame.textContent = `${info.frame_origin || '--'} · x:${info.frame_x_axis || '--'} · y:${info.frame_y_axis || '--'}`;
+          dom.runtimeSafeWorkspace.textContent = `${formatRange(info.safe_x_min, info.safe_x_max)} · ${formatRange(info.safe_y_min, info.safe_y_max)}`;
+        } else {
+          dom.runtimeBoardFrame.textContent = '--';
+          dom.runtimeSafeWorkspace.textContent = '--';
+        }
+      }
+
+      function updateRuntimeTone() {
+        if (!state.runtime) {
+          setStatusPill(dom.runtimePill, dom.runtimeText, 'connecting', 'Runtime · waiting');
+          return;
+        }
+        const ready = Boolean(state.runtime.ready);
+        const activeMode = state.runtime.active_mode || 'off';
+        setStatusPill(dom.runtimePill, dom.runtimeText, ready ? 'ready' : 'connecting', ready ? `Runtime · ${activeMode}` : 'Runtime · waiting');
+      }
+
+      function syncControls() {
+        const runtimeReady = Boolean(state.runtime && state.runtime.ready);
+        const backendHealthy = state.backend !== 'error';
+        const imageReady = Boolean(state.latestImageUploadId);
+
+        dom.modeButtons.forEach((button) => {
+          const active = state.runtime && state.runtime.active_mode === button.dataset.mode;
+          button.classList.toggle('active', active);
+          button.disabled = !runtimeReady || active;
+        });
+
+        const executorBusy = Boolean(state.runtime && state.runtime.statuses && state.runtime.statuses.cable_executor_status === 'running');
+        dom.manualPenButtons.forEach((button) => {
+          const active = state.manualPenMode === button.dataset.manualPen;
+          button.classList.toggle('active', active);
+          button.disabled = !runtimeReady || executorBusy || active;
+        });
+        dom.manualGripButtons.forEach((button) => {
+          const active = state.manualGripMode === button.dataset.manualGrip;
+          button.classList.toggle('active', active);
+          button.disabled = !runtimeReady || executorBusy || active;
+        });
+
+        dom.textPreviewBtn.disabled = !backendHealthy;
+        dom.textSubmitBtn.disabled = !runtimeReady;
+        dom.textHelloBtn.disabled = !runtimeReady;
+        dom.svgPreviewBtn.disabled = !backendHealthy;
+        dom.svgSubmitBtn.disabled = !runtimeReady;
+        dom.imageUploadBtn.disabled = !backendHealthy;
+        dom.imagePreviewBtn.disabled = !(backendHealthy && imageReady);
+        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady);
+      }
+
+      function setOverlay(title, copy, visible) {
+        dom.overlayTitle.textContent = title;
+        dom.overlayCopy.textContent = copy;
+        dom.overlayCard.classList.toggle('visible', visible);
+      }
+
+      function refreshOverlay() {
+        if (state.backend === 'error') {
+          setOverlay('Backend unavailable', 'The FastAPI backend is currently unreachable. The board will stay in local preview mode only.', true);
+          return;
+        }
+
+        if (state.rosbridge !== 'connected') {
+          setOverlay('Connecting to rosbridge', 'Live robot and pen telemetry will appear once rosbridge connects.', true);
+          return;
+        }
+
+        if (!state.board) {
+          setOverlay('Waiting for board metadata', 'The browser is connected, but /wall_climber/board_info has not arrived yet.', true);
+          return;
+        }
+
+        if (!state.robotPose && !state.penPose) {
+          setOverlay('Waiting for live poses', 'Board geometry is ready. Waiting for robot_pose_board and pen_pose_board.', true);
+          return;
+        }
+
+        setOverlay('', '', false);
+      }
+
+      function parseBoardInfo(raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (!Number.isFinite(Number(parsed.width)) || !Number.isFinite(Number(parsed.height))) {
+            return null;
+          }
+          return {
+            width: Number(parsed.width),
+            height: Number(parsed.height),
+            frame_origin: parsed.frame_origin || 'top_left',
+            frame_x_axis: parsed.frame_x_axis || 'right',
+            frame_y_axis: parsed.frame_y_axis || 'down',
+            writable_x_min: Number(parsed.writable_x_min),
+            writable_x_max: Number(parsed.writable_x_max),
+            writable_y_min: Number(parsed.writable_y_min),
+            writable_y_max: Number(parsed.writable_y_max),
+            safe_x_min: Number(parsed.safe_x_min),
+            safe_x_max: Number(parsed.safe_x_max),
+            safe_y_min: Number(parsed.safe_y_min),
+            safe_y_max: Number(parsed.safe_y_max),
+            line_height: safeNumber(parsed.line_height),
+            corner_keepout_radius: safeNumber(parsed.corner_keepout_radius),
+            anchors: parsed.anchors || null,
+          };
+        } catch (_error) {
+          return null;
+        }
+      }
+
+      function distance(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      function trimTrail() {
+        while (state.trailPointCount > MAX_TRAIL_POINTS && state.trailSegments.length > 0) {
+          const first = state.trailSegments[0];
+          if (!first || first.length === 0) {
+            state.trailSegments.shift();
+            continue;
+          }
+          first.shift();
+          state.trailPointCount -= 1;
+          if (first.length === 0) {
+            state.trailSegments.shift();
+          }
+        }
+      }
+
+      function clearTrail() {
+        state.trailSegments = [];
+        state.activeTrailSegment = null;
+        state.lastTrailPoint = null;
+        state.trailPointCount = 0;
+        pushFeed('Local browser trail cleared.', 'info');
+      }
+
+      function beginTrailSegment(point) {
+        const segment = [point];
+        state.trailSegments.push(segment);
+        state.activeTrailSegment = segment;
+        state.lastTrailPoint = point;
+        state.trailPointCount += 1;
+        trimTrail();
+      }
+
+      function endTrailSegment() {
+        state.activeTrailSegment = null;
+        state.lastTrailPoint = null;
+      }
+
+      function appendTrailPoint(point) {
+        if (!state.penContact) {
+          return;
+        }
+        if (!state.activeTrailSegment) {
+          beginTrailSegment(point);
+          return;
+        }
+        if (state.lastTrailPoint && distance(state.lastTrailPoint, point) < MIN_TRAIL_POINT_DIST) {
+          return;
+        }
+        state.activeTrailSegment.push(point);
+        state.lastTrailPoint = point;
+        state.trailPointCount += 1;
+        trimTrail();
+      }
+
+      function computeLayout() {
+        const board = currentBoard();
+        const stageWidth = Math.max(320, dom.boardStage.clientWidth);
+        const maxHeight = Math.max(320, window.innerHeight - 220);
+        const desiredHeight = Math.min(maxHeight, Math.max(340, stageWidth / (board.width / board.height)));
+        dom.boardStage.style.height = `${Math.round(desiredHeight)}px`;
+
+        const padding = 28;
+        const drawableWidth = stageWidth - (padding * 2);
+        const drawableHeight = desiredHeight - (padding * 2);
+        const scale = Math.min(drawableWidth / board.width, drawableHeight / board.height);
+        const boardPixelWidth = board.width * scale;
+        const boardPixelHeight = board.height * scale;
+        const originX = (stageWidth - boardPixelWidth) * 0.5;
+        const originY = (desiredHeight - boardPixelHeight) * 0.5;
+
+        return {
+          cssWidth: stageWidth,
+          cssHeight: desiredHeight,
+          board,
+          scale,
+          originX,
+          originY,
+          boardPixelWidth,
+          boardPixelHeight,
+        };
+      }
+
+      function resizeCanvas(layout) {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const width = Math.round(layout.cssWidth * dpr);
+        const height = Math.round(layout.cssHeight * dpr);
+        if (dom.canvas.width !== width || dom.canvas.height !== height) {
+          dom.canvas.width = width;
+          dom.canvas.height = height;
+        }
+        dom.canvas.style.width = `${Math.round(layout.cssWidth)}px`;
+        dom.canvas.style.height = `${Math.round(layout.cssHeight)}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function boardToCanvas(layout, x, y) {
+        return {
+          x: layout.originX + (x * layout.scale),
+          y: layout.originY + (y * layout.scale),
+        };
+      }
+
+      function roundedRect(context, x, y, width, height, radius) {
+        const r = Math.min(radius, width * 0.5, height * 0.5);
+        context.beginPath();
+        context.moveTo(x + r, y);
+        context.arcTo(x + width, y, x + width, y + height, r);
+        context.arcTo(x + width, y + height, x, y + height, r);
+        context.arcTo(x, y + height, x, y, r);
+        context.arcTo(x, y, x + width, y, r);
+        context.closePath();
+      }
+
+      function drawBackground(layout) {
+        const gradient = ctx.createLinearGradient(0, 0, 0, layout.cssHeight);
+        gradient.addColorStop(0, '#dce6ee');
+        gradient.addColorStop(1, '#eef2f6');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, layout.cssWidth, layout.cssHeight);
+
+        ctx.fillStyle = 'rgba(90, 105, 122, 0.08)';
+        ctx.fillRect(0, layout.originY + (layout.boardPixelHeight * 0.2), layout.cssWidth, layout.boardPixelHeight * 0.65);
+      }
+
+      function drawBoardBase(layout) {
+        const x = layout.originX;
+        const y = layout.originY;
+        const w = layout.boardPixelWidth;
+        const h = layout.boardPixelHeight;
+
+        roundedRect(ctx, x - 10, y - 10, w + 20, h + 20, 28);
+        ctx.fillStyle = '#515a62';
+        ctx.fill();
+
+        roundedRect(ctx, x, y, w, h, 22);
+        ctx.fillStyle = '#f6f2ea';
+        ctx.fill();
+
+        ctx.save();
+        roundedRect(ctx, x, y, w, h, 22);
+        ctx.clip();
+
+        const subtle = ctx.createLinearGradient(x, y, x + w, y + h);
+        subtle.addColorStop(0, 'rgba(255,255,255,0.82)');
+        subtle.addColorStop(1, 'rgba(226,230,236,0.5)');
+        ctx.fillStyle = subtle;
+        ctx.fillRect(x, y, w, h);
+
+        ctx.strokeStyle = 'rgba(54, 86, 111, 0.08)';
+        ctx.lineWidth = 1;
+        const step = Math.max(12, layout.scale * 0.2);
+        for (let ix = x; ix <= x + w; ix += step) {
+          ctx.beginPath();
+          ctx.moveTo(ix, y);
+          ctx.lineTo(ix, y + h);
+          ctx.stroke();
+        }
+        for (let iy = y; iy <= y + h; iy += step) {
+          ctx.beginPath();
+          ctx.moveTo(x, iy);
+          ctx.lineTo(x + w, iy);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function drawZones(layout) {
+        const board = currentBoard();
+        const writableTopLeft = boardToCanvas(layout, board.writable_x_min, board.writable_y_min);
+        const writableBottomRight = boardToCanvas(layout, board.writable_x_max, board.writable_y_max);
+        const safeTopLeft = boardToCanvas(layout, board.safe_x_min, board.safe_y_min);
+        const safeBottomRight = boardToCanvas(layout, board.safe_x_max, board.safe_y_max);
+
+        roundedRect(
+          ctx,
+          writableTopLeft.x,
+          writableTopLeft.y,
+          writableBottomRight.x - writableTopLeft.x,
+          writableBottomRight.y - writableTopLeft.y,
+          16
+        );
+        ctx.fillStyle = 'rgba(212, 139, 99, 0.08)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(201, 95, 56, 0.22)';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        roundedRect(
+          ctx,
+          safeTopLeft.x,
+          safeTopLeft.y,
+          safeBottomRight.x - safeTopLeft.x,
+          safeBottomRight.y - safeTopLeft.y,
+          14
+        );
+        ctx.fillStyle = 'rgba(54, 86, 111, 0.08)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(54, 86, 111, 0.28)';
+        ctx.setLineDash([7, 8]);
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (board.anchors && Number.isFinite(Number(board.corner_keepout_radius))) {
+          ['left', 'right'].forEach((side) => {
+            const anchor = board.anchors[side];
+            if (!anchor) {
+              return;
+            }
+            const point = boardToCanvas(layout, Number(anchor.x), Number(anchor.y));
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, Number(board.corner_keepout_radius) * layout.scale, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(186, 70, 87, 0.06)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(186, 70, 87, 0.14)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          });
+        }
+      }
+
+      function drawAnchors(layout) {
+        const board = currentBoard();
+        if (!board.anchors) {
+          return;
+        }
+        ['left', 'right'].forEach((side) => {
+          const anchor = board.anchors[side];
+          if (!anchor) {
+            return;
+          }
+          const point = boardToCanvas(layout, Number(anchor.x), Number(anchor.y));
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 8.6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(201, 95, 56, 0.14)';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 5.4, 0, Math.PI * 2);
+          ctx.fillStyle = '#2d2420';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
+          ctx.fillStyle = '#efb48f';
+          ctx.fill();
+        });
+      }
+
+      function drawCables(layout) {
+        const board = currentBoard();
+        if (!state.robotPose || !board.anchors) {
+          return;
+        }
+        const leftAnchor = boardToCanvas(layout, Number(board.anchors.left.x), Number(board.anchors.left.y));
+        const rightAnchor = boardToCanvas(layout, Number(board.anchors.right.x), Number(board.anchors.right.y));
+        const leftAttach = boardToCanvas(layout, state.robotPose.x - CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
+        const rightAttach = boardToCanvas(layout, state.robotPose.x + CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
+
+        ctx.strokeStyle = 'rgba(117, 54, 36, 0.82)';
+        ctx.lineWidth = Math.max(1.1, Math.min(2.0, layout.scale * 0.006));
+        ctx.beginPath();
+        ctx.moveTo(leftAnchor.x, leftAnchor.y);
+        ctx.lineTo(leftAttach.x, leftAttach.y);
+        ctx.moveTo(rightAnchor.x, rightAnchor.y);
+        ctx.lineTo(rightAttach.x, rightAttach.y);
+        ctx.stroke();
+      }
+
+      function drawRobot(layout) {
+        if (!state.robotPose) {
+          return;
+        }
+        const center = boardToCanvas(layout, state.robotPose.x, state.robotPose.y);
+        const width = CARRIAGE.width * layout.scale;
+        const height = CARRIAGE.height * layout.scale;
+        const x = center.x - (width * 0.5);
+        const y = center.y - (height * 0.5);
+
+        roundedRect(ctx, x, y, width, height, 10);
+        ctx.fillStyle = '#ef7b4d';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(35, 24, 21, 0.55)';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+
+        roundedRect(ctx, x + (width * 0.14), y + (height * 0.16), width * 0.72, height * 0.72, 8);
+        ctx.fillStyle = '#222a31';
+        ctx.fill();
+
+        const shoulder = boardToCanvas(
+          layout,
+          state.robotPose.x + CARRIAGE.armBaseX,
+          state.robotPose.y + CARRIAGE.armOffsetY
+        );
+        const elbow = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.armBaseX + 0.040),
+          state.robotPose.y + CARRIAGE.armOffsetY
+        );
+        const wrist = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.012),
+          state.robotPose.y + CARRIAGE.penOffsetY
+        );
+        const gripSpread = state.manualGripMode === 'open' ? 0.008 : 0.004;
+        const penBodyTop = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.002),
+          state.robotPose.y + (CARRIAGE.penOffsetY - 0.011)
+        );
+        const penBodyBottom = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.002),
+          state.robotPose.y + (CARRIAGE.penOffsetY + 0.011)
+        );
+
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#20262d';
+        ctx.lineWidth = Math.max(4, layout.scale * 0.028);
+        ctx.beginPath();
+        ctx.moveTo(shoulder.x, shoulder.y);
+        ctx.lineTo(elbow.x, elbow.y);
+        ctx.lineTo(wrist.x, wrist.y);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#5b6772';
+        ctx.lineWidth = Math.max(1.6, layout.scale * 0.010);
+        ctx.beginPath();
+        ctx.moveTo(shoulder.x + 1, shoulder.y - 2);
+        ctx.lineTo(elbow.x - 1, elbow.y - 2);
+        ctx.lineTo(wrist.x, wrist.y);
+        ctx.stroke();
+
+        ctx.fillStyle = '#56616c';
+        roundedRect(ctx, shoulder.x - 8, shoulder.y - 10, 18, 20, 6);
+        ctx.fill();
+        roundedRect(ctx, elbow.x - 8, elbow.y - 8, 20, 16, 6);
+        ctx.fill();
+        roundedRect(ctx, wrist.x - 7, wrist.y - 9, 16, 18, 6);
+        ctx.fillStyle = '#1d2228';
+        ctx.fill();
+
+        ctx.strokeStyle = '#1d2228';
+        ctx.lineWidth = Math.max(1.2, layout.scale * 0.010);
+        ctx.beginPath();
+        ctx.moveTo(wrist.x + 5, wrist.y - (gripSpread * layout.scale));
+        ctx.lineTo(penBodyTop.x, penBodyTop.y);
+        ctx.moveTo(wrist.x + 5, wrist.y + (gripSpread * layout.scale));
+        ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#b72222';
+        ctx.lineWidth = Math.max(2.4, layout.scale * 0.016);
+        ctx.beginPath();
+        ctx.moveTo(penBodyTop.x, penBodyTop.y);
+        ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
+        ctx.stroke();
+        ctx.restore();
+
+        const leftAttach = boardToCanvas(layout, state.robotPose.x - CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
+        const rightAttach = boardToCanvas(layout, state.robotPose.x + CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
+        [leftAttach, rightAttach].forEach((point) => {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, 4.2, 0, Math.PI * 2);
+          ctx.fillStyle = '#2f3740';
+          ctx.fill();
+        });
+      }
+
+      function drawPreview(layout) {
+        const preview = state.vectorPreview && state.vectorPreview.preview;
+        if (!preview || !Array.isArray(preview.strokes) || preview.strokes.length === 0) {
+          return;
+        }
+
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = previewStrokeColor();
+        ctx.lineWidth = Math.max(1.0, Math.min(2.8, layout.scale * 0.009));
+
+        preview.strokes.forEach((stroke) => {
+          if (!Array.isArray(stroke) || stroke.length < 2) {
+            return;
+          }
+          const first = boardToCanvas(layout, Number(stroke[0][0]), Number(stroke[0][1]));
+          ctx.beginPath();
+          ctx.moveTo(first.x, first.y);
+          for (let index = 1; index < stroke.length; index += 1) {
+            const point = boardToCanvas(layout, Number(stroke[index][0]), Number(stroke[index][1]));
+            ctx.lineTo(point.x, point.y);
+          }
+          ctx.stroke();
+        });
+
+        ctx.restore();
+      }
+
+      function drawTrail(layout) {
+        if (state.trailSegments.length === 0) {
+          return;
+        }
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(32, 38, 44, 0.9)';
+        ctx.lineWidth = Math.max(1.4, Math.min(3.0, layout.scale * 0.011));
+        state.trailSegments.forEach((segment) => {
+          if (!segment || segment.length < 2) {
+            return;
+          }
+          const first = boardToCanvas(layout, segment[0].x, segment[0].y);
+          ctx.beginPath();
+          ctx.moveTo(first.x, first.y);
+          for (let index = 1; index < segment.length; index += 1) {
+            const point = boardToCanvas(layout, segment[index].x, segment[index].y);
+            ctx.lineTo(point.x, point.y);
+          }
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+
+      function drawPen(layout) {
+        if (!state.penPose) {
+          return;
+        }
+        const point = boardToCanvas(layout, state.penPose.x, state.penPose.y);
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, state.penContact ? 6.4 : 5.2, 0, Math.PI * 2);
+        ctx.fillStyle = state.penContact ? '#1a2026' : '#7f8c99';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, state.penContact ? 10.5 : 8.4, 0, Math.PI * 2);
+        ctx.strokeStyle = state.penContact ? 'rgba(201, 95, 56, 0.68)' : 'rgba(127, 140, 153, 0.42)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      function drawOriginMarker(layout) {
+        const origin = boardToCanvas(layout, 0, 0);
+        ctx.fillStyle = 'rgba(24, 34, 43, 0.82)';
+        ctx.font = '12px var(--mono)';
+        ctx.fillText('(0,0)', origin.x + 14, origin.y + 16);
+      }
+
+      function renderBoard() {
+        const layout = computeLayout();
+        resizeCanvas(layout);
+        drawBackground(layout);
+        drawBoardBase(layout);
+        drawZones(layout);
+        drawAnchors(layout);
+        drawCables(layout);
+        drawPreview(layout);
+        drawTrail(layout);
+        drawRobot(layout);
+        drawPen(layout);
+        drawOriginMarker(layout);
+      }
+
+      function render() {
+        renderBoard();
+        updateSummary();
+        updateMetrics();
+        updateDiagnostics();
+        updateRuntimeTone();
+        syncControls();
+        refreshOverlay();
+        requestAnimationFrame(render);
+      }
+
+      async function previewText() {
+        const text = dom.textInput.value.trim();
+        if (!text) {
+          throw new Error('Enter text before preview.');
+        }
+        const payload = await apiRequest('/api/vector/text/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            placement: readPlacement(),
+          }),
+        });
+        applyVectorPreview('text', payload);
+      }
+
+      function computeNextTextPlacement(payload, currentPlacement) {
+        const preview = payload && payload.preview;
+        const bounds = preview && preview.bounds;
+        if (!bounds) {
+          return null;
+        }
+        const endX = Number(bounds.x_max);
+        const safe = safeBounds();
+        const commitRequest = payload && payload.commit_request ? payload.commit_request : {};
+        const glyphHeightM = Number(commitRequest.glyph_height_m);
+        const lineHeightScale = Number(commitRequest.line_height);
+        const fallbackLineHeight = currentBoard().line_height || 0.14;
+        const lineAdvance = (
+          Number.isFinite(glyphHeightM) && glyphHeightM > 0 && Number.isFinite(lineHeightScale) && lineHeightScale > 0
+        ) ? glyphHeightM * lineHeightScale : fallbackLineHeight;
+
+        const startX = safe.xMin + 0.02;
+        const maxX = safe.xMax - 0.02;
+        const startY = safe.yMin + 0.02;
+        const maxY = safe.yMax - 0.02;
+        const minRemainingWidth = Math.max(0.025, 0.3 * lineAdvance);
+
+        let nextX = endX + 0.013;
+        let nextY = Number(currentPlacement.y);
+        if (!Number.isFinite(nextY)) {
+          nextY = startY;
+        }
+        if (nextX + minRemainingWidth > maxX) {
+          nextX = startX;
+          nextY += lineAdvance;
+        }
+
+        return {
+          x: Math.max(startX, Math.min(nextX, maxX)),
+          y: Math.max(startY, Math.min(nextY, maxY)),
+          scale: Number(currentPlacement.scale) > 0 ? Number(currentPlacement.scale) : 1,
+        };
+      }
+
+      async function commitText(text) {
+        const currentPlacement = readPlacement();
+        await ensureMode('text');
+        const payload = await apiRequest('/api/text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            placement: currentPlacement,
+          }),
+        });
+        applyVectorPreview('text', payload);
+        const nextPlacement = computeNextTextPlacement(payload, currentPlacement);
+        if (nextPlacement) {
+          setPlacementInputs(nextPlacement);
+          state.placementTouched = true;
+        }
+        clearNotice();
+        pushFeed('Text plan committed through /api/text.', 'success');
+      }
+
+      async function previewSvg() {
+        const svg = dom.svgInput.value.trim();
+        if (!svg) {
+          throw new Error('Paste SVG markup before preview.');
+        }
+        const payload = await apiRequest('/api/vector/svg/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            svg,
+            placement: readPlacement(),
+          }),
+        });
+        applyVectorPreview('svg', payload);
+      }
+
+      async function commitSvg() {
+        const svg = dom.svgInput.value.trim();
+        if (!svg) {
+          throw new Error('Paste SVG markup before commit.');
+        }
+        await ensureMode('draw');
+        const payload = await apiRequest('/api/vector/svg/commit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            svg,
+            placement: readPlacement(),
+          }),
+        });
+        applyVectorPreview('svg', payload);
+        clearNotice();
+        pushFeed('SVG plan committed through draw mode.', 'success');
+      }
+
+      async function uploadAndPreviewImage(file) {
+        const form = new FormData();
+        form.append('file', file);
+        const payload = await apiRequest('/api/draw/image', {
+          method: 'POST',
+          body: form,
+        });
+        state.latestImageUploadId = payload.upload && payload.upload.upload_id;
+        state.imageCommitDefaults = payload.commit_request || null;
+        if (state.latestImageUploadId && payload.image_info) {
+          dom.imageMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(state.latestImageUploadId)} · ${payload.image_info.width_px}×${payload.image_info.height_px}`;
+        } else {
+          dom.imageMeta.innerHTML = '<strong>Upload</strong> none';
+        }
+        if (payload.preview) {
+          applyVectorPreview('image', payload);
+        } else {
+          setNotice('warning', 'Image uploaded', payload.preview_error || 'Preview is waiting for board metadata.');
+          pushFeed('Image uploaded, but preview is not ready yet.', 'info');
+        }
+      }
+
+      function buildImagePayload() {
+        if (!state.latestImageUploadId) {
+          throw new Error('No uploaded image is available yet.');
+        }
+        return Object.assign({}, state.imageCommitDefaults || {}, {
+          upload_id: state.latestImageUploadId,
+          placement: readPlacement(),
+        });
+      }
+
+      async function previewImage() {
+        const payload = await apiRequest('/api/vector/image/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildImagePayload()),
+        });
+        state.imageCommitDefaults = payload.commit_request || state.imageCommitDefaults;
+        applyVectorPreview('image', payload);
+      }
+
+      async function commitImage() {
+        await ensureMode('draw');
+        const payload = await apiRequest('/api/vector/image/commit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildImagePayload()),
+        });
+        state.imageCommitDefaults = payload.commit_request || state.imageCommitDefaults;
+        applyVectorPreview('image', payload);
+        clearNotice();
+        pushFeed('Image trace committed through draw mode.', 'success');
+      }
+
+      function handleError(prefix, error) {
+        const message = error && error.message ? error.message : 'Unknown error';
+        setNotice('error', prefix, message);
+        pushFeed(`${prefix}: ${message}`, 'error');
+      }
+
+      function setActiveTool(tool) {
+        state.activeTool = tool;
+        dom.toolButtons.forEach((button) => {
+          button.classList.toggle('active', button.dataset.tool === tool);
+        });
+        dom.toolTextPanel.classList.toggle('active', tool === 'text');
+        dom.toolSvgPanel.classList.toggle('active', tool === 'svg');
+        dom.toolImagePanel.classList.toggle('active', tool === 'image');
+        syncPlacementLabels();
+        if (!state.placementTouched) {
+          syncPlacementDefaults(true);
+        }
+      }
+
+      dom.modeButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+          try {
+            await setMode(button.dataset.mode);
+            clearNotice();
+          } catch (error) {
+            handleError(`Mode switch to ${button.dataset.mode} failed`, error);
+          }
+        });
+      });
+
+      dom.manualPenButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+          try {
+            await setManualPenMode(button.dataset.manualPen);
+            clearNotice();
+          } catch (error) {
+            handleError(`Arm test switch to ${button.dataset.manualPen} failed`, error);
+          }
+        });
+      });
+
+      dom.manualGripButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+          try {
+            await setManualGripMode(button.dataset.manualGrip);
+            clearNotice();
+          } catch (error) {
+            handleError(`Grip test switch to ${button.dataset.manualGrip} failed`, error);
+          }
+        });
+      });
+
+      dom.toolButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          setActiveTool(button.dataset.tool);
+        });
+      });
+
+      [dom.placementX, dom.placementY, dom.placementScale].forEach((input) => {
+        input.addEventListener('input', () => {
+          state.placementTouched = true;
+        });
+      });
+
+      dom.placementResetBtn.addEventListener('click', () => {
+        syncPlacementDefaults(true);
+        pushFeed('Placement reset for the active tool.', 'info');
+      });
+
+      dom.clearPreviewBtn.addEventListener('click', () => {
+        clearVectorPreview(true);
+        clearNotice();
+      });
+
+      dom.clearTrailBtn.addEventListener('click', clearTrail);
+
+      dom.textPreviewBtn.addEventListener('click', async () => {
+        try {
+          await previewText();
+        } catch (error) {
+          handleError('Text preview failed', error);
+        }
+      });
+
+      dom.textSubmitBtn.addEventListener('click', async () => {
+        const text = dom.textInput.value.trim();
+        if (!text) {
+          handleError('Text commit failed', new Error('Enter text before sending.'));
+          return;
+        }
+        try {
+          await commitText(text);
+        } catch (error) {
+          handleError('Text commit failed', error);
+        }
+      });
+
+      dom.textHelloBtn.addEventListener('click', async () => {
+        dom.textInput.value = 'HELLO';
+        try {
+          await commitText('HELLO');
+        } catch (error) {
+          handleError('Quick HELLO failed', error);
+        }
+      });
+
+      dom.textClearBtn.addEventListener('click', () => {
+        dom.textInput.value = '';
+      });
+
+      dom.svgPreviewBtn.addEventListener('click', async () => {
+        try {
+          await previewSvg();
+        } catch (error) {
+          handleError('SVG preview failed', error);
+        }
+      });
+
+      dom.svgSubmitBtn.addEventListener('click', async () => {
+        try {
+          await commitSvg();
+        } catch (error) {
+          handleError('SVG commit failed', error);
+        }
+      });
+
+      dom.svgClearBtn.addEventListener('click', () => {
+        dom.svgInput.value = '';
+      });
+
+      dom.imageUploadBtn.addEventListener('click', async () => {
+        const file = dom.imageInput.files && dom.imageInput.files[0];
+        if (!file) {
+          handleError('Image upload failed', new Error('Choose an image file first.'));
+          return;
+        }
+        try {
+          await uploadAndPreviewImage(file);
+          dom.imageInput.value = '';
+        } catch (error) {
+          handleError('Image upload failed', error);
+        }
+      });
+
+      dom.imagePreviewBtn.addEventListener('click', async () => {
+        try {
+          await previewImage();
+        } catch (error) {
+          handleError('Image preview failed', error);
+        }
+      });
+
+      dom.imageCommitBtn.addEventListener('click', async () => {
+        try {
+          await commitImage();
+        } catch (error) {
+          handleError('Image commit failed', error);
+        }
+      });
+
+      const ros = new ROSLIB.Ros({ url: WS_URL });
+
+      ros.on('connection', () => {
+        state.rosbridge = 'connected';
+        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connected', 'Rosbridge · connected');
+        if (state.reconnectTimer) {
+          clearTimeout(state.reconnectTimer);
+          state.reconnectTimer = null;
+        }
+      });
+
+      ros.on('error', () => {
+        state.rosbridge = 'error';
+        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'error', 'Rosbridge · error');
+      });
+
+      ros.on('close', () => {
+        state.rosbridge = 'disconnected';
+        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'disconnected', 'Rosbridge · disconnected');
+        if (!state.reconnectTimer) {
+          state.reconnectTimer = window.setTimeout(() => {
+            state.reconnectTimer = null;
+            state.rosbridge = 'connecting';
+            setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connecting', 'Rosbridge · reconnecting');
+            ros.connect(WS_URL);
+          }, 3000);
+        }
+      });
+
+      const boardInfoTopic = new ROSLIB.Topic({
+        ros,
+        name: TOPICS.boardInfo,
+        messageType: 'std_msgs/String',
+      });
+      boardInfoTopic.subscribe((msg) => {
+        const parsed = parseBoardInfo(msg.data);
+        if (parsed) {
+          state.board = parsed;
+          if (!state.placementTouched) {
+            syncPlacementDefaults(false);
+          }
+        }
+      });
+
+      const robotPoseTopic = new ROSLIB.Topic({
+        ros,
+        name: TOPICS.robotPose,
+        messageType: 'geometry_msgs/Pose2D',
+      });
+      robotPoseTopic.subscribe((msg) => {
+        const x = safeNumber(msg.x);
+        const y = safeNumber(msg.y);
+        const theta = safeNumber(msg.theta);
+        if (x === null || y === null || theta === null) {
+          return;
+        }
+        state.robotPose = { x, y, theta };
+      });
+
+      const penPoseTopic = new ROSLIB.Topic({
+        ros,
+        name: TOPICS.penPose,
+        messageType: 'geometry_msgs/PointStamped',
+      });
+      penPoseTopic.subscribe((msg) => {
+        const x = safeNumber(msg.point && msg.point.x);
+        const y = safeNumber(msg.point && msg.point.y);
+        if (x === null || y === null) {
+          return;
+        }
+        state.penPose = { x, y };
+        if (state.penContact) {
+          appendTrailPoint({ x, y });
+        }
+      });
+
+      const penContactTopic = new ROSLIB.Topic({
+        ros,
+        name: TOPICS.penContact,
+        messageType: 'std_msgs/Bool',
+      });
+      penContactTopic.subscribe((msg) => {
+        const nextContact = Boolean(msg.data);
+        if (state.penContact && !nextContact) {
+          endTrailSegment();
+        }
+        state.penContact = nextContact;
+        if (nextContact && state.penPose && !state.activeTrailSegment) {
+          appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
+        }
+      });
+
+      function startRuntimePolling() {
+        const poll = async () => {
+          try {
+            state.backend = 'ready';
+            await refreshRuntime();
+          } catch (error) {
+            state.backend = 'error';
+            setStatusPill(dom.backendPill, dom.backendText, 'error', 'Backend · unavailable');
+            setStatusPill(dom.runtimePill, dom.runtimeText, 'error', 'Runtime · unavailable');
+            setNotice('error', 'Runtime refresh failed', error.message);
+          }
+        };
+        poll();
+        state.runtimeTimer = window.setInterval(poll, RUNTIME_POLL_MS);
+      }
+
+      window.addEventListener('resize', () => {
+        renderBoard();
+      });
+
+      window.addEventListener('beforeunload', () => {
+        if (state.runtimeTimer) {
+          clearInterval(state.runtimeTimer);
+          state.runtimeTimer = null;
+        }
+      });
+
+      pushFeed('UI initialized. Waiting for backend and rosbridge.', 'info');
+      syncPlacementLabels();
+      syncPlacementDefaults(true);
+      clearVectorPreview(false);
+      updateSummary();
+      updateMetrics();
+      updateDiagnostics();
+      syncControls();
+      refreshOverlay();
+      startRuntimePolling();
+      requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>
