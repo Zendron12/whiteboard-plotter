@@ -20,14 +20,9 @@
         <controller type="extern"/>
         <plugin type="wall_climber.cable_robot_plugin.CableRobotPlugin">
             <pen_joint_name>pen_slide_joint</pen_joint_name>
-            <gripper_left_joint_name>gripper_left_joint</gripper_left_joint_name>
-            <gripper_right_joint_name>gripper_right_joint</gripper_right_joint_name>
             <pen_slide_velocity>${pen_cfg['slide_velocity']}</pen_slide_velocity>
             <pen_up_position>${pen_cfg['up_position']}</pen_up_position>
             <pen_down_position>${pen_cfg['down_position']}</pen_down_position>
-            <gripper_velocity>${pen_cfg['gripper_velocity']}</gripper_velocity>
-            <gripper_closed_position>${pen_cfg['gripper_closed_position']}</gripper_closed_position>
-            <gripper_open_position>${pen_cfg['gripper_open_position']}</gripper_open_position>
         </plugin>
     </webots>
 

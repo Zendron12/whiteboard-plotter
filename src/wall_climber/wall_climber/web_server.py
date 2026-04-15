@@ -19,7 +19,7 @@ from geometry_msgs.msg import Point
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import String
 from wall_climber_interfaces.msg import DrawPlan, DrawPolyline
 
 from wall_climber.runtime_topics import (
@@ -27,20 +27,14 @@ from wall_climber.runtime_topics import (
     CABLE_EXECUTOR_STATUS_TOPIC,
     CABLE_SUPERVISOR_STATUS_TOPIC,
     DRAW_PLAN_TOPIC,
-    GRIP_MODE_AUTO,
-    GRIP_MODE_CLOSED,
-    GRIP_MODE_OPEN,
     MANUAL_PEN_MODE_TOPIC,
-    MANUAL_GRIP_MODE_TOPIC,
     MODE_DRAW,
     MODE_OFF,
     MODE_TEXT,
-    PEN_ATTACHED_TOPIC,
     PEN_MODE_AUTO,
     PEN_MODE_DOWN,
     PEN_MODE_UP,
     VALID_MODES,
-    VALID_MANUAL_GRIP_MODES,
     VALID_MANUAL_PEN_MODES,
 )
 from wall_climber.shared_config import load_shared_config
@@ -118,8 +112,6 @@ class WebBackendNode(Node):
             requested_mode = MODE_OFF
         self._active_mode = requested_mode
         self._manual_pen_mode = PEN_MODE_AUTO
-        self._manual_grip_mode = GRIP_MODE_AUTO
-        self._pen_attached = True
 
         self._lock = threading.Lock()
         self._observed_statuses = {key: False for key in _REQUIRED_STATUS_KEYS}
@@ -138,11 +130,6 @@ class WebBackendNode(Node):
             MANUAL_PEN_MODE_TOPIC,
             _ACTIVE_MODE_QOS,
         )
-        self._manual_grip_mode_pub = self.create_publisher(
-            String,
-            MANUAL_GRIP_MODE_TOPIC,
-            _ACTIVE_MODE_QOS,
-        )
 
         self.create_subscription(
             String,
@@ -157,23 +144,15 @@ class WebBackendNode(Node):
             _STATUS_TOPIC_QOS,
         )
         self.create_subscription(String, '/wall_climber/board_info', self._board_info_cb, 10)
-        self.create_subscription(Bool, PEN_ATTACHED_TOPIC, self._pen_attached_cb, _STATUS_TOPIC_QOS)
         self.create_subscription(
             String,
             MANUAL_PEN_MODE_TOPIC,
             self._manual_pen_mode_cb,
             _ACTIVE_MODE_QOS,
         )
-        self.create_subscription(
-            String,
-            MANUAL_GRIP_MODE_TOPIC,
-            self._manual_grip_mode_cb,
-            _ACTIVE_MODE_QOS,
-        )
 
         self._publish_active_mode(self._active_mode)
         self._publish_manual_pen_mode(self._manual_pen_mode)
-        self._publish_manual_grip_mode(self._manual_grip_mode)
         self.get_logger().info(
             f'Web backend ready on port {self.port} with initial mode {self._active_mode!r}.'
         )
@@ -227,17 +206,6 @@ class WebBackendNode(Node):
         with self._lock:
             self._manual_pen_mode = mode
 
-    def _manual_grip_mode_cb(self, msg: String) -> None:
-        mode = str(msg.data).strip().lower()
-        if mode not in VALID_MANUAL_GRIP_MODES:
-            return
-        with self._lock:
-            self._manual_grip_mode = mode
-
-    def _pen_attached_cb(self, msg: Bool) -> None:
-        with self._lock:
-            self._pen_attached = bool(msg.data)
-
     def _publish_active_mode(self, mode: str) -> None:
         msg = String()
         msg.data = mode
@@ -248,11 +216,6 @@ class WebBackendNode(Node):
         msg.data = mode
         self._manual_pen_mode_pub.publish(msg)
 
-    def _publish_manual_grip_mode(self, mode: str) -> None:
-        msg = String()
-        msg.data = mode
-        self._manual_grip_mode_pub.publish(msg)
-
     def runtime_snapshot(self) -> dict[str, Any]:
         with self._lock:
             statuses = dict(self._statuses)
@@ -260,14 +223,10 @@ class WebBackendNode(Node):
             board_info = dict(self._board_info) if self._board_info is not None else None
             active_mode = self._active_mode
             manual_pen_mode = self._manual_pen_mode
-            manual_grip_mode = self._manual_grip_mode
-            pen_attached = self._pen_attached
         ready = all(observed.values())
         return {
             'active_mode': active_mode,
             'manual_pen_mode': manual_pen_mode,
-            'manual_grip_mode': manual_grip_mode,
-            'pen_attached': pen_attached,
             'ready': ready,
             'not_ready_reason': None if ready else 'waiting_for_status_topics',
             'observed_statuses': observed,
@@ -304,18 +263,6 @@ class WebBackendNode(Node):
         self._publish_manual_pen_mode(mode)
         return self.runtime_snapshot()
 
-    def set_manual_grip_mode(self, mode: str) -> dict[str, Any]:
-        if mode not in VALID_MANUAL_GRIP_MODES:
-            raise HTTPException(status_code=400, detail='invalid manual grip mode')
-        snapshot = self.ensure_ready()
-        statuses = snapshot['statuses']
-        if statuses['cable_executor_status'] == 'running':
-            raise HTTPException(status_code=409, detail='runtime is busy; manual grip control rejected')
-        with self._lock:
-            self._manual_grip_mode = mode
-        self._publish_manual_grip_mode(mode)
-        return self.runtime_snapshot()
-
     def publish_draw_plan(self, plan: DrawPlan, *, allowed_modes: tuple[str, ...]) -> None:
         snapshot = self.ensure_ready()
         if snapshot['active_mode'] not in allowed_modes:
@@ -323,10 +270,6 @@ class WebBackendNode(Node):
             raise HTTPException(status_code=409, detail=f'active mode must be one of: {allowed}')
         if snapshot['manual_pen_mode'] != PEN_MODE_AUTO:
             raise HTTPException(status_code=409, detail='manual arm test must be set to auto before drawing')
-        if snapshot['manual_grip_mode'] != GRIP_MODE_AUTO:
-            raise HTTPException(status_code=409, detail='manual grip test must be set to auto before drawing')
-        if not snapshot['pen_attached']:
-            raise HTTPException(status_code=409, detail='robot has no pen attached')
         if snapshot['statuses']['cable_executor_status'] == 'running':
             raise HTTPException(status_code=409, detail='cable executor is busy')
         self._draw_plan_pub.publish(plan)
@@ -971,23 +914,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             )
         snapshot = runtime.node.set_manual_pen_mode(mode)
         return JSONResponse({'ok': True, 'manual_pen_mode': mode, 'runtime': snapshot})
-
-    @app.post('/api/manual/gripper')
-    async def set_manual_grip_mode(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='manual grip request',
-            max_bytes=1024,
-        )
-        _reject_extra_fields(raw, {'mode'}, 'manual grip request')
-        mode = raw.get('mode')
-        if mode not in VALID_MANUAL_GRIP_MODES:
-            raise HTTPException(
-                status_code=422,
-                detail=f'mode must be one of {VALID_MANUAL_GRIP_MODES}',
-            )
-        snapshot = runtime.node.set_manual_grip_mode(mode)
-        return JSONResponse({'ok': True, 'manual_grip_mode': mode, 'runtime': snapshot})
 
     def _build_text_vector(
         raw: dict[str, Any],

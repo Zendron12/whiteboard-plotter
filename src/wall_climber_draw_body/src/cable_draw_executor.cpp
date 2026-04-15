@@ -10,7 +10,6 @@
 
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "wall_climber_interfaces/msg/cable_setpoint.hpp"
 #include "wall_climber_interfaces/msg/draw_plan.hpp"
@@ -98,10 +97,6 @@ class CableDrawExecutor final : public rclcpp::Node {
       "/wall_climber/internal/active_mode",
       transient_local_qos(),
       std::bind(&CableDrawExecutor::active_mode_callback, this, std::placeholders::_1));
-    pen_attached_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "/wall_climber/pen_attached",
-      transient_local_qos(),
-      std::bind(&CableDrawExecutor::pen_attached_callback, this, std::placeholders::_1));
     draw_plan_sub_ = create_subscription<wall_climber_interfaces::msg::DrawPlan>(
       "/wall_climber/draw_plan",
       10,
@@ -495,24 +490,12 @@ class CableDrawExecutor final : public rclcpp::Node {
     active_mode_ = msg->data;
   }
 
-  void pen_attached_callback(const std_msgs::msg::Bool::SharedPtr msg) {
-    if (!msg) {
-      return;
-    }
-    pen_attached_ = msg->data;
-  }
-
   void draw_plan_callback(const wall_climber_interfaces::msg::DrawPlan::SharedPtr msg) {
     if (!msg) {
       return;
     }
     if (status_ == "running") {
       RCLCPP_WARN(get_logger(), "Ignoring incoming draw plan because the cable executor is busy.");
-      return;
-    }
-    if (!pen_attached_) {
-      set_status("error");
-      RCLCPP_ERROR(get_logger(), "Rejected draw plan: robot has no pen attached.");
       return;
     }
 
@@ -534,14 +517,6 @@ class CableDrawExecutor final : public rclcpp::Node {
   }
 
   void on_timer() {
-    if (!pen_attached_) {
-      if (!schedule_.empty()) {
-        schedule_.clear();
-        set_status("error");
-        RCLCPP_ERROR(get_logger(), "Stopped execution because the pen is no longer attached.");
-      }
-      return;
-    }
     if (schedule_.empty()) {
       if (status_ == "running") {
         set_status("done");
@@ -574,14 +549,12 @@ class CableDrawExecutor final : public rclcpp::Node {
   rclcpp::Publisher<wall_climber_interfaces::msg::CableSetpoint>::SharedPtr setpoint_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr active_mode_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pen_attached_sub_;
   rclcpp::Subscription<wall_climber_interfaces::msg::DrawPlan>::SharedPtr draw_plan_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::deque<PlannedSample> schedule_;
   Point2D current_pen_point_;
   std::string status_;
   std::string active_mode_{"off"};
-  bool pen_attached_{true};
 };
 
 int main(int argc, char ** argv) {

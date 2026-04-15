@@ -79,9 +79,6 @@ class PenDefaults:
     slide_velocity: float
     up_position: float
     down_position: float
-    gripper_velocity: float
-    gripper_closed_position: float
-    gripper_open_position: float
     settle_sec: float
     contact_engage_gap: float
     contact_release_gap: float

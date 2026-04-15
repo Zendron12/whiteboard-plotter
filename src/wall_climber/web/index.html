@@ -984,24 +984,18 @@
           <section class="section">
             <div class="section-head">
               <div class="section-title">
-                <h3>Arm & Grip Test</h3>
-                <p>Manual overrides for arm lift and gripper. <strong>Grip Open</strong> now releases the pen; once dropped, drawing stays locked until reset or respawn.</p>
+                <h3>Arm Press / Release</h3>
+                <p>Manual overrides for the arm only. Use <strong>Press</strong> to touch the board and <strong>Release</strong> to lift the pen clear before returning to auto.</p>
               </div>
             </div>
             <div class="section-body mode-switch">
               <div class="segmented">
                 <button id="manual-pen-auto-btn" data-manual-pen="auto" type="button">Auto</button>
-                <button id="manual-pen-up-btn" data-manual-pen="up" type="button">Arm Up</button>
-                <button id="manual-pen-down-btn" data-manual-pen="down" type="button">Arm Down</button>
-              </div>
-              <div class="segmented">
-                <button id="manual-grip-auto-btn" data-manual-grip="auto" type="button">Grip Auto</button>
-                <button id="manual-grip-closed-btn" data-manual-grip="closed" type="button">Grip Closed</button>
-                <button id="manual-grip-open-btn" data-manual-grip="open" type="button">Grip Open / Drop</button>
+                <button id="manual-pen-up-btn" data-manual-pen="up" type="button">Release</button>
+                <button id="manual-pen-down-btn" data-manual-pen="down" type="button">Press</button>
               </div>
               <div class="micro-meta">
-                <div class="micro-pill"><strong>Arm Test</strong> <span id="manual-pen-status">--</span></div>
-                <div class="micro-pill"><strong>Grip Test</strong> <span id="manual-grip-status">--</span></div>
+                <div class="micro-pill"><strong>Arm State</strong> <span id="manual-pen-status">--</span></div>
               </div>
             </div>
           </section>
@@ -1174,9 +1168,10 @@
         height: 0.20,
         attachX: 0.104,
         attachY: 0.075,
-        armBaseX: 0.131,
-        armMidX: 0.171,
-        gripX: 0.195,
+        armBaseX: 0.129,
+        armMidX: 0.161,
+        wristX: 0.189,
+        holderX: 0.203,
         armOffsetY: 0.020,
         penOffsetX: 0.203,
         penOffsetY: 0.020,
@@ -1189,7 +1184,6 @@
         robotPose: '/wall_climber/robot_pose_board',
         penPose: '/wall_climber/pen_pose_board',
         penContact: '/wall_climber/pen_contact',
-        penAttached: '/wall_climber/pen_attached',
       };
 
       const dom = {
@@ -1221,8 +1215,6 @@
         statusSupervisor: document.getElementById('status-supervisor'),
         manualPenButtons: Array.from(document.querySelectorAll('[data-manual-pen]')),
         manualPenStatus: document.getElementById('manual-pen-status'),
-        manualGripButtons: Array.from(document.querySelectorAll('[data-manual-grip]')),
-        manualGripStatus: document.getElementById('manual-grip-status'),
         placementX: document.getElementById('placement-x'),
         placementY: document.getElementById('placement-y'),
         placementScale: document.getElementById('placement-scale'),
@@ -1266,12 +1258,10 @@
         rosbridge: 'connecting',
         runtime: null,
         manualPenMode: 'auto',
-        manualGripMode: 'auto',
         board: null,
         robotPose: null,
         penPose: null,
         penContact: false,
-        penAttached: true,
         activeTool: 'text',
         placementTouched: false,
         vectorPreview: null,
@@ -1457,8 +1447,6 @@
         const runtime = await apiRequest('/api/runtime');
         state.runtime = runtime;
         state.manualPenMode = runtime.manual_pen_mode || 'auto';
-        state.manualGripMode = runtime.manual_grip_mode || 'auto';
-        state.penAttached = runtime.pen_attached !== false;
         state.board = runtime.board_info || state.board;
 
         const backendTone = runtime.ready ? 'ready' : 'connecting';
@@ -1479,8 +1467,6 @@
         });
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : 'auto';
-        state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : 'auto';
-        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
         pushFeed(`Mode switched to ${mode}.`, 'success');
         return payload.runtime;
       }
@@ -1493,24 +1479,8 @@
         });
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : mode;
-        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
-        pushFeed(`Arm test set to ${mode}.`, 'success');
-        return payload.runtime;
-      }
-
-      async function setManualGripMode(mode) {
-        const payload = await apiRequest('/api/manual/gripper', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode }),
-        });
-        state.runtime = payload.runtime;
-        state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : mode;
-        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
-        pushFeed(
-          mode === 'open' ? 'Grip opened. If a pen was attached, it has been dropped.' : `Grip test set to ${mode}.`,
-          'success'
-        );
+        const label = mode === 'down' ? 'press' : mode === 'up' ? 'release' : 'auto';
+        pushFeed(`Arm test set to ${label}.`, 'success');
         return payload.runtime;
       }
 
@@ -1594,9 +1564,7 @@
           dom.metricRobot.textContent = '--';
         }
         if (state.penPose) {
-          const contactState = state.penAttached
-            ? (state.penContact ? 'contact' : 'lift')
-            : 'detached';
+          const contactState = state.penContact ? 'press' : 'release';
           dom.metricPen.textContent = `${formatPoint(state.penPose.x, state.penPose.y)} · ${contactState}`;
         } else {
           dom.metricPen.textContent = '--';
@@ -1605,7 +1573,6 @@
         dom.statusExecutor.textContent = state.runtime && state.runtime.statuses ? (state.runtime.statuses.cable_executor_status || '--') : '--';
         dom.statusSupervisor.textContent = state.runtime && state.runtime.statuses ? (state.runtime.statuses.cable_supervisor_status || '--') : '--';
         dom.manualPenStatus.textContent = state.manualPenMode || '--';
-        dom.manualGripStatus.textContent = state.manualGripMode || '--';
       }
 
       function updateDiagnostics() {
@@ -1667,21 +1634,15 @@
           button.classList.toggle('active', active);
           button.disabled = !runtimeReady || executorBusy || active;
         });
-        dom.manualGripButtons.forEach((button) => {
-          const active = state.manualGripMode === button.dataset.manualGrip;
-          button.classList.toggle('active', active);
-          button.disabled = !runtimeReady || executorBusy || active;
-        });
 
         dom.textPreviewBtn.disabled = !backendHealthy;
-        const penAvailable = state.penAttached;
-        dom.textSubmitBtn.disabled = !(runtimeReady && penAvailable);
-        dom.textHelloBtn.disabled = !(runtimeReady && penAvailable);
+        dom.textSubmitBtn.disabled = !runtimeReady;
+        dom.textHelloBtn.disabled = !runtimeReady;
         dom.svgPreviewBtn.disabled = !backendHealthy;
-        dom.svgSubmitBtn.disabled = !(runtimeReady && penAvailable);
+        dom.svgSubmitBtn.disabled = !runtimeReady;
         dom.imageUploadBtn.disabled = !backendHealthy;
         dom.imagePreviewBtn.disabled = !(backendHealthy && imageReady);
-        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady && penAvailable);
+        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady);
       }
 
       function setOverlay(title, copy, visible) {
@@ -1703,11 +1664,6 @@
 
         if (!state.board) {
           setOverlay('Waiting for board metadata', 'The browser is connected, but /wall_climber/board_info has not arrived yet.', true);
-          return;
-        }
-
-        if (!state.penAttached) {
-          setOverlay('No pen attached', 'Grip release dropped the pen. Reset or respawn the robot before sending another draw plan.', true);
           return;
         }
 
@@ -2080,117 +2036,94 @@
         );
         const wrist = boardToCanvas(
           layout,
-          state.robotPose.x + (CARRIAGE.gripX - 0.010),
+          state.robotPose.x + CARRIAGE.wristX,
           state.robotPose.y + CARRIAGE.penOffsetY
         );
-        const gripCenter = boardToCanvas(
+        const holder = boardToCanvas(
           layout,
-          state.robotPose.x + CARRIAGE.gripX,
+          state.robotPose.x + CARRIAGE.holderX,
           state.robotPose.y + CARRIAGE.penOffsetY
         );
-        const gripSpread = (!state.penAttached || state.manualGripMode === 'open') ? 0.016 : 0.0105;
-        const penBodyTop = boardToCanvas(
+        const penBodyStart = boardToCanvas(
           layout,
           state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
-          state.robotPose.y + (CARRIAGE.penOffsetY - 0.022)
+          state.robotPose.y + (CARRIAGE.penOffsetY - 0.009)
         );
-        const penBodyBottom = boardToCanvas(
+        const penBodyEnd = boardToCanvas(
           layout,
           state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
-          state.robotPose.y + (CARRIAGE.penOffsetY + 0.020)
+          state.robotPose.y + (CARRIAGE.penOffsetY + 0.021)
         );
-        const penCenter = boardToCanvas(
+        const penFrontBand = boardToCanvas(
           layout,
           state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
-          state.robotPose.y + CARRIAGE.penOffsetY
+          state.robotPose.y + (CARRIAGE.penOffsetY - 0.0015)
         );
-        const penBandStart = boardToCanvas(
+        const penBackCap = boardToCanvas(
           layout,
           state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
-          state.robotPose.y + (CARRIAGE.penOffsetY - 0.010)
-        );
-        const penBandEnd = boardToCanvas(
-          layout,
-          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
-          state.robotPose.y + (CARRIAGE.penOffsetY + 0.014)
+          state.robotPose.y + (CARRIAGE.penOffsetY + 0.016)
         );
 
         ctx.save();
         ctx.lineCap = 'round';
-        ctx.fillStyle = '#2a3138';
-        roundedRect(ctx, shoulder.x - 9, shoulder.y - 12, 16, 24, 6);
+        ctx.fillStyle = '#272e35';
+        roundedRect(ctx, shoulder.x - 9, shoulder.y - 11, 16, 22, 6);
         ctx.fill();
-        ctx.fillStyle = '#3c464f';
-        roundedRect(ctx, shoulder.x + 2, shoulder.y - 8, 18, 16, 5);
+        ctx.fillStyle = '#55616d';
+        roundedRect(ctx, shoulder.x + 1, shoulder.y - 7, 14, 14, 5);
         ctx.fill();
 
-        ctx.strokeStyle = '#79c6d3';
-        ctx.lineWidth = Math.max(2.4, layout.scale * 0.010);
-        ctx.beginPath();
-        ctx.moveTo(shoulder.x + 2, shoulder.y - 7);
-        ctx.lineTo(mid.x - 5, mid.y - 7);
-        ctx.lineTo(wrist.x + 2, wrist.y - 7);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(shoulder.x + 2, shoulder.y + 7);
-        ctx.lineTo(mid.x - 5, mid.y + 7);
-        ctx.lineTo(wrist.x + 2, wrist.y + 7);
-        ctx.stroke();
-
-        ctx.fillStyle = '#181d22';
-        roundedRect(ctx, wrist.x - 5, wrist.y - 9, 12, 18, 5);
+        const bracketLeadX = shoulder.x + 4;
+        const bracketLeadW = Math.max(16, mid.x - shoulder.x + 1);
+        ctx.fillStyle = '#647583';
+        roundedRect(ctx, bracketLeadX, shoulder.y - 8, bracketLeadW, 6, 3);
         ctx.fill();
+        roundedRect(ctx, bracketLeadX, shoulder.y + 2, bracketLeadW, 6, 3);
+        ctx.fill();
+        ctx.fillStyle = '#50606c';
+        roundedRect(ctx, mid.x - 3, mid.y - 8, Math.max(14, wrist.x - mid.x + 5), 16, 5);
+        ctx.fill();
+
+        ctx.fillStyle = '#161b20';
+        roundedRect(ctx, wrist.x - 5, wrist.y - 8, 12, 16, 5);
+        ctx.fill();
+        ctx.fillStyle = '#2d353d';
+        roundedRect(ctx, wrist.x + 1, wrist.y - 4, 12, 8, 4);
+        ctx.fill();
+
         ctx.fillStyle = '#2a323a';
-        roundedRect(ctx, wrist.x + 3, wrist.y - 7, 22, 14, 5);
+        roundedRect(ctx, holder.x - 12, holder.y - 4, 12, 8, 4);
         ctx.fill();
 
-        const clampRadius = Math.max(5.8, layout.scale * 0.023);
-        const clampGap = (!state.penAttached || state.manualGripMode === 'open') ? 0.56 : 0.18;
-        ctx.strokeStyle = '#c83333';
-        ctx.lineWidth = Math.max(2.8, layout.scale * 0.0135);
+        const cradleRadius = Math.max(5.4, layout.scale * 0.016);
+        const cradleThickness = Math.max(2.1, layout.scale * 0.007);
+        ctx.strokeStyle = '#191d22';
+        ctx.lineWidth = cradleThickness;
         ctx.beginPath();
-        ctx.arc(gripCenter.x, penCenter.y, clampRadius, Math.PI * (0.50 + clampGap), Math.PI * (1.50 - clampGap));
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(gripCenter.x, penCenter.y, clampRadius, Math.PI * (1.50 + clampGap), Math.PI * (2.50 - clampGap));
+        ctx.arc(holder.x, holder.y, cradleRadius, Math.PI * 0.34, Math.PI * 1.66, false);
         ctx.stroke();
 
-        ctx.strokeStyle = '#1b2026';
-        ctx.lineWidth = Math.max(1.2, layout.scale * 0.006);
+        ctx.strokeStyle = '#bf2020';
+        ctx.lineWidth = Math.max(2.4, layout.scale * 0.012);
         ctx.beginPath();
-        ctx.arc(gripCenter.x, penCenter.y, clampRadius - Math.max(2.0, layout.scale * 0.009), 0, Math.PI * 2);
+        ctx.moveTo(penBodyStart.x, penBodyStart.y);
+        ctx.lineTo(penBodyEnd.x, penBodyEnd.y);
         ctx.stroke();
 
-        ctx.fillStyle = '#d7dee6';
+        ctx.strokeStyle = '#171b20';
+        ctx.lineWidth = Math.max(1.5, layout.scale * 0.008);
         ctx.beginPath();
-        ctx.arc(gripCenter.x + 2, penCenter.y - clampRadius, Math.max(1.7, layout.scale * 0.0065), 0, Math.PI * 2);
+        ctx.arc(penFrontBand.x, penFrontBand.y, Math.max(4.4, layout.scale * 0.016), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(penBackCap.x, penBackCap.y, Math.max(4.8, layout.scale * 0.017), 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = state.penContact ? '#0f1318' : '#58626d';
+        ctx.beginPath();
+        ctx.arc(penBodyStart.x, penBodyStart.y, Math.max(1.8, layout.scale * 0.0075), 0, Math.PI * 2);
         ctx.fill();
-        ctx.beginPath();
-        ctx.arc(gripCenter.x + 2, penCenter.y + clampRadius, Math.max(1.7, layout.scale * 0.0065), 0, Math.PI * 2);
-        ctx.fill();
-
-        if (state.penAttached) {
-          ctx.strokeStyle = '#bf2020';
-          ctx.lineWidth = Math.max(2.4, layout.scale * 0.013);
-          ctx.beginPath();
-          ctx.moveTo(penBodyTop.x, penBodyTop.y);
-          ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
-          ctx.stroke();
-
-          ctx.strokeStyle = '#171b20';
-          ctx.lineWidth = Math.max(1.5, layout.scale * 0.008);
-          ctx.beginPath();
-          ctx.arc(penBandStart.x, penBandStart.y, Math.max(4.5, layout.scale * 0.017), 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.arc(penBandEnd.x, penBandEnd.y, Math.max(4.9, layout.scale * 0.018), 0, Math.PI * 2);
-          ctx.stroke();
-
-          ctx.fillStyle = state.penContact ? '#0f1318' : '#58626d';
-          ctx.beginPath();
-          ctx.arc(penBodyBottom.x, penBodyBottom.y, Math.max(2.0, layout.scale * 0.009), 0, Math.PI * 2);
-          ctx.fill();
-        }
         ctx.restore();
 
         const leftAttach = boardToCanvas(layout, state.robotPose.x - CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
@@ -2514,17 +2447,6 @@
         });
       });
 
-      dom.manualGripButtons.forEach((button) => {
-        button.addEventListener('click', async () => {
-          try {
-            await setManualGripMode(button.dataset.manualGrip);
-            clearNotice();
-          } catch (error) {
-            handleError(`Grip test switch to ${button.dataset.manualGrip} failed`, error);
-          }
-        });
-      });
-
       dom.toolButtons.forEach((button) => {
         button.addEventListener('click', () => {
           setActiveTool(button.dataset.tool);
@@ -2723,15 +2645,6 @@
         if (nextContact && state.penPose && !state.activeTrailSegment) {
           appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
         }
-      });
-
-      const penAttachedTopic = new ROSLIB.Topic({
-        ros,
-        name: TOPICS.penAttached,
-        messageType: 'std_msgs/Bool',
-      });
-      penAttachedTopic.subscribe((msg) => {
-        state.penAttached = Boolean(msg.data);
       });
 
       function startRuntimePolling() {
