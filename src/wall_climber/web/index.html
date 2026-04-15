@@ -60,7 +60,7 @@
     }
 
     .shell {
-      width: min(1480px, calc(100vw - 28px));
+      width: min(1640px, calc(100vw - 24px));
       margin: 0 auto;
       padding: 24px 0 28px;
       display: grid;
@@ -275,7 +275,7 @@
 
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1.55fr) minmax(360px, 440px);
+      grid-template-columns: minmax(0, 1fr);
       gap: 18px;
       align-items: start;
     }
@@ -326,12 +326,14 @@
     .workspace-body {
       display: grid;
       gap: 18px;
-      padding: 18px 22px 22px;
+      padding: 22px 24px 26px;
+      justify-items: center;
     }
 
     .board-stage {
       position: relative;
-      min-height: 420px;
+      width: min(100%, 1540px);
+      min-height: 620px;
       border-radius: var(--radius-xl);
       overflow: hidden;
       border: 1px solid rgba(24, 34, 43, 0.08);
@@ -388,6 +390,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
+      width: min(100%, 1540px);
     }
 
     .legend-chip {
@@ -413,6 +416,7 @@
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
+      width: min(100%, 1540px);
     }
 
     .live-card {
@@ -439,8 +443,7 @@
     }
 
     .control-panel {
-      position: sticky;
-      top: 14px;
+      position: static;
       overflow: hidden;
     }
 
@@ -461,26 +464,21 @@
 
     .control-body {
       display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
       gap: 16px;
-      padding: 16px 18px 18px;
-      max-height: calc(100vh - 28px);
-      overflow: auto;
-    }
-
-    .control-body::-webkit-scrollbar {
-      width: 10px;
-    }
-
-    .control-body::-webkit-scrollbar-thumb {
-      background: rgba(24, 34, 43, 0.14);
-      border-radius: 999px;
+      padding: 22px 24px 26px;
     }
 
     .section {
+      grid-column: span 6;
       border-radius: var(--radius-xl);
       border: 1px solid var(--paper-line);
       background: rgba(255, 255, 255, 0.54);
       overflow: hidden;
+    }
+
+    .section.wide {
+      grid-column: 1 / -1;
     }
 
     .section-body {
@@ -791,12 +789,13 @@
         grid-template-columns: 1fr;
       }
 
-      .control-panel {
-        position: static;
+      .control-body {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
-      .control-body {
-        max-height: none;
+      .section,
+      .section.wide {
+        grid-column: auto;
       }
     }
 
@@ -814,7 +813,7 @@
 
     @media (max-width: 720px) {
       .shell {
-        width: min(calc(100vw - 14px), 1480px);
+        width: min(calc(100vw - 14px), 1640px);
         padding-top: 14px;
       }
 
@@ -838,8 +837,17 @@
         grid-template-columns: 1fr;
       }
 
+      .control-body {
+        grid-template-columns: 1fr;
+      }
+
+      .section,
+      .section.wide {
+        grid-column: auto;
+      }
+
       .board-stage {
-        min-height: 320px;
+        min-height: 360px;
       }
     }
   </style>
@@ -895,7 +903,7 @@
         <div class="workspace-head">
           <div class="workspace-title">
             <h2>Board Workspace</h2>
-            <p>Top-left origin, safe/writable zones, live telemetry, preview strokes, local trail, and anchor layout in one place.</p>
+            <p>Top-left origin, safe and writable zones, live telemetry, preview strokes, and the live carriage path in one centered workspace.</p>
           </div>
           <div class="micro-meta">
             <div id="preview-chip" class="micro-pill"><strong>Preview</strong> none</div>
@@ -944,11 +952,11 @@
         </div>
       </section>
 
-      <aside class="control-panel">
+      <section class="control-panel">
         <div class="control-head">
           <div>
             <h2>Command Deck</h2>
-            <p>Run the robot without fighting the runtime graph. The UI now handles preview, validation, and mode switching more directly.</p>
+            <p>Runtime controls, manual arm tests, placement, and vector tools stay under the board so the drawing surface remains the main focus.</p>
           </div>
         </div>
 
@@ -977,7 +985,7 @@
             <div class="section-head">
               <div class="section-title">
                 <h3>Arm & Grip Test</h3>
-                <p>Manual overrides for arm lift and gripper. Grip controls are <strong>test-only</strong> — no real pen detach in this phase.</p>
+                <p>Manual overrides for arm lift and gripper. <strong>Grip Open</strong> now releases the pen; once dropped, drawing stays locked until reset or respawn.</p>
               </div>
             </div>
             <div class="section-body mode-switch">
@@ -988,8 +996,8 @@
               </div>
               <div class="segmented">
                 <button id="manual-grip-auto-btn" data-manual-grip="auto" type="button">Grip Auto</button>
-                <button id="manual-grip-closed-btn" data-manual-grip="closed" type="button">Grip Closed (test)</button>
-                <button id="manual-grip-open-btn" data-manual-grip="open" type="button">Grip Open (test)</button>
+                <button id="manual-grip-closed-btn" data-manual-grip="closed" type="button">Grip Closed</button>
+                <button id="manual-grip-open-btn" data-manual-grip="open" type="button">Grip Open / Drop</button>
               </div>
               <div class="micro-meta">
                 <div class="micro-pill"><strong>Arm Test</strong> <span id="manual-pen-status">--</span></div>
@@ -1002,7 +1010,7 @@
             <div class="section-head">
               <div class="section-title">
                 <h3>Placement</h3>
-                <p id="placement-copy">For text, X and Y define the top-left writing origin inside the board-safe region.</p>
+                <p id="placement-copy">For text, X and Y define the top-left writing origin inside the carriage-safe writing region.</p>
               </div>
             </div>
             <div class="section-body">
@@ -1024,11 +1032,11 @@
                 <button id="placement-reset-btn" class="secondary-btn" type="button">Reset Placement</button>
                 <button id="clear-preview-btn" class="quiet-btn" type="button">Clear Preview</button>
               </div>
-              <p id="placement-helper" class="helper-copy">The board overlay updates immediately. Validation errors stay visible before you commit.</p>
+              <p id="placement-helper" class="helper-copy">Placement is validated against both the pen workspace and the carriage body staying inside the board frame.</p>
             </div>
           </section>
 
-          <section class="section">
+          <section class="section wide">
             <div class="section-head">
               <div class="section-title">
                 <h3>Input</h3>
@@ -1043,7 +1051,7 @@
               </div>
 
               <div id="tool-text-panel" class="tool-panel active">
-                <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping and board limits are handled by the backend, not guessed in the browser.</p>
+                <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping, board limits, and carriage-safe start positions are handled by the backend.</p>
                 <textarea id="text-input" placeholder="Write text here. Example: HELLO&#10;WORLD"></textarea>
                 <div class="action-row">
                   <button id="text-preview-btn" class="secondary-btn" type="button">Preview Text</button>
@@ -1128,7 +1136,7 @@
             </div>
           </section>
         </div>
-      </aside>
+      </section>
     </main>
 
     <div class="footer">
@@ -1166,7 +1174,9 @@
         height: 0.20,
         attachX: 0.104,
         attachY: 0.075,
-        armBaseX: 0.151,
+        armBaseX: 0.131,
+        armMidX: 0.171,
+        gripX: 0.195,
         armOffsetY: 0.020,
         penOffsetX: 0.203,
         penOffsetY: 0.020,
@@ -1179,6 +1189,7 @@
         robotPose: '/wall_climber/robot_pose_board',
         penPose: '/wall_climber/pen_pose_board',
         penContact: '/wall_climber/pen_contact',
+        penAttached: '/wall_climber/pen_attached',
       };
 
       const dom = {
@@ -1260,6 +1271,7 @@
         robotPose: null,
         penPose: null,
         penContact: false,
+        penAttached: true,
         activeTool: 'text',
         placementTouched: false,
         vectorPreview: null,
@@ -1446,6 +1458,7 @@
         state.runtime = runtime;
         state.manualPenMode = runtime.manual_pen_mode || 'auto';
         state.manualGripMode = runtime.manual_grip_mode || 'auto';
+        state.penAttached = runtime.pen_attached !== false;
         state.board = runtime.board_info || state.board;
 
         const backendTone = runtime.ready ? 'ready' : 'connecting';
@@ -1467,6 +1480,7 @@
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : 'auto';
         state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : 'auto';
+        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
         pushFeed(`Mode switched to ${mode}.`, 'success');
         return payload.runtime;
       }
@@ -1479,6 +1493,7 @@
         });
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : mode;
+        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
         pushFeed(`Arm test set to ${mode}.`, 'success');
         return payload.runtime;
       }
@@ -1491,7 +1506,11 @@
         });
         state.runtime = payload.runtime;
         state.manualGripMode = payload.runtime && payload.runtime.manual_grip_mode ? payload.runtime.manual_grip_mode : mode;
-        pushFeed(`Grip test set to ${mode}.`, 'success');
+        state.penAttached = !(payload.runtime && payload.runtime.pen_attached === false);
+        pushFeed(
+          mode === 'open' ? 'Grip opened. If a pen was attached, it has been dropped.' : `Grip test set to ${mode}.`,
+          'success'
+        );
         return payload.runtime;
       }
 
@@ -1555,20 +1574,30 @@
 
       function updateSummary() {
         const board = currentBoard();
-        dom.summaryBoard.textContent = `${board.width.toFixed(2)}m × ${board.height.toFixed(2)}m · writable ${formatRange(board.writable_x_min, board.writable_x_max)} / ${formatRange(board.writable_y_min, board.writable_y_max)}`;
+        const bodySafe = Number.isFinite(Number(board.body_safe_x_min))
+          ? ` · carriage-safe ${formatRange(board.body_safe_x_min, board.body_safe_x_max)} / ${formatRange(board.body_safe_y_min, board.body_safe_y_max)}`
+          : '';
+        dom.summaryBoard.textContent = `${board.width.toFixed(2)}m × ${board.height.toFixed(2)}m · writable ${formatRange(board.writable_x_min, board.writable_x_max)} / ${formatRange(board.writable_y_min, board.writable_y_max)}${bodySafe}`;
       }
 
       function updateMetrics() {
         const board = currentBoard();
         dom.metricBoard.textContent = `${board.width.toFixed(3)} × ${board.height.toFixed(3)} m`;
-        dom.metricWritable.textContent = `${formatRange(board.writable_x_min, board.writable_x_max)} · ${formatRange(board.writable_y_min, board.writable_y_max)}`;
+        if (Number.isFinite(Number(board.body_safe_x_min))) {
+          dom.metricWritable.textContent = `${formatRange(board.body_safe_x_min, board.body_safe_x_max)} · ${formatRange(board.body_safe_y_min, board.body_safe_y_max)}`;
+        } else {
+          dom.metricWritable.textContent = `${formatRange(board.writable_x_min, board.writable_x_max)} · ${formatRange(board.writable_y_min, board.writable_y_max)}`;
+        }
         if (state.robotPose) {
           dom.metricRobot.textContent = `${state.robotPose.x.toFixed(3)}, ${state.robotPose.y.toFixed(3)} · θ ${state.robotPose.theta.toFixed(3)}`;
         } else {
           dom.metricRobot.textContent = '--';
         }
         if (state.penPose) {
-          dom.metricPen.textContent = `${formatPoint(state.penPose.x, state.penPose.y)} · ${state.penContact ? 'contact' : 'up'}`;
+          const contactState = state.penAttached
+            ? (state.penContact ? 'contact' : 'lift')
+            : 'detached';
+          dom.metricPen.textContent = `${formatPoint(state.penPose.x, state.penPose.y)} · ${contactState}`;
         } else {
           dom.metricPen.textContent = '--';
         }
@@ -1599,7 +1628,12 @@
         if (runtime.board_info) {
           const info = runtime.board_info;
           dom.runtimeBoardFrame.textContent = `${info.frame_origin || '--'} · x:${info.frame_x_axis || '--'} · y:${info.frame_y_axis || '--'}`;
-          dom.runtimeSafeWorkspace.textContent = `${formatRange(info.safe_x_min, info.safe_x_max)} · ${formatRange(info.safe_y_min, info.safe_y_max)}`;
+          const safeText = `${formatRange(info.safe_x_min, info.safe_x_max)} · ${formatRange(info.safe_y_min, info.safe_y_max)}`;
+          if (Number.isFinite(Number(info.body_safe_x_min))) {
+            dom.runtimeSafeWorkspace.textContent = `${safeText} · body ${formatRange(info.body_safe_x_min, info.body_safe_x_max)}`;
+          } else {
+            dom.runtimeSafeWorkspace.textContent = safeText;
+          }
         } else {
           dom.runtimeBoardFrame.textContent = '--';
           dom.runtimeSafeWorkspace.textContent = '--';
@@ -1640,13 +1674,14 @@
         });
 
         dom.textPreviewBtn.disabled = !backendHealthy;
-        dom.textSubmitBtn.disabled = !runtimeReady;
-        dom.textHelloBtn.disabled = !runtimeReady;
+        const penAvailable = state.penAttached;
+        dom.textSubmitBtn.disabled = !(runtimeReady && penAvailable);
+        dom.textHelloBtn.disabled = !(runtimeReady && penAvailable);
         dom.svgPreviewBtn.disabled = !backendHealthy;
-        dom.svgSubmitBtn.disabled = !runtimeReady;
+        dom.svgSubmitBtn.disabled = !(runtimeReady && penAvailable);
         dom.imageUploadBtn.disabled = !backendHealthy;
         dom.imagePreviewBtn.disabled = !(backendHealthy && imageReady);
-        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady);
+        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady && penAvailable);
       }
 
       function setOverlay(title, copy, visible) {
@@ -1668,6 +1703,11 @@
 
         if (!state.board) {
           setOverlay('Waiting for board metadata', 'The browser is connected, but /wall_climber/board_info has not arrived yet.', true);
+          return;
+        }
+
+        if (!state.penAttached) {
+          setOverlay('No pen attached', 'Grip release dropped the pen. Reset or respawn the robot before sending another draw plan.', true);
           return;
         }
 
@@ -1769,7 +1809,7 @@
       function computeLayout() {
         const board = currentBoard();
         const stageWidth = Math.max(320, dom.boardStage.clientWidth);
-        const maxHeight = Math.max(320, window.innerHeight - 220);
+        const maxHeight = Math.max(420, window.innerHeight - 170);
         const desiredHeight = Math.min(maxHeight, Math.max(340, stageWidth / (board.width / board.height)));
         dom.boardStage.style.height = `${Math.round(desiredHeight)}px`;
 
@@ -1915,6 +1955,31 @@
         ctx.stroke();
         ctx.setLineDash([]);
 
+        if (
+          Number.isFinite(Number(board.body_safe_x_min)) &&
+          Number.isFinite(Number(board.body_safe_x_max)) &&
+          Number.isFinite(Number(board.body_safe_y_min)) &&
+          Number.isFinite(Number(board.body_safe_y_max))
+        ) {
+          const bodySafeTopLeft = boardToCanvas(layout, board.body_safe_x_min, board.body_safe_y_min);
+          const bodySafeBottomRight = boardToCanvas(layout, board.body_safe_x_max, board.body_safe_y_max);
+          roundedRect(
+            ctx,
+            bodySafeTopLeft.x,
+            bodySafeTopLeft.y,
+            bodySafeBottomRight.x - bodySafeTopLeft.x,
+            bodySafeBottomRight.y - bodySafeTopLeft.y,
+            12
+          );
+          ctx.fillStyle = 'rgba(24, 34, 43, 0.045)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(24, 34, 43, 0.18)';
+          ctx.setLineDash([4, 6]);
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
         if (board.anchors && Number.isFinite(Number(board.corner_keepout_radius))) {
           ['left', 'right'].forEach((side) => {
             const anchor = board.anchors[side];
@@ -1996,8 +2061,11 @@
         ctx.lineWidth = 1.4;
         ctx.stroke();
 
-        roundedRect(ctx, x + (width * 0.14), y + (height * 0.16), width * 0.72, height * 0.72, 8);
+        roundedRect(ctx, x + (width * 0.12), y + (height * 0.16), width * 0.70, height * 0.70, 8);
         ctx.fillStyle = '#222a31';
+        ctx.fill();
+        roundedRect(ctx, x + (width * 0.62), y + (height * 0.20), width * 0.18, height * 0.58, 6);
+        ctx.fillStyle = '#4c5762';
         ctx.fill();
 
         const shoulder = boardToCanvas(
@@ -2005,70 +2073,124 @@
           state.robotPose.x + CARRIAGE.armBaseX,
           state.robotPose.y + CARRIAGE.armOffsetY
         );
-        const elbow = boardToCanvas(
+        const mid = boardToCanvas(
           layout,
-          state.robotPose.x + (CARRIAGE.armBaseX + 0.040),
+          state.robotPose.x + CARRIAGE.armMidX,
           state.robotPose.y + CARRIAGE.armOffsetY
         );
         const wrist = boardToCanvas(
           layout,
-          state.robotPose.x + (CARRIAGE.penOffsetX - 0.012),
+          state.robotPose.x + (CARRIAGE.gripX - 0.010),
           state.robotPose.y + CARRIAGE.penOffsetY
         );
-        const gripSpread = state.manualGripMode === 'open' ? 0.008 : 0.004;
+        const gripCenter = boardToCanvas(
+          layout,
+          state.robotPose.x + CARRIAGE.gripX,
+          state.robotPose.y + CARRIAGE.penOffsetY
+        );
+        const gripSpread = (!state.penAttached || state.manualGripMode === 'open') ? 0.016 : 0.0105;
         const penBodyTop = boardToCanvas(
           layout,
-          state.robotPose.x + (CARRIAGE.penOffsetX - 0.002),
-          state.robotPose.y + (CARRIAGE.penOffsetY - 0.011)
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
+          state.robotPose.y + (CARRIAGE.penOffsetY - 0.022)
         );
         const penBodyBottom = boardToCanvas(
           layout,
-          state.robotPose.x + (CARRIAGE.penOffsetX - 0.002),
-          state.robotPose.y + (CARRIAGE.penOffsetY + 0.011)
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
+          state.robotPose.y + (CARRIAGE.penOffsetY + 0.020)
+        );
+        const penCenter = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
+          state.robotPose.y + CARRIAGE.penOffsetY
+        );
+        const penBandStart = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
+          state.robotPose.y + (CARRIAGE.penOffsetY - 0.010)
+        );
+        const penBandEnd = boardToCanvas(
+          layout,
+          state.robotPose.x + (CARRIAGE.penOffsetX - 0.003),
+          state.robotPose.y + (CARRIAGE.penOffsetY + 0.014)
         );
 
         ctx.save();
         ctx.lineCap = 'round';
-        ctx.strokeStyle = '#20262d';
-        ctx.lineWidth = Math.max(4, layout.scale * 0.028);
-        ctx.beginPath();
-        ctx.moveTo(shoulder.x, shoulder.y);
-        ctx.lineTo(elbow.x, elbow.y);
-        ctx.lineTo(wrist.x, wrist.y);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#5b6772';
-        ctx.lineWidth = Math.max(1.6, layout.scale * 0.010);
-        ctx.beginPath();
-        ctx.moveTo(shoulder.x + 1, shoulder.y - 2);
-        ctx.lineTo(elbow.x - 1, elbow.y - 2);
-        ctx.lineTo(wrist.x, wrist.y);
-        ctx.stroke();
-
-        ctx.fillStyle = '#56616c';
-        roundedRect(ctx, shoulder.x - 8, shoulder.y - 10, 18, 20, 6);
+        ctx.fillStyle = '#2a3138';
+        roundedRect(ctx, shoulder.x - 9, shoulder.y - 12, 16, 24, 6);
         ctx.fill();
-        roundedRect(ctx, elbow.x - 8, elbow.y - 8, 20, 16, 6);
-        ctx.fill();
-        roundedRect(ctx, wrist.x - 7, wrist.y - 9, 16, 18, 6);
-        ctx.fillStyle = '#1d2228';
+        ctx.fillStyle = '#3c464f';
+        roundedRect(ctx, shoulder.x + 2, shoulder.y - 8, 18, 16, 5);
         ctx.fill();
 
-        ctx.strokeStyle = '#1d2228';
-        ctx.lineWidth = Math.max(1.2, layout.scale * 0.010);
+        ctx.strokeStyle = '#79c6d3';
+        ctx.lineWidth = Math.max(2.4, layout.scale * 0.010);
         ctx.beginPath();
-        ctx.moveTo(wrist.x + 5, wrist.y - (gripSpread * layout.scale));
-        ctx.lineTo(penBodyTop.x, penBodyTop.y);
-        ctx.moveTo(wrist.x + 5, wrist.y + (gripSpread * layout.scale));
-        ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
+        ctx.moveTo(shoulder.x + 2, shoulder.y - 7);
+        ctx.lineTo(mid.x - 5, mid.y - 7);
+        ctx.lineTo(wrist.x + 2, wrist.y - 7);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(shoulder.x + 2, shoulder.y + 7);
+        ctx.lineTo(mid.x - 5, mid.y + 7);
+        ctx.lineTo(wrist.x + 2, wrist.y + 7);
         ctx.stroke();
 
-        ctx.strokeStyle = '#b72222';
-        ctx.lineWidth = Math.max(2.4, layout.scale * 0.016);
+        ctx.fillStyle = '#181d22';
+        roundedRect(ctx, wrist.x - 5, wrist.y - 9, 12, 18, 5);
+        ctx.fill();
+        ctx.fillStyle = '#2a323a';
+        roundedRect(ctx, wrist.x + 3, wrist.y - 7, 22, 14, 5);
+        ctx.fill();
+
+        const clampRadius = Math.max(5.8, layout.scale * 0.023);
+        const clampGap = (!state.penAttached || state.manualGripMode === 'open') ? 0.56 : 0.18;
+        ctx.strokeStyle = '#c83333';
+        ctx.lineWidth = Math.max(2.8, layout.scale * 0.0135);
         ctx.beginPath();
-        ctx.moveTo(penBodyTop.x, penBodyTop.y);
-        ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
+        ctx.arc(gripCenter.x, penCenter.y, clampRadius, Math.PI * (0.50 + clampGap), Math.PI * (1.50 - clampGap));
         ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(gripCenter.x, penCenter.y, clampRadius, Math.PI * (1.50 + clampGap), Math.PI * (2.50 - clampGap));
+        ctx.stroke();
+
+        ctx.strokeStyle = '#1b2026';
+        ctx.lineWidth = Math.max(1.2, layout.scale * 0.006);
+        ctx.beginPath();
+        ctx.arc(gripCenter.x, penCenter.y, clampRadius - Math.max(2.0, layout.scale * 0.009), 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = '#d7dee6';
+        ctx.beginPath();
+        ctx.arc(gripCenter.x + 2, penCenter.y - clampRadius, Math.max(1.7, layout.scale * 0.0065), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(gripCenter.x + 2, penCenter.y + clampRadius, Math.max(1.7, layout.scale * 0.0065), 0, Math.PI * 2);
+        ctx.fill();
+
+        if (state.penAttached) {
+          ctx.strokeStyle = '#bf2020';
+          ctx.lineWidth = Math.max(2.4, layout.scale * 0.013);
+          ctx.beginPath();
+          ctx.moveTo(penBodyTop.x, penBodyTop.y);
+          ctx.lineTo(penBodyBottom.x, penBodyBottom.y);
+          ctx.stroke();
+
+          ctx.strokeStyle = '#171b20';
+          ctx.lineWidth = Math.max(1.5, layout.scale * 0.008);
+          ctx.beginPath();
+          ctx.arc(penBandStart.x, penBandStart.y, Math.max(4.5, layout.scale * 0.017), 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(penBandEnd.x, penBandEnd.y, Math.max(4.9, layout.scale * 0.018), 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.fillStyle = state.penContact ? '#0f1318' : '#58626d';
+          ctx.beginPath();
+          ctx.arc(penBodyBottom.x, penBodyBottom.y, Math.max(2.0, layout.scale * 0.009), 0, Math.PI * 2);
+          ctx.fill();
+        }
         ctx.restore();
 
         const leftAttach = boardToCanvas(layout, state.robotPose.x - CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
@@ -2601,6 +2723,15 @@
         if (nextContact && state.penPose && !state.activeTrailSegment) {
           appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
         }
+      });
+
+      const penAttachedTopic = new ROSLIB.Topic({
+        ros,
+        name: TOPICS.penAttached,
+        messageType: 'std_msgs/Bool',
+      });
+      penAttachedTopic.subscribe((msg) => {
+        state.penAttached = Boolean(msg.data);
       });
 
       function startRuntimePolling() {

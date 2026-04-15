@@ -8,7 +8,17 @@ from geometry_msgs.msg import PointStamped, Pose2D
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64, String
 from wall_climber_interfaces.msg import CableSetpoint
-from wall_climber.runtime_topics import MANUAL_PEN_MODE_TOPIC, PEN_MODE_AUTO, PEN_MODE_DOWN, PEN_MODE_UP
+from wall_climber.runtime_topics import (
+    GRIP_MODE_AUTO,
+    GRIP_MODE_CLOSED,
+    GRIP_MODE_OPEN,
+    MANUAL_GRIP_MODE_TOPIC,
+    MANUAL_PEN_MODE_TOPIC,
+    PEN_ATTACHED_TOPIC,
+    PEN_MODE_AUTO,
+    PEN_MODE_DOWN,
+    PEN_MODE_UP,
+)
 
 
 _TRANSIENT_QOS = QoSProfile(
@@ -21,12 +31,18 @@ _TRANSIENT_QOS = QoSProfile(
 class CableSupervisorPlugin:
     _BOARD_FRAME_ID = 'board'
     _DEFAULT_ROTATION = [1.0, 0.0, 0.0, 1.5708]
+    _DETACHED_PEN_DEF = 'DETACHED_PEN'
     _SAFE_UNAVAILABLE_GAP = 1.0
 
     def init(self, webots_node, properties):
         self._supervisor = webots_node.robot
         self._target = None
         self._pen_node = None
+        self._pen_holder_node = None
+        self._pen_holder_translation_field = None
+        self._pen_holder_attached_translation = None
+        self._pen_holder_hidden_translation = None
+        self._detached_pen_node = None
         self._left_mount_node = None
         self._right_mount_node = None
         self._root_children = None
@@ -67,6 +83,8 @@ class CableSupervisorPlugin:
             float(properties.get('carriage_attachment_right_x', '0.104')),
             float(properties.get('carriage_attachment_right_y', '-0.075')),
         )
+        self._carriage_width = float(properties.get('carriage_width', '0.29'))
+        self._carriage_height = float(properties.get('carriage_height', '0.20'))
         self._mount_left_local = (
             float(properties.get('cable_mount_left_local_x', str(self._attach_left[0]))),
             float(properties.get('cable_mount_left_local_y', str(-self._attach_left[1]))),
@@ -81,6 +99,15 @@ class CableSupervisorPlugin:
             float(properties.get('pen_offset_x', '0.203')),
             float(properties.get('pen_offset_y', '0.020')),
         )
+        self._pen_length = float(properties.get('pen_length', '0.082'))
+        self._pen_radius = float(properties.get('pen_radius', '0.009'))
+        self._pen_mass = float(properties.get('pen_mass', '0.025'))
+        self._fallback_tip_local_center = (
+            0.0,
+            0.0,
+            float(properties.get('pen_tip_local_z', '-0.011')),
+        )
+        self._fallback_tip_radius = float(properties.get('pen_tip_radius', '0.003'))
         self._initial_center = (
             float(properties.get('initial_center_x', f'{self._board_width * 0.5}')),
             float(properties.get('initial_center_y', '0.95')),
@@ -95,10 +122,22 @@ class CableSupervisorPlugin:
         self._writable_x_max = self._board_width - self._margin_right
         self._writable_y_min = self._margin_top
         self._writable_y_max = self._board_height - self._margin_bottom
+        self._body_safe_x_min = max(self._writable_x_min, (self._carriage_width * 0.5) + self._pen_offset[0])
+        self._body_safe_x_max = min(
+            self._writable_x_max,
+            self._board_width - (self._carriage_width * 0.5) + self._pen_offset[0],
+        )
+        self._body_safe_y_min = max(self._writable_y_min, (self._carriage_height * 0.5) + self._pen_offset[1])
+        self._body_safe_y_max = min(
+            self._writable_y_max,
+            self._board_height - (self._carriage_height * 0.5) + self._pen_offset[1],
+        )
 
         self._latest_setpoint = None
         self._pen_down_requested = False
         self._manual_pen_mode = PEN_MODE_AUTO
+        self._manual_grip_mode = GRIP_MODE_AUTO
+        self._pen_attached = True
         self._pen_contact_latched = False
         self._current_center = self._initial_center
         self._current_pen_target = (
@@ -138,6 +177,7 @@ class CableSupervisorPlugin:
         self._board_info_pub = self._node.create_publisher(String, '/wall_climber/board_info', _TRANSIENT_QOS)
         self._pen_contact_pub = self._node.create_publisher(Bool, '/wall_climber/pen_contact', 1)
         self._pen_gap_pub = self._node.create_publisher(Float64, '/wall_climber/pen_gap', 1)
+        self._pen_attached_pub = self._node.create_publisher(Bool, PEN_ATTACHED_TOPIC, _TRANSIENT_QOS)
         self._status_pub = self._node.create_publisher(String, '/wall_climber/cable_supervisor_status', _TRANSIENT_QOS)
         self._node.create_subscription(
             CableSetpoint,
@@ -149,6 +189,12 @@ class CableSupervisorPlugin:
             String,
             MANUAL_PEN_MODE_TOPIC,
             self._manual_pen_mode_cb,
+            _TRANSIENT_QOS,
+        )
+        self._node.create_subscription(
+            String,
+            MANUAL_GRIP_MODE_TOPIC,
+            self._manual_grip_mode_cb,
             _TRANSIENT_QOS,
         )
 
@@ -172,6 +218,10 @@ class CableSupervisorPlugin:
                 'safe_x_max': self._safe_x_max,
                 'safe_y_min': self._safe_y_min,
                 'safe_y_max': self._safe_y_max,
+                'body_safe_x_min': self._body_safe_x_min,
+                'body_safe_x_max': self._body_safe_x_max,
+                'body_safe_y_min': self._body_safe_y_min,
+                'body_safe_y_max': self._body_safe_y_max,
                 'corner_keepout_radius': self._corner_keepout_radius,
                 'line_height': self._line_height,
                 'anchors': {
@@ -182,6 +232,7 @@ class CableSupervisorPlugin:
             separators=(',', ':'),
         )
         self._publish_board_info()
+        self._publish_pen_attached(self._pen_attached)
         self._set_status('starting')
 
     def _setpoint_cb(self, msg: CableSetpoint):
@@ -198,6 +249,15 @@ class CableSupervisorPlugin:
             self._pen_down_requested = bool(self._latest_setpoint.pen_down) if self._latest_setpoint is not None else False
         else:
             self._pen_down_requested = (mode == PEN_MODE_DOWN)
+
+    def _manual_grip_mode_cb(self, msg: String):
+        mode = str(msg.data).strip().lower()
+        if mode not in (GRIP_MODE_AUTO, GRIP_MODE_CLOSED, GRIP_MODE_OPEN):
+            return
+        self._manual_grip_mode = mode
+        if mode == GRIP_MODE_OPEN:
+            self._log.info('Grip open received; attempting to detach pen.')
+            self._detach_pen()
 
     def _set_status(self, status: str):
         if self._last_status == status:
@@ -246,6 +306,11 @@ class CableSupervisorPlugin:
         msg.data = float(gap)
         self._pen_gap_pub.publish(msg)
 
+    def _publish_pen_attached(self, attached):
+        msg = Bool()
+        msg.data = bool(attached)
+        self._pen_attached_pub.publish(msg)
+
     def _find_target(self):
         root = self._supervisor.getRoot()
         if root is None:
@@ -263,6 +328,10 @@ class CableSupervisorPlugin:
             if name_field.getSFString() == self._target_name:
                 self._target = child
                 self._resolve_cable_mount_nodes()
+                self._resolve_pen_holder_node()
+                self._restore_attached_pen()
+                if self._manual_grip_mode == GRIP_MODE_OPEN:
+                    self._detach_pen()
                 self._log.info(f'Found target robot "{self._target_name}".')
                 return
 
@@ -284,6 +353,211 @@ class CableSupervisorPlugin:
             self._left_mount_node = self._find_named_descendant(self._target, 'left_cable_mount')
         if self._right_mount_node is None:
             self._right_mount_node = self._find_named_descendant(self._target, 'right_cable_mount')
+
+    def _resolve_pen_holder_node(self):
+        self._pen_holder_node = None
+        self._pen_holder_translation_field = None
+        self._pen_holder_attached_translation = None
+        self._pen_holder_hidden_translation = None
+        if self._target is None:
+            return
+        self._pen_holder_node = self._find_named_descendant(self._target, 'pen_holder')
+        if self._pen_holder_node is None:
+            return
+        translation_field = self._field(self._pen_holder_node, 'translation')
+        if translation_field is None:
+            return
+        self._pen_holder_translation_field = translation_field
+        try:
+            attached = translation_field.getSFVec3f()
+        except Exception:
+            return
+        self._pen_holder_attached_translation = [
+            float(attached[0]),
+            float(attached[1]),
+            float(attached[2]),
+        ]
+        self._pen_holder_hidden_translation = [
+            float(attached[0]),
+            float(attached[1]),
+            float(attached[2]) + 0.16,
+        ]
+
+    def _set_pen_holder_translation(self, translation):
+        if self._pen_holder_translation_field is None or translation is None:
+            return False
+        try:
+            self._pen_holder_translation_field.setSFVec3f(
+                [float(translation[0]), float(translation[1]), float(translation[2])]
+            )
+            return True
+        except Exception:
+            return False
+
+    def _restore_attached_pen(self):
+        self._drop_existing_node(self._DETACHED_PEN_DEF)
+        self._detached_pen_node = None
+        self._set_pen_holder_translation(self._pen_holder_attached_translation)
+        self._pen_attached = True
+        self._publish_pen_attached(True)
+
+    def _hide_attached_pen(self):
+        if self._set_pen_holder_translation(self._pen_holder_hidden_translation):
+            return
+        fallback = self._pen_holder_hidden_translation
+        if fallback is not None:
+            self._set_pen_holder_translation(fallback)
+
+    def _format_float(self, value):
+        return f'{float(value):.6f}'
+
+    def _axis_angle_from_orientation(self, orientation):
+        if orientation is None or len(orientation) < 9:
+            return (0.0, 1.0, 0.0, 0.0)
+        r00, r01, r02 = float(orientation[0]), float(orientation[1]), float(orientation[2])
+        r10, r11, r12 = float(orientation[3]), float(orientation[4]), float(orientation[5])
+        r20, r21, r22 = float(orientation[6]), float(orientation[7]), float(orientation[8])
+        trace = r00 + r11 + r22
+        cos_angle = max(-1.0, min(1.0, (trace - 1.0) * 0.5))
+        angle = math.acos(cos_angle)
+        if angle <= 1.0e-7:
+            return (0.0, 1.0, 0.0, 0.0)
+        sin_angle = math.sin(angle)
+        if abs(sin_angle) > 1.0e-5:
+            axis = (
+                (r21 - r12) / (2.0 * sin_angle),
+                (r02 - r20) / (2.0 * sin_angle),
+                (r10 - r01) / (2.0 * sin_angle),
+            )
+        else:
+            axis = (
+                math.sqrt(max(0.0, (r00 + 1.0) * 0.5)),
+                math.sqrt(max(0.0, (r11 + 1.0) * 0.5)),
+                math.sqrt(max(0.0, (r22 + 1.0) * 0.5)),
+            )
+            axis = (
+                math.copysign(axis[0], r21 - r12 if abs(r21 - r12) > 1.0e-8 else 1.0),
+                math.copysign(axis[1], r02 - r20 if abs(r02 - r20) > 1.0e-8 else 1.0),
+                math.copysign(axis[2], r10 - r01 if abs(r10 - r01) > 1.0e-8 else 1.0),
+            )
+        norm = math.sqrt((axis[0] * axis[0]) + (axis[1] * axis[1]) + (axis[2] * axis[2]))
+        if norm <= 1.0e-8:
+            return (0.0, 1.0, 0.0, angle)
+        return (axis[0] / norm, axis[1] / norm, axis[2] / norm, angle)
+
+    def _detached_pen_center_z(self):
+        return max(self._pen_length * 0.5, 0.022)
+
+    def _detached_pen_front_ring_z(self):
+        return 0.006
+
+    def _detached_pen_back_ring_z(self):
+        return max(0.008, self._pen_length - 0.004)
+
+    def _build_detached_pen_node_string(self, translation, rotation):
+        tx, ty, tz = translation
+        rx, ry, rz, angle = rotation
+        pen_center_z = self._detached_pen_center_z()
+        front_ring_z = self._detached_pen_front_ring_z()
+        back_ring_z = self._detached_pen_back_ring_z()
+        band_radius = self._pen_radius + 0.0034
+        tip_cylinder_radius = self._pen_radius * 0.38
+        tip_cylinder_length = 0.011
+        tip_cylinder_z = self._fallback_tip_local_center[2] + self._fallback_tip_radius + (tip_cylinder_length * 0.5)
+        support_radius = max(0.0025, self._pen_radius * 0.45)
+        support_center_z = self._fallback_tip_local_center[2] + self._fallback_tip_radius + 0.0040
+        return (
+            f'DEF {self._DETACHED_PEN_DEF} Solid {{ '
+            f'name "detached_pen" '
+            f'translation {self._format_float(tx)} {self._format_float(ty)} {self._format_float(tz)} '
+            f'rotation {self._format_float(rx)} {self._format_float(ry)} {self._format_float(rz)} {self._format_float(angle)} '
+            'children [ '
+            f'Transform {{ translation 0 0 {self._format_float(front_ring_z)} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.08 0.08 0.10 } } '
+            f'geometry Cylinder {{ radius {self._format_float(band_radius)} height 0.006000 }} }} ] }} '
+            f'Transform {{ translation 0 0 {self._format_float(pen_center_z)} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.88 0.11 0.11 } } '
+            f'geometry Cylinder {{ radius {self._format_float(self._pen_radius)} height {self._format_float(self._pen_length)} }} }} ] }} '
+            f'Transform {{ translation 0 0 {self._format_float(back_ring_z)} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.08 0.08 0.10 } } '
+            f'geometry Cylinder {{ radius {self._format_float(band_radius)} height 0.006000 }} }} ] }} '
+            f'Transform {{ translation 0 0 {self._format_float(support_center_z)} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.14 0.14 0.16 } } '
+            f'geometry Sphere {{ radius {self._format_float(support_radius)} }} }} ] }} '
+            f'Transform {{ translation 0 0 {self._format_float(tip_cylinder_z)} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.07 0.07 0.08 } } '
+            f'geometry Cylinder {{ radius {self._format_float(tip_cylinder_radius)} height {self._format_float(tip_cylinder_length)} }} }} ] }} '
+            f'Transform {{ translation 0 0 {self._format_float(self._fallback_tip_local_center[2])} children [ '
+            'Shape { appearance Appearance { material Material { diffuseColor 0.07 0.07 0.08 } } '
+            f'geometry Sphere {{ radius {self._format_float(self._fallback_tip_radius)} }} }} ] }} '
+            '] '
+            f'boundingObject Group {{ children [ Transform {{ translation 0 0 {self._format_float(pen_center_z)} children [ '
+            f'Cylinder {{ radius {self._format_float(self._pen_radius)} height {self._format_float(self._pen_length)} }} ] }} ] }} '
+            f'physics Physics {{ density -1 mass {self._format_float(self._pen_mass)} }} '
+            '}'
+        )
+
+    def _detach_pen(self):
+        if not self._pen_attached or self._root_children is None:
+            if not self._pen_attached:
+                self._log.warn('Detach requested but pen is already detached.')
+            elif self._root_children is None:
+                self._log.warn('Detach requested but supervisor root children field is unavailable.')
+            return False
+        holder = self._pen_holder_node
+        if holder is None:
+            holder = self._find_named_descendant(self._target, 'pen_holder') if self._target is not None else None
+            self._pen_holder_node = holder
+        if holder is None:
+            self._log.warn('Detach requested but pen_holder node could not be resolved.')
+            return False
+        try:
+            position = holder.getPosition()
+            orientation = holder.getOrientation()
+        except Exception as exc:
+            self._log.warn(f'Detach requested but pen_holder pose could not be read: {exc}')
+            return False
+        if position is None or orientation is None:
+            self._log.warn('Detach requested but pen_holder pose is incomplete.')
+            return False
+        rotation = self._axis_angle_from_orientation(orientation)
+        release_world = self._world_from_local(position, orientation, (0.0, 0.0, 0.004))
+        if release_world is None:
+            release_world = (float(position[0]), float(position[1]), float(position[2]))
+        self._drop_existing_node(self._DETACHED_PEN_DEF)
+        node_str = self._build_detached_pen_node_string(release_world, rotation)
+        try:
+            self._root_children.importMFNodeFromString(-1, node_str)
+        except Exception as exc:
+            self._log.warn(f'Failed to spawn detached pen: {exc}')
+            return False
+        self._detached_pen_node = self._supervisor.getFromDef(self._DETACHED_PEN_DEF)
+        if self._detached_pen_node is None:
+            self._log.warn('Detached pen import completed but Webots did not expose the new node by DEF.')
+            return False
+        self._hide_attached_pen()
+        self._pen_attached = False
+        self._pen_contact_latched = False
+        self._publish_pen_attached(False)
+        self._log.info('Pen released from gripper; detached pen is now under physics.')
+        return True
+
+    def _detached_pen_tip_pose(self):
+        if self._detached_pen_node is None:
+            self._detached_pen_node = self._supervisor.getFromDef(self._DETACHED_PEN_DEF)
+        if self._detached_pen_node is None:
+            return None, self._SAFE_UNAVAILABLE_GAP
+        try:
+            position = self._detached_pen_node.getPosition()
+            orientation = self._detached_pen_node.getOrientation()
+        except Exception:
+            return None, self._SAFE_UNAVAILABLE_GAP
+        tip_center_world = self._world_from_local(position, orientation, self._fallback_tip_local_center)
+        if tip_center_world is None:
+            return None, self._SAFE_UNAVAILABLE_GAP
+        tip_surface_y = tip_center_world[1] + self._fallback_tip_radius
+        gap = self._board_surface_y - tip_surface_y
+        return tip_center_world, gap
 
     def _find_named_descendant(self, node, target_name, depth=0):
         if node is None or depth > 40:
@@ -509,10 +783,15 @@ class CableSupervisorPlugin:
                 f'radius={self._tip_sphere_radius:.5f}'
             )
             return True
+        self._tip_sphere_local_center = self._fallback_tip_local_center
+        self._tip_sphere_radius = self._fallback_tip_radius
+        self._tip_geometry_ready = True
         if not self._tip_geometry_warned:
-            self._log.warn('Pen tip collision sphere is unavailable; using fallback gap semantics.')
+            self._log.warn(
+                'Pen tip collision sphere is unavailable; using configured pen-tip fallback geometry.'
+            )
             self._tip_geometry_warned = True
-        return False
+        return True
 
     def _world_from_local(self, position, orientation, local_point):
         if orientation is None or len(orientation) < 9:
@@ -571,10 +850,6 @@ class CableSupervisorPlugin:
             translation_field.setSFVec3f(list(translation))
         if rotation_field is not None:
             rotation_field.setSFRotation(self._DEFAULT_ROTATION)
-        try:
-            self._target.resetPhysics()
-        except Exception:
-            pass
         try:
             self._target.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         except Exception:
@@ -839,6 +1114,25 @@ class CableSupervisorPlugin:
         self._trail_last_dir = (dir_x, dir_z)
 
     def _update_pen_state(self):
+        if not self._pen_attached:
+            tip_center_world, gap = self._detached_pen_tip_pose()
+            if tip_center_world is None:
+                pen_x, pen_y = self._current_pen_target
+                self._publish_pen_pose(pen_x, pen_y)
+                self._publish_pen_gap(self._SAFE_UNAVAILABLE_GAP)
+            else:
+                pen_board_x, pen_board_y = self._world_to_board(tip_center_world[0], tip_center_world[2])
+                self._publish_pen_pose(pen_board_x, pen_board_y)
+                self._publish_pen_gap(gap)
+            self._publish_pen_contact(False)
+            self._pen_contact_latched = False
+            if self._enable_webots_trail and self._last_pos is not None:
+                self._add_trail_round_cap(self._last_pos[0], self._last_pos[1])
+            self._last_pos = None
+            self._trail_last_dir = None
+            self._trail_last_round_pos = None
+            return
+
         if self._pen_node is None:
             self._pen_node = self._find_pen_tip_node()
             if self._pen_node is not None:

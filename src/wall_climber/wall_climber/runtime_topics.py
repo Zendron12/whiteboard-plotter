@@ -6,6 +6,7 @@ DRAW_PLAN_TOPIC = '/wall_climber/draw_plan'
 CABLE_SETPOINT_TOPIC = '/wall_climber/cable_setpoint'
 CABLE_EXECUTOR_STATUS_TOPIC = '/wall_climber/cable_executor_status'
 CABLE_SUPERVISOR_STATUS_TOPIC = '/wall_climber/cable_supervisor_status'
+PEN_ATTACHED_TOPIC = '/wall_climber/pen_attached'
 
 MODE_OFF = 'off'
 MODE_TEXT = 'text'

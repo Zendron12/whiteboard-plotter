@@ -74,6 +74,7 @@ class PenDefaults:
     mount_length: float
     radius: float
     tip_radius: float
+    tip_local_z: float
     support_radius: float
     slide_velocity: float
     up_position: float
@@ -180,6 +181,38 @@ class SharedConfig:
     def safe_y_max(self) -> float:
         return self.writable_y_max - self.workspace.safety_margin_bottom
 
+    @property
+    def carriage_center_x_min(self) -> float:
+        return self.carriage.width * 0.5
+
+    @property
+    def carriage_center_x_max(self) -> float:
+        return self.board.width - (self.carriage.width * 0.5)
+
+    @property
+    def carriage_center_y_min(self) -> float:
+        return self.carriage.height * 0.5
+
+    @property
+    def carriage_center_y_max(self) -> float:
+        return self.board.height - (self.carriage.height * 0.5)
+
+    @property
+    def carriage_safe_pen_x_min(self) -> float:
+        return self.carriage_center_x_min + self.carriage.pen_offset_x
+
+    @property
+    def carriage_safe_pen_x_max(self) -> float:
+        return self.carriage_center_x_max + self.carriage.pen_offset_x
+
+    @property
+    def carriage_safe_pen_y_min(self) -> float:
+        return self.carriage_center_y_min + self.carriage.pen_offset_y
+
+    @property
+    def carriage_safe_pen_y_max(self) -> float:
+        return self.carriage_center_y_max + self.carriage.pen_offset_y
+
     def writable_bounds(self) -> dict[str, float]:
         return {
             'x_min': self.writable_x_min,
@@ -197,6 +230,53 @@ class SharedConfig:
             'y_min': self.safe_y_min,
             'y_max': self.safe_y_max,
         }
+
+    def carriage_safe_pen_bounds(self) -> dict[str, float]:
+        if (
+            self.carriage_center_x_max <= self.carriage_center_x_min or
+            self.carriage_center_y_max <= self.carriage_center_y_min
+        ):
+            raise RuntimeError('Configured carriage dimensions collapse the board-safe center region.')
+        return {
+            'x_min': self.carriage_safe_pen_x_min,
+            'x_max': self.carriage_safe_pen_x_max,
+            'y_min': self.carriage_safe_pen_y_min,
+            'y_max': self.carriage_safe_pen_y_max,
+        }
+
+    def carriage_safe_writable_bounds(self) -> dict[str, float]:
+        writable = self.writable_bounds()
+        carriage_pen = self.carriage_safe_pen_bounds()
+        bounds = {
+            'x_min': max(writable['x_min'], carriage_pen['x_min']),
+            'x_max': min(writable['x_max'], carriage_pen['x_max']),
+            'y_min': max(writable['y_min'], carriage_pen['y_min']),
+            'y_max': min(writable['y_max'], carriage_pen['y_max']),
+        }
+        if bounds['x_max'] <= bounds['x_min'] or bounds['y_max'] <= bounds['y_min']:
+            raise RuntimeError('Configured carriage-safe writable region collapsed after intersections.')
+        return bounds
+
+    def carriage_safe_workspace_bounds(self) -> dict[str, float]:
+        safe = self.safe_bounds()
+        carriage_pen = self.carriage_safe_pen_bounds()
+        bounds = {
+            'x_min': max(safe['x_min'], carriage_pen['x_min']),
+            'x_max': min(safe['x_max'], carriage_pen['x_max']),
+            'y_min': max(safe['y_min'], carriage_pen['y_min']),
+            'y_max': min(safe['y_max'], carriage_pen['y_max']),
+        }
+        if bounds['x_max'] <= bounds['x_min'] or bounds['y_max'] <= bounds['y_min']:
+            raise RuntimeError('Configured carriage-safe workspace region collapsed after intersections.')
+        return bounds
+
+    def point_keeps_carriage_on_board(self, x: float, y: float) -> bool:
+        center_x = x - self.carriage.pen_offset_x
+        center_y = y - self.carriage.pen_offset_y
+        return (
+            self.carriage_center_x_min <= center_x <= self.carriage_center_x_max and
+            self.carriage_center_y_min <= center_y <= self.carriage_center_y_max
+        )
 
     def point_in_safe_workspace(self, x: float, y: float) -> bool:
         if not (self.safe_x_min <= x <= self.safe_x_max and self.safe_y_min <= y <= self.safe_y_max):
@@ -218,6 +298,8 @@ class SharedConfig:
     def cable_executor_params(self) -> dict[str, Any]:
         safe = self.safe_bounds()
         writable = self.writable_bounds()
+        body_safe_writable = self.carriage_safe_writable_bounds()
+        body_safe_safe = self.carriage_safe_workspace_bounds()
         return {
             'anchor_left_x': self.anchors.left_x,
             'anchor_left_y': self.anchors.left_y,
@@ -243,6 +325,14 @@ class SharedConfig:
             'safe_x_max': safe['x_max'],
             'safe_y_min': safe['y_min'],
             'safe_y_max': safe['y_max'],
+            'body_safe_writable_x_min': body_safe_writable['x_min'],
+            'body_safe_writable_x_max': body_safe_writable['x_max'],
+            'body_safe_writable_y_min': body_safe_writable['y_min'],
+            'body_safe_writable_y_max': body_safe_writable['y_max'],
+            'body_safe_safe_x_min': body_safe_safe['x_min'],
+            'body_safe_safe_x_max': body_safe_safe['x_max'],
+            'body_safe_safe_y_min': body_safe_safe['y_min'],
+            'body_safe_safe_y_max': body_safe_safe['y_max'],
             'corner_keepout_radius': self.workspace.corner_keepout_radius,
             'pen_down_settle_sec': self.pen.settle_sec,
         }

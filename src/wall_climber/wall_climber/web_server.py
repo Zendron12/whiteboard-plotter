@@ -19,7 +19,7 @@ from geometry_msgs.msg import Point
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from wall_climber_interfaces.msg import DrawPlan, DrawPolyline
 
 from wall_climber.runtime_topics import (
@@ -35,6 +35,7 @@ from wall_climber.runtime_topics import (
     MODE_DRAW,
     MODE_OFF,
     MODE_TEXT,
+    PEN_ATTACHED_TOPIC,
     PEN_MODE_AUTO,
     PEN_MODE_DOWN,
     PEN_MODE_UP,
@@ -100,6 +101,7 @@ _REQUIRED_STATUS_KEYS = (
 class WebBackendNode(Node):
     def __init__(self) -> None:
         super().__init__('web_ui_server')
+        self._shared = load_shared_config()
         self.declare_parameter('port', 8080)
         self.declare_parameter('initial_mode', MODE_OFF)
         self.declare_parameter('enable_webots_trail', False)
@@ -117,6 +119,7 @@ class WebBackendNode(Node):
         self._active_mode = requested_mode
         self._manual_pen_mode = PEN_MODE_AUTO
         self._manual_grip_mode = GRIP_MODE_AUTO
+        self._pen_attached = True
 
         self._lock = threading.Lock()
         self._observed_statuses = {key: False for key in _REQUIRED_STATUS_KEYS}
@@ -154,6 +157,7 @@ class WebBackendNode(Node):
             _STATUS_TOPIC_QOS,
         )
         self.create_subscription(String, '/wall_climber/board_info', self._board_info_cb, 10)
+        self.create_subscription(Bool, PEN_ATTACHED_TOPIC, self._pen_attached_cb, _STATUS_TOPIC_QOS)
         self.create_subscription(
             String,
             MANUAL_PEN_MODE_TOPIC,
@@ -230,6 +234,10 @@ class WebBackendNode(Node):
         with self._lock:
             self._manual_grip_mode = mode
 
+    def _pen_attached_cb(self, msg: Bool) -> None:
+        with self._lock:
+            self._pen_attached = bool(msg.data)
+
     def _publish_active_mode(self, mode: str) -> None:
         msg = String()
         msg.data = mode
@@ -253,11 +261,13 @@ class WebBackendNode(Node):
             active_mode = self._active_mode
             manual_pen_mode = self._manual_pen_mode
             manual_grip_mode = self._manual_grip_mode
+            pen_attached = self._pen_attached
         ready = all(observed.values())
         return {
             'active_mode': active_mode,
             'manual_pen_mode': manual_pen_mode,
             'manual_grip_mode': manual_grip_mode,
+            'pen_attached': pen_attached,
             'ready': ready,
             'not_ready_reason': None if ready else 'waiting_for_status_topics',
             'observed_statuses': observed,
@@ -315,6 +325,8 @@ class WebBackendNode(Node):
             raise HTTPException(status_code=409, detail='manual arm test must be set to auto before drawing')
         if snapshot['manual_grip_mode'] != GRIP_MODE_AUTO:
             raise HTTPException(status_code=409, detail='manual grip test must be set to auto before drawing')
+        if not snapshot['pen_attached']:
+            raise HTTPException(status_code=409, detail='robot has no pen attached')
         if snapshot['statuses']['cable_executor_status'] == 'running':
             raise HTTPException(status_code=409, detail='cable executor is busy')
         self._draw_plan_pub.publish(plan)
@@ -324,6 +336,18 @@ class WebBackendNode(Node):
             if self._board_bounds is None:
                 raise HTTPException(status_code=503, detail='board metadata is not ready yet')
             return dict(self._board_bounds)
+
+    def carriage_safe_writable_bounds(self) -> dict[str, float]:
+        try:
+            return self._shared.carriage_safe_writable_bounds()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    def carriage_safe_safe_bounds(self) -> dict[str, float]:
+        try:
+            return self._shared.carriage_safe_workspace_bounds()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 class BackendRuntime:
@@ -679,7 +703,7 @@ def _preview_payload_from_strokes(
     can_commit = placement_result.outside_points == 0 and outside_safe_points == 0
     validation_error = None
     if placement_result.outside_points != 0:
-        validation_error = 'geometry exceeds writable board bounds'
+        validation_error = 'geometry exceeds carriage-safe writable bounds'
     elif outside_safe_points != 0:
         validation_error = 'geometry exits the configured safe cable workspace'
     return {
@@ -748,7 +772,7 @@ def _build_draw_plan_message(
             ):
                 raise HTTPException(
                     status_code=422,
-                    detail=f'draw segment[{index}] extends outside writable board bounds',
+                    detail=f'draw segment[{index}] extends outside carriage-safe writable bounds',
                 )
         if _interpolated_outside_safe_workspace_count((segment.points,), shared_config) != 0:
             raise HTTPException(
@@ -1033,8 +1057,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             minimum=0.1,
             maximum=1.0,
         )
-        writable_bounds = runtime.node.writable_bounds()
-        safe_bounds = shared.safe_bounds()
+        writable_bounds = runtime.node.carriage_safe_writable_bounds()
+        safe_bounds = runtime.node.carriage_safe_safe_bounds()
         text_start = _resolve_text_start_placement(
             raw.get('placement'),
             request_name=request_name,
@@ -1058,13 +1082,13 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         if available_width_m <= 0.0:
             raise HTTPException(
                 status_code=422,
-                detail=f'{request_name}.placement.x leaves no writable width for text',
+                detail=f'{request_name}.placement.x leaves no carriage-safe width for text',
             )
         max_line_width_units = available_width_m / glyph_scale_m
         if max_line_width_units <= 0.25:
             raise HTTPException(
                 status_code=422,
-                detail=f'{request_name}.placement.scale is too large for the remaining writable width',
+                detail=f'{request_name}.placement.scale is too large for the remaining carriage-safe width',
             )
         wrapped_text = _wrap_text_for_line_width(
             normalized_text,
@@ -1233,7 +1257,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             minimum=0.0,
             maximum=2.0,
         )
-        writable_bounds = runtime.node.writable_bounds()
+        writable_bounds = runtime.node.carriage_safe_writable_bounds()
         try:
             placement = normalize_placement(raw.get('placement'), writable_bounds)
         except ValueError as exc:
@@ -1332,7 +1356,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             minimum=1,
             maximum=2048,
         )
-        writable_bounds = runtime.node.writable_bounds()
+        writable_bounds = runtime.node.carriage_safe_writable_bounds()
         try:
             placement = normalize_placement(raw.get('placement'), writable_bounds)
         except ValueError as exc:
@@ -1636,7 +1660,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             _validate_upload(file, content)
             metadata = runtime.store_upload(file, content)
             try:
-                writable_bounds = runtime.node.writable_bounds()
+                writable_bounds = runtime.node.carriage_safe_writable_bounds()
             except HTTPException as exc:
                 return JSONResponse(
                     {

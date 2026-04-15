@@ -39,16 +39,17 @@ carriage:
   initial_center_y: 0.95
 
 pen:
-  mount_length: 0.050
+  mount_length: 0.082
   radius: 0.009
   tip_radius: 0.003
+  tip_local_z: -0.011
   support_radius: 0.004
   slide_velocity: 0.30
   up_position: 0.002
-  down_position: -0.005
-  gripper_velocity: 0.12
+  down_position: -0.0030
+  gripper_velocity: 0.18
   gripper_closed_position: 0.0
-  gripper_open_position: 0.0036
+  gripper_open_position: 0.0075
   settle_sec: 0.03
   contact_engage_gap: 0.0012
   contact_release_gap: 0.0022

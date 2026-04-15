@@ -10,6 +10,7 @@
 
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "wall_climber_interfaces/msg/cable_setpoint.hpp"
 #include "wall_climber_interfaces/msg/draw_plan.hpp"
@@ -60,10 +61,10 @@ class CableDrawExecutor final : public rclcpp::Node {
     declare_parameter("carriage_attachment_left_y", -0.075);
     declare_parameter("carriage_attachment_right_x", 0.104);
     declare_parameter("carriage_attachment_right_y", -0.075);
-    declare_parameter("pen_offset_x", 0.184);
-    declare_parameter("pen_offset_y", 0.026);
-    declare_parameter("initial_pen_x", 3.334);
-    declare_parameter("initial_pen_y", 0.976);
+    declare_parameter("pen_offset_x", 0.203);
+    declare_parameter("pen_offset_y", 0.020);
+    declare_parameter("initial_pen_x", 3.353);
+    declare_parameter("initial_pen_y", 0.970);
     declare_parameter("fixed_theta_rad", 0.0);
     declare_parameter("draw_resample_step_m", 0.012);
     declare_parameter("travel_resample_step_m", 0.025);
@@ -76,6 +77,14 @@ class CableDrawExecutor final : public rclcpp::Node {
     declare_parameter("safe_x_max", 6.14);
     declare_parameter("safe_y_min", 0.32);
     declare_parameter("safe_y_max", 2.82);
+    declare_parameter("body_safe_writable_x_min", 0.348);
+    declare_parameter("body_safe_writable_x_max", 6.20);
+    declare_parameter("body_safe_writable_y_min", 0.12);
+    declare_parameter("body_safe_writable_y_max", 2.90);
+    declare_parameter("body_safe_safe_x_min", 0.348);
+    declare_parameter("body_safe_safe_x_max", 6.14);
+    declare_parameter("body_safe_safe_y_min", 0.32);
+    declare_parameter("body_safe_safe_y_max", 2.82);
     declare_parameter("corner_keepout_radius", 0.36);
     declare_parameter("pen_down_settle_sec", 0.05);
 
@@ -89,6 +98,10 @@ class CableDrawExecutor final : public rclcpp::Node {
       "/wall_climber/internal/active_mode",
       transient_local_qos(),
       std::bind(&CableDrawExecutor::active_mode_callback, this, std::placeholders::_1));
+    pen_attached_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/wall_climber/pen_attached",
+      transient_local_qos(),
+      std::bind(&CableDrawExecutor::pen_attached_callback, this, std::placeholders::_1));
     draw_plan_sub_ = create_subscription<wall_climber_interfaces::msg::DrawPlan>(
       "/wall_climber/draw_plan",
       10,
@@ -125,6 +138,14 @@ class CableDrawExecutor final : public rclcpp::Node {
     double safe_x_max;
     double safe_y_min;
     double safe_y_max;
+    double body_safe_writable_x_min;
+    double body_safe_writable_x_max;
+    double body_safe_writable_y_min;
+    double body_safe_writable_y_max;
+    double body_safe_safe_x_min;
+    double body_safe_safe_x_max;
+    double body_safe_safe_y_min;
+    double body_safe_safe_y_max;
     double corner_keepout_radius;
     double pen_down_settle_sec;
   };
@@ -154,6 +175,14 @@ class CableDrawExecutor final : public rclcpp::Node {
       get_parameter("safe_x_max").as_double(),
       get_parameter("safe_y_min").as_double(),
       get_parameter("safe_y_max").as_double(),
+      get_parameter("body_safe_writable_x_min").as_double(),
+      get_parameter("body_safe_writable_x_max").as_double(),
+      get_parameter("body_safe_writable_y_min").as_double(),
+      get_parameter("body_safe_writable_y_max").as_double(),
+      get_parameter("body_safe_safe_x_min").as_double(),
+      get_parameter("body_safe_safe_x_max").as_double(),
+      get_parameter("body_safe_safe_y_min").as_double(),
+      get_parameter("body_safe_safe_y_max").as_double(),
       std::max(0.0, get_parameter("corner_keepout_radius").as_double()),
       std::max(0.0, get_parameter("pen_down_settle_sec").as_double()),
     };
@@ -168,6 +197,20 @@ class CableDrawExecutor final : public rclcpp::Node {
            point.x <= params.writable_x_max &&
            point.y >= params.writable_y_min &&
            point.y <= params.writable_y_max;
+  }
+
+  bool point_keeps_body_on_board(const Point2D & point, const GeometryParams & params) const {
+    return point.x >= params.body_safe_writable_x_min &&
+           point.x <= params.body_safe_writable_x_max &&
+           point.y >= params.body_safe_writable_y_min &&
+           point.y <= params.body_safe_writable_y_max;
+  }
+
+  bool point_within_body_safe_workspace(const Point2D & point, const GeometryParams & params) const {
+    return point.x >= params.body_safe_safe_x_min &&
+           point.x <= params.body_safe_safe_x_max &&
+           point.y >= params.body_safe_safe_y_min &&
+           point.y <= params.body_safe_safe_y_max;
   }
 
   bool point_within_safe_workspace(const Point2D & point, const GeometryParams & params) const {
@@ -319,6 +362,10 @@ class CableDrawExecutor final : public rclcpp::Node {
           *failure = "draw plan extends outside writable board bounds";
           return false;
         }
+        if (!point_keeps_body_on_board(candidate, params)) {
+          *failure = "draw plan would move the carriage body outside the board frame";
+          return false;
+        }
         raw_points.push_back(candidate);
       }
       const Point2D segment_start = raw_points.front();
@@ -359,15 +406,15 @@ class CableDrawExecutor final : public rclcpp::Node {
 
     // After text execution, park near the lower-left safe corner with pen lifted.
     if (active_mode_ == "text") {
-      const Point2D park_point{params.safe_x_min, params.safe_y_max};
+      const Point2D park_point{params.body_safe_safe_x_min, params.body_safe_safe_y_max};
       if (finite_point(park_point) &&
-          point_within_writable(park_point, params) &&
+          point_keeps_body_on_board(park_point, params) &&
           point_within_safe_workspace(park_point, params) &&
           !approximately_equal(cursor, park_point)) {
-        const Point2D park_waypoint{cursor.x, params.safe_y_max};
+        const Point2D park_waypoint{cursor.x, params.body_safe_safe_y_max};
         const int32_t park_segment_index = static_cast<int32_t>(plan.segments.size());
         if (!approximately_equal(cursor, park_waypoint) &&
-            point_within_writable(park_waypoint, params) &&
+            point_keeps_body_on_board(park_waypoint, params) &&
             point_within_safe_workspace(park_waypoint, params)) {
           std::vector<Point2D> travel_down{cursor, park_waypoint};
           append_resampled_segment(
@@ -407,6 +454,10 @@ class CableDrawExecutor final : public rclcpp::Node {
 
     double traversed_length = 0.0;
     for (std::size_t index = 0; index < sampled_points.size(); ++index) {
+      if (!point_within_body_safe_workspace(sampled_points[index], params)) {
+        *failure = "draw plan would move the carriage body outside the board frame";
+        return false;
+      }
       if (!point_within_safe_workspace(sampled_points[index], params)) {
         *failure = "draw plan exits the configured safe cable workspace";
         return false;
@@ -444,12 +495,24 @@ class CableDrawExecutor final : public rclcpp::Node {
     active_mode_ = msg->data;
   }
 
+  void pen_attached_callback(const std_msgs::msg::Bool::SharedPtr msg) {
+    if (!msg) {
+      return;
+    }
+    pen_attached_ = msg->data;
+  }
+
   void draw_plan_callback(const wall_climber_interfaces::msg::DrawPlan::SharedPtr msg) {
     if (!msg) {
       return;
     }
     if (status_ == "running") {
       RCLCPP_WARN(get_logger(), "Ignoring incoming draw plan because the cable executor is busy.");
+      return;
+    }
+    if (!pen_attached_) {
+      set_status("error");
+      RCLCPP_ERROR(get_logger(), "Rejected draw plan: robot has no pen attached.");
       return;
     }
 
@@ -471,6 +534,14 @@ class CableDrawExecutor final : public rclcpp::Node {
   }
 
   void on_timer() {
+    if (!pen_attached_) {
+      if (!schedule_.empty()) {
+        schedule_.clear();
+        set_status("error");
+        RCLCPP_ERROR(get_logger(), "Stopped execution because the pen is no longer attached.");
+      }
+      return;
+    }
     if (schedule_.empty()) {
       if (status_ == "running") {
         set_status("done");
@@ -503,12 +574,14 @@ class CableDrawExecutor final : public rclcpp::Node {
   rclcpp::Publisher<wall_climber_interfaces::msg::CableSetpoint>::SharedPtr setpoint_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr active_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pen_attached_sub_;
   rclcpp::Subscription<wall_climber_interfaces::msg::DrawPlan>::SharedPtr draw_plan_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::deque<PlannedSample> schedule_;
   Point2D current_pen_point_;
   std::string status_;
   std::string active_mode_{"off"};
+  bool pen_attached_{true};
 };
 
 int main(int argc, char ** argv) {

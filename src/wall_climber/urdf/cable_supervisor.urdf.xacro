@@ -46,6 +46,8 @@
       <carriage_attachment_left_y>${carriage_cfg['attachment_left_y']}</carriage_attachment_left_y>
       <carriage_attachment_right_x>${carriage_cfg['attachment_right_x']}</carriage_attachment_right_x>
       <carriage_attachment_right_y>${carriage_cfg['attachment_right_y']}</carriage_attachment_right_y>
+      <carriage_width>${carriage_cfg['width']}</carriage_width>
+      <carriage_height>${carriage_cfg['height']}</carriage_height>
       <cable_mount_left_local_x>${carriage_cfg['attachment_left_x']}</cable_mount_left_local_x>
       <cable_mount_left_local_y>${cable_mount_left_local_y}</cable_mount_left_local_y>
       <cable_mount_right_local_x>${carriage_cfg['attachment_right_x']}</cable_mount_right_local_x>
@@ -53,6 +55,11 @@
       <cable_mount_local_z>${cable_mount_local_z}</cable_mount_local_z>
       <pen_offset_x>${carriage_cfg['pen_offset_x']}</pen_offset_x>
       <pen_offset_y>${carriage_cfg['pen_offset_y']}</pen_offset_y>
+      <pen_length>${pen_cfg['mount_length']}</pen_length>
+      <pen_radius>${pen_cfg['radius']}</pen_radius>
+      <pen_mass>0.025</pen_mass>
+      <pen_tip_local_z>${pen_cfg['tip_local_z']}</pen_tip_local_z>
+      <pen_tip_radius>${pen_cfg['tip_radius']}</pen_tip_radius>
       <initial_center_x>${carriage_cfg['initial_center_x']}</initial_center_x>
       <initial_center_y>${carriage_cfg['initial_center_y']}</initial_center_y>
       <pen_contact_engage_gap>${pen_cfg['contact_engage_gap']}</pen_contact_engage_gap>
