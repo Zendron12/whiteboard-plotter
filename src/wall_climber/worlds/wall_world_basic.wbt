@@ -1,0 +1,130 @@
+#VRML_SIM R2023b utf8
+
+WorldInfo {
+  info [ "Two-Cable Drawing Robot - Clean Environment" ]
+  title "Two-Cable Drawing Robot Lab"
+  gravity 9.81
+  basicTimeStep 16
+  contactProperties [ ContactProperties { coulombFriction [ 2.5 ] } ]
+}
+
+Viewpoint {
+  orientation -0.05 0.05 0.99 1.6
+  position 5.0 -6.0 3.5
+}
+
+Background {
+  skyColor [
+    0.68 0.74 0.84
+    0.82 0.86 0.92
+    0.94 0.96 0.98
+  ]
+}
+
+DirectionalLight { ambientIntensity 0.55 direction -0.42 0.60 -1 intensity 1.15 castShadows TRUE }
+DirectionalLight { ambientIntensity 0.10 direction 0.55 -0.20 -0.70 intensity 0.45 castShadows FALSE }
+
+# --- Base Floor ---
+Solid {
+  translation 0 0 -0.06
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.54 0.56 0.60
+        roughness 0.97
+        metalness 0
+      }
+      geometry Box {
+        size 12.0 12.0 0.12
+      }
+    }
+  ]
+  name "floor_base"
+  boundingObject Box { size 12.0 12.0 0.12 }
+  locked TRUE
+}
+
+# --- Mounting Wall ---
+Solid {
+  translation 0 2.5 1.75
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.92 0.92 0.88
+        roughness 1
+        metalness 0
+        transparency 0
+      }
+      geometry Box {
+        size 8.0 0.12 3.7
+      }
+    }
+  ]
+  name "front_wall_panel"
+  boundingObject Box { size 8.0 0.12 3.7 }
+  locked TRUE
+}
+
+# --- Whiteboard Frame (dark border) ---
+Solid {
+  translation 0 2.43 1.8
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 roughness 1 metalness 0 transparency 0 } geometry Box { size 6.5 0.025 3.2 } }
+  ]
+  name "whiteboard_frame"
+  boundingObject Box { size 6.5 0.025 3.2 }
+  locked TRUE
+}
+
+# --- Whiteboard Writing Surface (white, on top of frame) ---
+Solid {
+  translation 0 2.415 1.8
+  children [
+    Shape { appearance PBRAppearance { baseColor 1 1 1 roughness 1 metalness 0 transparency 0 } geometry Box { size 6.3 0.01 3.0 } }
+  ]
+  name "whiteboard"
+  boundingObject Box { size 6.3 0.01 3.0 }
+  locked TRUE
+}
+
+# --- Cable Anchor Mounts ---
+Solid {
+  translation -3.15 2.404 3.30
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.95 0.64 0.28
+        roughness 0.42
+        metalness 0.06
+        emissiveColor 0.07 0.03 0.01
+      }
+      geometry Sphere { radius 0.035 }
+    }
+  ]
+  name "left_cable_anchor_mount"
+  locked TRUE
+}
+
+Solid {
+  translation 3.15 2.404 3.30
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.95 0.64 0.28
+        roughness 0.42
+        metalness 0.06
+        emissiveColor 0.07 0.03 0.01
+      }
+      geometry Sphere { radius 0.035 }
+    }
+  ]
+  name "right_cable_anchor_mount"
+  locked TRUE
+}
+
+# --- Cable Supervisor (invisible, no geometry) ---
+Robot {
+  name "cable_supervisor"
+  controller "<extern>"
+  supervisor TRUE
+}
