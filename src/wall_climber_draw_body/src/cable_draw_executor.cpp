@@ -46,6 +46,12 @@ bool approximately_equal(const Point2D & a, const Point2D & b, const double eps 
   return std::abs(a.x - b.x) <= eps && std::abs(a.y - b.y) <= eps;
 }
 
+bool within_closed_interval(
+  const double value, const double minimum, const double maximum, const double eps = 1.0e-6)
+{
+  return value >= (minimum - eps) && value <= (maximum + eps);
+}
+
 }  // namespace
 
 class CableDrawExecutor final : public rclcpp::Node {
@@ -188,29 +194,27 @@ class CableDrawExecutor final : public rclcpp::Node {
   }
 
   bool point_within_writable(const Point2D & point, const GeometryParams & params) const {
-    return point.x >= params.writable_x_min &&
-           point.x <= params.writable_x_max &&
-           point.y >= params.writable_y_min &&
-           point.y <= params.writable_y_max;
+    return within_closed_interval(point.x, params.writable_x_min, params.writable_x_max) &&
+           within_closed_interval(point.y, params.writable_y_min, params.writable_y_max);
   }
 
   bool point_keeps_body_on_board(const Point2D & point, const GeometryParams & params) const {
-    return point.x >= params.body_safe_writable_x_min &&
-           point.x <= params.body_safe_writable_x_max &&
-           point.y >= params.body_safe_writable_y_min &&
-           point.y <= params.body_safe_writable_y_max;
+    return within_closed_interval(
+             point.x, params.body_safe_writable_x_min, params.body_safe_writable_x_max) &&
+           within_closed_interval(
+             point.y, params.body_safe_writable_y_min, params.body_safe_writable_y_max);
   }
 
   bool point_within_body_safe_workspace(const Point2D & point, const GeometryParams & params) const {
-    return point.x >= params.body_safe_safe_x_min &&
-           point.x <= params.body_safe_safe_x_max &&
-           point.y >= params.body_safe_safe_y_min &&
-           point.y <= params.body_safe_safe_y_max;
+    return within_closed_interval(
+             point.x, params.body_safe_safe_x_min, params.body_safe_safe_x_max) &&
+           within_closed_interval(
+             point.y, params.body_safe_safe_y_min, params.body_safe_safe_y_max);
   }
 
   bool point_within_safe_workspace(const Point2D & point, const GeometryParams & params) const {
-    if (point.x < params.safe_x_min || point.x > params.safe_x_max ||
-        point.y < params.safe_y_min || point.y > params.safe_y_max) {
+    if (!within_closed_interval(point.x, params.safe_x_min, params.safe_x_max) ||
+        !within_closed_interval(point.y, params.safe_y_min, params.safe_y_max)) {
       return false;
     }
     const double left_dist = distance_xy(point, params.anchor_left);

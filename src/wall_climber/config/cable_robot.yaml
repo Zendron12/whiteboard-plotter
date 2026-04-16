@@ -39,15 +39,15 @@ carriage:
   initial_center_y: 0.95
 
 pen:
-  mount_length: 0.080
+  mount_length: 0.0890
   radius: 0.009
   tip_radius: 0.003
-  tip_local_z: -0.0064
+  tip_local_z: -0.0067
   support_radius: 0.004
-  slide_velocity: 0.30
+  slide_velocity: 0.35
   up_position: 0.0000
-  down_position: -0.0038
-  settle_sec: 0.03
+  down_position: -0.0064
+  settle_sec: 0.02
   contact_engage_gap: 0.0012
   contact_release_gap: 0.0022
 
@@ -56,7 +56,7 @@ text_layout:
   right_margin: 0.020
   top_margin: 0.020
   bottom_margin: 0.020
-  glyph_height: 0.102
+  glyph_height: 0.094
   letter_spacing: 0.013
   word_spacing: 0.046
   uppercase_advance_scale: 0.84

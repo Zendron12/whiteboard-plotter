@@ -499,8 +499,12 @@ def _resolve_text_start_placement(
     safe_bounds: dict[str, float],
     text_layout_defaults,
 ) -> VectorPlacement:
-    default_x = safe_bounds['x_min'] + float(text_layout_defaults.left_margin)
-    default_y = safe_bounds['y_min'] + float(text_layout_defaults.top_margin)
+    min_x = safe_bounds['x_min'] + float(text_layout_defaults.left_margin)
+    max_x = safe_bounds['x_max'] - float(text_layout_defaults.right_margin)
+    min_y = safe_bounds['y_min'] + float(text_layout_defaults.top_margin)
+    max_y = safe_bounds['y_max'] - float(text_layout_defaults.bottom_margin)
+    default_x = min_x
+    default_y = min_y
     default_scale = 1.0
     if raw_placement is None:
         return VectorPlacement(x=default_x, y=default_y, scale=default_scale)
@@ -524,6 +528,8 @@ def _resolve_text_start_placement(
         minimum=0.05,
         maximum=10.0,
     )
+    x = min(max(x, min_x), max_x)
+    y = min(max(y, min_y), max_y)
     return VectorPlacement(x=x, y=y, scale=scale)
 
 

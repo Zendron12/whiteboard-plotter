@@ -436,12 +436,59 @@ class CableSupervisorPlugin:
             pass
         return None
 
+    def _find_named_descendant_contains(self, node, name_fragment, depth=0):
+        if node is None or depth > 50:
+            return None
+        lowered_fragment = str(name_fragment).lower()
+        try:
+            name_field = node.getField('name')
+            if name_field is not None:
+                name_value = str(name_field.getSFString())
+                if lowered_fragment in name_value.lower():
+                    return node
+        except Exception:
+            pass
+        try:
+            children_field = node.getField('children')
+            if children_field is not None:
+                for index in range(children_field.getCount()):
+                    child = children_field.getMFNode(index)
+                    result = self._find_named_descendant_contains(child, lowered_fragment, depth + 1)
+                    if result is not None:
+                        return result
+        except Exception:
+            pass
+        try:
+            endpoint_field = node.getField('endPoint')
+            if endpoint_field is not None:
+                endpoint = endpoint_field.getSFNode()
+                result = self._find_named_descendant_contains(endpoint, lowered_fragment, depth + 1)
+                if result is not None:
+                    return result
+        except Exception:
+            pass
+        return None
+
     def _find_pen_tip_node(self):
         endpoint = self._find_joint_endpoint(self._target, 'pen_slide_joint')
         if endpoint is None:
             return None
-        tip_node = self._find_named_descendant(endpoint, 'pen_tip_stage')
-        return tip_node if tip_node is not None else endpoint
+        # Prefer explicit tip links when they are present in the converted Webots tree.
+        for candidate_name in ('pen_tip_stage', 'pen_tip', 'tip_stage', 'tip_link'):
+            tip_node = self._find_named_descendant(endpoint, candidate_name)
+            if tip_node is not None:
+                return tip_node
+        for candidate_fragment in ('pen_tip', 'tip_stage', 'tip'):
+            tip_node = self._find_named_descendant_contains(endpoint, candidate_fragment)
+            if tip_node is not None:
+                self._log.info(
+                    f'Using pen-tip node discovered by partial name match "{candidate_fragment}".'
+                )
+                return tip_node
+        self._log.warn(
+            'Could not find a named pen-tip node; falling back to pen-slide endpoint geometry search.'
+        )
+        return endpoint
 
     def _field(self, node, name):
         try:
@@ -486,9 +533,11 @@ class CableSupervisorPlugin:
             return False
         return self._field(node, 'height') is None and self._field(node, 'size') is None
 
-    def _find_tip_sphere_geometry(self, node, accumulated_translation=(0.0, 0.0, 0.0)):
+    def _collect_tip_sphere_geometries(self, node, accumulated_translation=(0.0, 0.0, 0.0), out=None):
+        if out is None:
+            out = []
         if node is None:
-            return None
+            return out
         local_translation = accumulated_translation
         translation = self._field_sfvec3f(node, 'translation')
         if translation is not None:
@@ -497,31 +546,40 @@ class CableSupervisorPlugin:
         if self._is_sphere_node(node):
             radius = self._field_sffloat(node, 'radius')
             if radius is not None:
-                return local_translation, radius
+                out.append((local_translation, radius))
 
         geometry_node = self._field_sfnode(node, 'geometry')
         if geometry_node is not None:
-            result = self._find_tip_sphere_geometry(geometry_node, local_translation)
-            if result is not None:
-                return result
+            self._collect_tip_sphere_geometries(geometry_node, local_translation, out)
 
         child_node = self._field_sfnode(node, 'child')
         if child_node is not None:
-            result = self._find_tip_sphere_geometry(child_node, local_translation)
-            if result is not None:
-                return result
+            self._collect_tip_sphere_geometries(child_node, local_translation, out)
+
+        endpoint_node = self._field_sfnode(node, 'endPoint')
+        if endpoint_node is not None:
+            self._collect_tip_sphere_geometries(endpoint_node, local_translation, out)
+
+        bounding_object = self._field_sfnode(node, 'boundingObject')
+        if bounding_object is not None:
+            self._collect_tip_sphere_geometries(bounding_object, local_translation, out)
 
         children_field = self._field(node, 'children')
         if children_field is not None:
             try:
                 for index in range(children_field.getCount()):
                     child = children_field.getMFNode(index)
-                    result = self._find_tip_sphere_geometry(child, local_translation)
-                    if result is not None:
-                        return result
+                    self._collect_tip_sphere_geometries(child, local_translation, out)
             except Exception:
                 pass
-        return None
+        return out
+
+    def _select_tip_sphere_geometry(self, candidates):
+        if not candidates:
+            return None
+        # In the pen local frame, more negative Z is closer to the board.
+        # Tie-break on smaller radius so a support caster sphere is deprioritized.
+        return min(candidates, key=lambda item: (item[0][2], item[1]))
 
     def _resolve_tip_geometry(self):
         if self._tip_geometry_ready:
@@ -529,14 +587,18 @@ class CableSupervisorPlugin:
         if self._pen_node is None:
             return False
         bounding_object = self._field_sfnode(self._pen_node, 'boundingObject')
-        resolved = self._find_tip_sphere_geometry(bounding_object) if bounding_object is not None else None
+        candidates = self._collect_tip_sphere_geometries(bounding_object) if bounding_object is not None else []
+        if not candidates:
+            candidates = self._collect_tip_sphere_geometries(self._pen_node)
+        resolved = self._select_tip_sphere_geometry(candidates)
         if resolved is not None:
             self._tip_sphere_local_center, self._tip_sphere_radius = resolved
             self._tip_geometry_ready = True
             self._tip_geometry_warned = False
             self._log.info(
                 f'Resolved pen tip sphere: center={self._tip_sphere_local_center} '
-                f'radius={self._tip_sphere_radius:.5f}'
+                f'radius={self._tip_sphere_radius:.5f} '
+                f'(candidates={len(candidates)})'
             )
             return True
         self._tip_sphere_local_center = self._fallback_tip_local_center

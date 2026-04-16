@@ -332,14 +332,12 @@
 
     .board-stage {
       position: relative;
-      width: min(100%, 1540px);
-      min-height: 620px;
+      width: 100%;
+      min-height: 720px;
       border-radius: var(--radius-xl);
       overflow: hidden;
       border: 1px solid rgba(24, 34, 43, 0.08);
-      background:
-        linear-gradient(180deg, rgba(234, 241, 246, 0.6), rgba(246, 239, 232, 0.65)),
-        #f7f3ed;
+      background: #ffffff;
     }
 
     #board-canvas {
@@ -390,7 +388,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
-      width: min(100%, 1540px);
+      width: 100%;
     }
 
     .legend-chip {
@@ -416,7 +414,7 @@
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
-      width: min(100%, 1540px);
+      width: 100%;
     }
 
     .live-card {
@@ -847,7 +845,7 @@
       }
 
       .board-stage {
-        min-height: 360px;
+        min-height: 420px;
       }
     }
   </style>
@@ -903,7 +901,7 @@
         <div class="workspace-head">
           <div class="workspace-title">
             <h2>Board Workspace</h2>
-            <p>Top-left origin, safe and writable zones, live telemetry, preview strokes, and the live carriage path in one centered workspace.</p>
+            <p>Centered white writing surface for the robot's actual reachable area, with live robot, pen, and local trail only.</p>
           </div>
           <div class="micro-meta">
             <div id="preview-chip" class="micro-pill"><strong>Preview</strong> none</div>
@@ -924,9 +922,8 @@
           </div>
 
           <div class="board-legend">
-            <div class="legend-chip"><span class="legend-mark" style="background:#36566f;"></span> Safe workspace</div>
-            <div class="legend-chip"><span class="legend-mark" style="background:#d48b63;"></span> Writable zone</div>
-            <div class="legend-chip"><span class="legend-mark" style="background:#c95f38;"></span> Vector preview</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#ffffff; border:1px solid rgba(24,34,43,0.22);"></span> Reachable writing area</div>
+            <div class="legend-chip"><span class="legend-mark" style="background:#36566f;"></span> Safe travel area</div>
             <div class="legend-chip"><span class="legend-mark" style="background:#7f8c99;"></span> Carriage</div>
             <div class="legend-chip"><span class="legend-mark" style="background:#1a2026;"></span> Pen / trail</div>
           </div>
@@ -1134,7 +1131,7 @@
     </main>
 
     <div class="footer">
-      Board canvas is now the primary browser view: writable area, safe area, anchors, preview, telemetry, and local trail are rendered together without relying on Webots trail output.
+      The board canvas now focuses on the actual reachable writing area, live telemetry, and the local browser trail.
     </div>
   </div>
 
@@ -1154,10 +1151,14 @@
         writable_y_max: 2.9,
         safe_x_min: 0.16,
         safe_x_max: 6.14,
-        safe_y_min: 0.32,
+        safe_y_min: 0.22,
         safe_y_max: 2.82,
+        body_safe_x_min: 0.348,
+        body_safe_x_max: 6.2,
+        body_safe_y_min: 0.12,
+        body_safe_y_max: 2.9,
         line_height: 0.14,
-        corner_keepout_radius: 0.36,
+        corner_keepout_radius: 0.24,
         anchors: {
           left: { x: 0, y: 0 },
           right: { x: 6.3, y: 0 },
@@ -1361,19 +1362,45 @@
         };
       }
 
+      function carriageSafeWritableBounds() {
+        const board = currentBoard();
+        return {
+          xMin: Number.isFinite(Number(board.body_safe_x_min)) ? Number(board.body_safe_x_min) : Number(board.writable_x_min),
+          xMax: Number.isFinite(Number(board.body_safe_x_max)) ? Number(board.body_safe_x_max) : Number(board.writable_x_max),
+          yMin: Number.isFinite(Number(board.body_safe_y_min)) ? Number(board.body_safe_y_min) : Number(board.writable_y_min),
+          yMax: Number.isFinite(Number(board.body_safe_y_max)) ? Number(board.body_safe_y_max) : Number(board.writable_y_max),
+        };
+      }
+
+      function displayBounds() {
+        return carriageSafeWritableBounds();
+      }
+
+      function textSafeBounds() {
+        const safe = safeBounds();
+        const carriageSafe = carriageSafeWritableBounds();
+        return {
+          xMin: Math.max(safe.xMin, carriageSafe.xMin),
+          xMax: Math.min(safe.xMax, carriageSafe.xMax),
+          yMin: Math.max(safe.yMin, carriageSafe.yMin),
+          yMax: Math.min(safe.yMax, carriageSafe.yMax),
+        };
+      }
+
       function defaultPlacementForTool(tool) {
         const writable = writableBounds();
-        const safe = safeBounds();
         if (tool === 'text') {
+          const textSafe = textSafeBounds();
           return {
-            x: safe.xMin + 0.02,
-            y: safe.yMin + 0.02,
+            x: textSafe.xMin + 0.02,
+            y: textSafe.yMin + 0.02,
             scale: 1,
           };
         }
+        const display = displayBounds();
         return {
-          x: writable.xMin + ((writable.xMax - writable.xMin) * 0.5),
-          y: writable.yMin + ((writable.yMax - writable.yMin) * 0.5),
+          x: display.xMin + ((display.xMax - display.xMin) * 0.5),
+          y: display.yMin + ((display.yMax - display.yMin) * 0.5),
           scale: 1,
         };
       }
@@ -1382,8 +1409,8 @@
         if (state.activeTool === 'text') {
           dom.placementXLabel.textContent = 'Start X (m)';
           dom.placementYLabel.textContent = 'Start Y (m)';
-          dom.placementCopy.textContent = 'For text, X and Y define the top-left writing origin inside the board-safe region.';
-          dom.placementHelper.textContent = 'Text preview and commit use the board-aware text path. New lines are wrapped by the backend within the safe writing width.';
+          dom.placementCopy.textContent = 'For text, X and Y define the top-left writing origin inside the carriage-safe writing region.';
+          dom.placementHelper.textContent = 'Text preview and commit validate against the writable region that also keeps the carriage body inside the board.';
         } else {
           dom.placementXLabel.textContent = 'Center X (m)';
           dom.placementYLabel.textContent = 'Center Y (m)';
@@ -1543,21 +1570,19 @@
       }
 
       function updateSummary() {
-        const board = currentBoard();
-        const bodySafe = Number.isFinite(Number(board.body_safe_x_min))
-          ? ` · carriage-safe ${formatRange(board.body_safe_x_min, board.body_safe_x_max)} / ${formatRange(board.body_safe_y_min, board.body_safe_y_max)}`
-          : '';
-        dom.summaryBoard.textContent = `${board.width.toFixed(2)}m × ${board.height.toFixed(2)}m · writable ${formatRange(board.writable_x_min, board.writable_x_max)} / ${formatRange(board.writable_y_min, board.writable_y_max)}${bodySafe}`;
+        const display = displayBounds();
+        dom.summaryBoard.textContent = `Reachable writing area ${(
+          display.xMax - display.xMin
+        ).toFixed(2)}m × ${(
+          display.yMax - display.yMin
+        ).toFixed(2)}m · x ${formatRange(display.xMin, display.xMax)} / y ${formatRange(display.yMin, display.yMax)}`;
       }
 
       function updateMetrics() {
         const board = currentBoard();
-        dom.metricBoard.textContent = `${board.width.toFixed(3)} × ${board.height.toFixed(3)} m`;
-        if (Number.isFinite(Number(board.body_safe_x_min))) {
-          dom.metricWritable.textContent = `${formatRange(board.body_safe_x_min, board.body_safe_x_max)} · ${formatRange(board.body_safe_y_min, board.body_safe_y_max)}`;
-        } else {
-          dom.metricWritable.textContent = `${formatRange(board.writable_x_min, board.writable_x_max)} · ${formatRange(board.writable_y_min, board.writable_y_max)}`;
-        }
+        const display = displayBounds();
+        dom.metricBoard.textContent = `${(display.xMax - display.xMin).toFixed(3)} × ${(display.yMax - display.yMin).toFixed(3)} m`;
+        dom.metricWritable.textContent = `${formatRange(display.xMin, display.xMax)} · ${formatRange(display.yMin, display.yMax)}`;
         if (state.robotPose) {
           dom.metricRobot.textContent = `${state.robotPose.x.toFixed(3)}, ${state.robotPose.y.toFixed(3)} · θ ${state.robotPose.theta.toFixed(3)}`;
         } else {
@@ -1695,6 +1720,10 @@
             safe_x_max: Number(parsed.safe_x_max),
             safe_y_min: Number(parsed.safe_y_min),
             safe_y_max: Number(parsed.safe_y_max),
+            body_safe_x_min: safeNumber(parsed.body_safe_x_min),
+            body_safe_x_max: safeNumber(parsed.body_safe_x_max),
+            body_safe_y_min: safeNumber(parsed.body_safe_y_min),
+            body_safe_y_max: safeNumber(parsed.body_safe_y_max),
             line_height: safeNumber(parsed.line_height),
             corner_keepout_radius: safeNumber(parsed.corner_keepout_radius),
             anchors: parsed.anchors || null,
@@ -1764,17 +1793,20 @@
 
       function computeLayout() {
         const board = currentBoard();
+        const view = displayBounds();
+        const viewWidth = Math.max(1.0e-6, view.xMax - view.xMin);
+        const viewHeight = Math.max(1.0e-6, view.yMax - view.yMin);
         const stageWidth = Math.max(320, dom.boardStage.clientWidth);
-        const maxHeight = Math.max(420, window.innerHeight - 170);
-        const desiredHeight = Math.min(maxHeight, Math.max(340, stageWidth / (board.width / board.height)));
+        const maxHeight = Math.max(560, window.innerHeight - 140);
+        const desiredHeight = Math.min(maxHeight, Math.max(520, stageWidth / (viewWidth / viewHeight)));
         dom.boardStage.style.height = `${Math.round(desiredHeight)}px`;
 
-        const padding = 28;
+        const padding = 16;
         const drawableWidth = stageWidth - (padding * 2);
         const drawableHeight = desiredHeight - (padding * 2);
-        const scale = Math.min(drawableWidth / board.width, drawableHeight / board.height);
-        const boardPixelWidth = board.width * scale;
-        const boardPixelHeight = board.height * scale;
+        const scale = Math.min(drawableWidth / viewWidth, drawableHeight / viewHeight);
+        const boardPixelWidth = viewWidth * scale;
+        const boardPixelHeight = viewHeight * scale;
         const originX = (stageWidth - boardPixelWidth) * 0.5;
         const originY = (desiredHeight - boardPixelHeight) * 0.5;
 
@@ -1782,6 +1814,7 @@
           cssWidth: stageWidth,
           cssHeight: desiredHeight,
           board,
+          view,
           scale,
           originX,
           originY,
@@ -1805,8 +1838,8 @@
 
       function boardToCanvas(layout, x, y) {
         return {
-          x: layout.originX + (x * layout.scale),
-          y: layout.originY + (y * layout.scale),
+          x: layout.originX + ((x - layout.view.xMin) * layout.scale),
+          y: layout.originY + ((y - layout.view.yMin) * layout.scale),
         };
       }
 
@@ -1823,13 +1856,10 @@
 
       function drawBackground(layout) {
         const gradient = ctx.createLinearGradient(0, 0, 0, layout.cssHeight);
-        gradient.addColorStop(0, '#dce6ee');
-        gradient.addColorStop(1, '#eef2f6');
+        gradient.addColorStop(0, '#eef3f6');
+        gradient.addColorStop(1, '#f7f9fb');
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, layout.cssWidth, layout.cssHeight);
-
-        ctx.fillStyle = 'rgba(90, 105, 122, 0.08)';
-        ctx.fillRect(0, layout.originY + (layout.boardPixelHeight * 0.2), layout.cssWidth, layout.boardPixelHeight * 0.65);
       }
 
       function drawBoardBase(layout) {
@@ -1838,12 +1868,12 @@
         const w = layout.boardPixelWidth;
         const h = layout.boardPixelHeight;
 
-        roundedRect(ctx, x - 10, y - 10, w + 20, h + 20, 28);
-        ctx.fillStyle = '#515a62';
+        roundedRect(ctx, x - 8, y - 8, w + 16, h + 16, 26);
+        ctx.fillStyle = '#dfe6ec';
         ctx.fill();
 
         roundedRect(ctx, x, y, w, h, 22);
-        ctx.fillStyle = '#f6f2ea';
+        ctx.fillStyle = '#ffffff';
         ctx.fill();
 
         ctx.save();
@@ -1851,12 +1881,12 @@
         ctx.clip();
 
         const subtle = ctx.createLinearGradient(x, y, x + w, y + h);
-        subtle.addColorStop(0, 'rgba(255,255,255,0.82)');
-        subtle.addColorStop(1, 'rgba(226,230,236,0.5)');
+        subtle.addColorStop(0, 'rgba(255,255,255,0.98)');
+        subtle.addColorStop(1, 'rgba(246,248,250,0.92)');
         ctx.fillStyle = subtle;
         ctx.fillRect(x, y, w, h);
 
-        ctx.strokeStyle = 'rgba(54, 86, 111, 0.08)';
+        ctx.strokeStyle = 'rgba(54, 86, 111, 0.05)';
         ctx.lineWidth = 1;
         const step = Math.max(12, layout.scale * 0.2);
         for (let ix = x; ix <= x + w; ix += step) {
@@ -1875,25 +1905,9 @@
       }
 
       function drawZones(layout) {
-        const board = currentBoard();
-        const writableTopLeft = boardToCanvas(layout, board.writable_x_min, board.writable_y_min);
-        const writableBottomRight = boardToCanvas(layout, board.writable_x_max, board.writable_y_max);
-        const safeTopLeft = boardToCanvas(layout, board.safe_x_min, board.safe_y_min);
-        const safeBottomRight = boardToCanvas(layout, board.safe_x_max, board.safe_y_max);
-
-        roundedRect(
-          ctx,
-          writableTopLeft.x,
-          writableTopLeft.y,
-          writableBottomRight.x - writableTopLeft.x,
-          writableBottomRight.y - writableTopLeft.y,
-          16
-        );
-        ctx.fillStyle = 'rgba(212, 139, 99, 0.08)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(201, 95, 56, 0.22)';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
+        const safe = textSafeBounds();
+        const safeTopLeft = boardToCanvas(layout, safe.xMin, safe.yMin);
+        const safeBottomRight = boardToCanvas(layout, safe.xMax, safe.yMax);
 
         roundedRect(
           ctx,
@@ -1910,94 +1924,6 @@
         ctx.lineWidth = 1.4;
         ctx.stroke();
         ctx.setLineDash([]);
-
-        if (
-          Number.isFinite(Number(board.body_safe_x_min)) &&
-          Number.isFinite(Number(board.body_safe_x_max)) &&
-          Number.isFinite(Number(board.body_safe_y_min)) &&
-          Number.isFinite(Number(board.body_safe_y_max))
-        ) {
-          const bodySafeTopLeft = boardToCanvas(layout, board.body_safe_x_min, board.body_safe_y_min);
-          const bodySafeBottomRight = boardToCanvas(layout, board.body_safe_x_max, board.body_safe_y_max);
-          roundedRect(
-            ctx,
-            bodySafeTopLeft.x,
-            bodySafeTopLeft.y,
-            bodySafeBottomRight.x - bodySafeTopLeft.x,
-            bodySafeBottomRight.y - bodySafeTopLeft.y,
-            12
-          );
-          ctx.fillStyle = 'rgba(24, 34, 43, 0.045)';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(24, 34, 43, 0.18)';
-          ctx.setLineDash([4, 6]);
-          ctx.lineWidth = 1.2;
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-
-        if (board.anchors && Number.isFinite(Number(board.corner_keepout_radius))) {
-          ['left', 'right'].forEach((side) => {
-            const anchor = board.anchors[side];
-            if (!anchor) {
-              return;
-            }
-            const point = boardToCanvas(layout, Number(anchor.x), Number(anchor.y));
-            ctx.beginPath();
-            ctx.arc(point.x, point.y, Number(board.corner_keepout_radius) * layout.scale, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(186, 70, 87, 0.06)';
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(186, 70, 87, 0.14)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-          });
-        }
-      }
-
-      function drawAnchors(layout) {
-        const board = currentBoard();
-        if (!board.anchors) {
-          return;
-        }
-        ['left', 'right'].forEach((side) => {
-          const anchor = board.anchors[side];
-          if (!anchor) {
-            return;
-          }
-          const point = boardToCanvas(layout, Number(anchor.x), Number(anchor.y));
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, 8.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(201, 95, 56, 0.14)';
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, 5.4, 0, Math.PI * 2);
-          ctx.fillStyle = '#2d2420';
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
-          ctx.fillStyle = '#efb48f';
-          ctx.fill();
-        });
-      }
-
-      function drawCables(layout) {
-        const board = currentBoard();
-        if (!state.robotPose || !board.anchors) {
-          return;
-        }
-        const leftAnchor = boardToCanvas(layout, Number(board.anchors.left.x), Number(board.anchors.left.y));
-        const rightAnchor = boardToCanvas(layout, Number(board.anchors.right.x), Number(board.anchors.right.y));
-        const leftAttach = boardToCanvas(layout, state.robotPose.x - CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
-        const rightAttach = boardToCanvas(layout, state.robotPose.x + CARRIAGE.attachX, state.robotPose.y - CARRIAGE.attachY);
-
-        ctx.strokeStyle = 'rgba(117, 54, 36, 0.82)';
-        ctx.lineWidth = Math.max(1.1, Math.min(2.0, layout.scale * 0.006));
-        ctx.beginPath();
-        ctx.moveTo(leftAnchor.x, leftAnchor.y);
-        ctx.lineTo(leftAttach.x, leftAttach.y);
-        ctx.moveTo(rightAnchor.x, rightAnchor.y);
-        ctx.lineTo(rightAttach.x, rightAttach.y);
-        ctx.stroke();
       }
 
       function drawRobot(layout) {
@@ -2136,35 +2062,6 @@
         });
       }
 
-      function drawPreview(layout) {
-        const preview = state.vectorPreview && state.vectorPreview.preview;
-        if (!preview || !Array.isArray(preview.strokes) || preview.strokes.length === 0) {
-          return;
-        }
-
-        ctx.save();
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = previewStrokeColor();
-        ctx.lineWidth = Math.max(1.0, Math.min(2.8, layout.scale * 0.009));
-
-        preview.strokes.forEach((stroke) => {
-          if (!Array.isArray(stroke) || stroke.length < 2) {
-            return;
-          }
-          const first = boardToCanvas(layout, Number(stroke[0][0]), Number(stroke[0][1]));
-          ctx.beginPath();
-          ctx.moveTo(first.x, first.y);
-          for (let index = 1; index < stroke.length; index += 1) {
-            const point = boardToCanvas(layout, Number(stroke[index][0]), Number(stroke[index][1]));
-            ctx.lineTo(point.x, point.y);
-          }
-          ctx.stroke();
-        });
-
-        ctx.restore();
-      }
-
       function drawTrail(layout) {
         if (state.trailSegments.length === 0) {
           return;
@@ -2206,26 +2103,15 @@
         ctx.stroke();
       }
 
-      function drawOriginMarker(layout) {
-        const origin = boardToCanvas(layout, 0, 0);
-        ctx.fillStyle = 'rgba(24, 34, 43, 0.82)';
-        ctx.font = '12px var(--mono)';
-        ctx.fillText('(0,0)', origin.x + 14, origin.y + 16);
-      }
-
       function renderBoard() {
         const layout = computeLayout();
         resizeCanvas(layout);
         drawBackground(layout);
         drawBoardBase(layout);
         drawZones(layout);
-        drawAnchors(layout);
-        drawCables(layout);
-        drawPreview(layout);
         drawTrail(layout);
         drawRobot(layout);
         drawPen(layout);
-        drawOriginMarker(layout);
       }
 
       function render() {
@@ -2262,7 +2148,7 @@
           return null;
         }
         const endX = Number(bounds.x_max);
-        const safe = safeBounds();
+        const textSafe = textSafeBounds();
         const commitRequest = payload && payload.commit_request ? payload.commit_request : {};
         const glyphHeightM = Number(commitRequest.glyph_height_m);
         const lineHeightScale = Number(commitRequest.line_height);
@@ -2271,10 +2157,10 @@
           Number.isFinite(glyphHeightM) && glyphHeightM > 0 && Number.isFinite(lineHeightScale) && lineHeightScale > 0
         ) ? glyphHeightM * lineHeightScale : fallbackLineHeight;
 
-        const startX = safe.xMin + 0.02;
-        const maxX = safe.xMax - 0.02;
-        const startY = safe.yMin + 0.02;
-        const maxY = safe.yMax - 0.02;
+        const startX = textSafe.xMin + 0.02;
+        const maxX = textSafe.xMax - 0.02;
+        const startY = textSafe.yMin + 0.02;
+        const maxY = textSafe.yMax - 0.02;
         const minRemainingWidth = Math.max(0.025, 0.3 * lineAdvance);
 
         let nextX = endX + 0.013;
