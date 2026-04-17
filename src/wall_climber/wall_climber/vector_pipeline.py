@@ -27,7 +27,6 @@ from matplotlib.path import Path as MplPath
 from matplotlib.textpath import TextPath, TextToPath
 
 from wall_climber.shared_config import load_shared_config
-from wall_climber.text_stick_font import get_glyph as get_stick_glyph
 from wall_climber.text_vector_font import get_glyph as get_legacy_glyph
 
 
@@ -36,10 +35,21 @@ _EPS = 1.0e-9
 _PACKAGE_NAME = 'wall_climber'
 _BUNDLED_FONT_NAME = 'DejaVuSans.ttf'
 _RELIEF_SVG_FONT_NAME = 'ReliefSingleLineSVG-Regular.svg'
+_HERSHEY_SVG_FONT_NAME = 'HersheySans1.svg'
 _RELIEF_SVG_MIN_CURVE_TOLERANCE = 0.005
 _DEFAULT_TEXT_CURVE_TOLERANCE = 0.008
 _MAX_TEXT_CONTOUR_POINTS = 512
 _MAX_TEXT_TOTAL_POINTS = 12000
+_TEXT_WRAP_RIGHT_MARGIN_EPS_M = 0.003
+_GLYPH_LOCAL_PADDING_EM = 0.012
+_TEXT_FONT_SOURCE_RELIEF = 'relief_singleline'
+_TEXT_FONT_SOURCE_HERSHEY = 'hershey_sans_1'
+_VALID_TEXT_FONT_SOURCES = frozenset(
+    {
+        _TEXT_FONT_SOURCE_RELIEF,
+        _TEXT_FONT_SOURCE_HERSHEY,
+    }
+)
 _LOG = logging.getLogger(__name__)
 _LOGGED_TEXT_FONT_SOURCES: set[str] = set()
 _LOGGED_TEXT_SOURCE_POLICIES: set[str] = set()
@@ -49,7 +59,7 @@ _LOGGED_TEXT_UPWARD_BIAS: set[float] = set()
 
 
 @dataclass(frozen=True)
-class ReliefSvgFont:
+class SvgStrokeFont:
     glyphs: dict[str, tuple[str | None, float]]
     default_advance: float
     cap_height: float
@@ -111,6 +121,7 @@ class TextGlyphOutline:
     strokes: tuple[tuple[_Point, ...], ...]
     bbox: VectorBounds
     advance: float
+    source: str
 
 
 class TextDensityError(ValueError):
@@ -136,6 +147,85 @@ def _normalized_text_spacing_defaults() -> tuple[float, float, float]:
     return letter_spacing_em, word_spacing_em, uppercase_advance_scale
 
 
+def _normalize_text_font_source(font_source: str | None) -> str | None:
+    if font_source is None:
+        return None
+    normalized = str(font_source).strip().lower()
+    if not normalized:
+        return None
+    if normalized not in _VALID_TEXT_FONT_SOURCES:
+        raise ValueError(
+            f'font_source must be one of {sorted(_VALID_TEXT_FONT_SOURCES)}.'
+        )
+    return normalized
+
+
+def _normalize_text_glyph_template(template: TextGlyphTemplate) -> TextGlyphTemplate:
+    global _LOGGED_TEXT_NORMALIZATION
+    if template.bbox is None or not template.strokes:
+        return template
+    if template.source not in {'relief_svg', 'hershey_svg', 'text_vector_font_fallback'}:
+        return template
+
+    x_shift = _GLYPH_LOCAL_PADDING_EM - float(template.bbox.x_min)
+    if abs(x_shift) <= _EPS:
+        return template
+
+    normalized_strokes = tuple(
+        tuple((point[0] + x_shift, point[1]) for point in stroke)
+        for stroke in template.strokes
+    )
+    normalized_bbox = _strokes_bounds(normalized_strokes)
+    preserved_advance = max(float(normalized_bbox.x_max), float(template.advance) + x_shift)
+    letter_spacing_em, _, uppercase_advance_scale = _normalized_text_spacing_defaults()
+    is_uppercase_letter = (
+        len(template.text) == 1
+        and template.text.isalpha()
+        and template.text.upper() == template.text
+        and template.text.lower() != template.text
+    )
+    normalized_advance = preserved_advance
+    if not is_uppercase_letter:
+        tight_advance = float(normalized_bbox.x_max) + _GLYPH_LOCAL_PADDING_EM
+        normalized_advance = max(float(normalized_bbox.x_max), min(preserved_advance, tight_advance))
+    elif uppercase_advance_scale > _EPS:
+        min_uppercase_advance = (
+            float(normalized_bbox.x_max)
+            + _GLYPH_LOCAL_PADDING_EM
+            - letter_spacing_em
+        ) / uppercase_advance_scale
+        normalized_advance = max(normalized_advance, min_uppercase_advance)
+    if not _LOGGED_TEXT_NORMALIZATION:
+        _LOGGED_TEXT_NORMALIZATION = True
+        _LOG.info(
+            'Text glyph normalization enabled for line-font sources with glyph_local_padding_em=%.4f and advance compensation.',
+            _GLYPH_LOCAL_PADDING_EM,
+        )
+    return TextGlyphTemplate(
+        text=template.text,
+        strokes=normalized_strokes,
+        bbox=normalized_bbox,
+        advance=normalized_advance,
+        source=template.source,
+    )
+
+
+@lru_cache(maxsize=1)
+def _text_wrap_line_width_units() -> float:
+    shared = load_shared_config()
+    glyph_height = max(float(shared.text_layout.glyph_height), 1.0e-6)
+
+    # Keep only the left-side margin for text wrapping.
+    # Do not reserve an artificial right text margin anymore.
+    usable_width_m = (
+        float(shared.board.width)
+        - float(shared.text_layout.left_margin)
+    )
+    if usable_width_m <= _EPS:
+        raise ValueError('Configured text layout width collapsed after margins were applied.')
+    return usable_width_m / glyph_height
+
+
 def _effective_text_advance_em(
     char: str,
     *,
@@ -150,6 +240,63 @@ def _effective_text_advance_em(
     if char.isalpha() and char.upper() == char and char.lower() != char:
         advance *= uppercase_advance_scale
     return advance + letter_spacing_em
+
+
+def _text_token_layout_entries(
+    token: str,
+    *,
+    font_family: str | None,
+    font_source: str | None,
+    curve_tolerance: float,
+    simplify_epsilon: float,
+    letter_spacing_em: float,
+    word_spacing_em: float,
+    uppercase_advance_scale: float,
+) -> tuple[tuple[str, TextGlyphTemplate, float], ...]:
+    entries: list[tuple[str, TextGlyphTemplate, float]] = []
+    for char in token:
+        template = get_text_glyph_template(
+            char,
+            font_family=font_family,
+            font_source=font_source,
+            curve_tolerance=curve_tolerance,
+            simplify_epsilon=simplify_epsilon,
+        )
+        advance_em = _effective_text_advance_em(
+            char,
+            base_advance=template.advance,
+            letter_spacing_em=letter_spacing_em,
+            word_spacing_em=word_spacing_em,
+            uppercase_advance_scale=uppercase_advance_scale,
+        )
+        entries.append((char, template, advance_em))
+    return tuple(entries)
+
+
+def _measure_text_token_width(
+    token: str,
+    *,
+    font_family: str | None,
+    font_source: str | None,
+    curve_tolerance: float,
+    simplify_epsilon: float,
+    letter_spacing_em: float,
+    word_spacing_em: float,
+    uppercase_advance_scale: float,
+) -> float:
+    return sum(
+        entry[2]
+        for entry in _text_token_layout_entries(
+            token,
+            font_family=font_family,
+            font_source=font_source,
+            curve_tolerance=curve_tolerance,
+            simplify_epsilon=simplify_epsilon,
+            letter_spacing_em=letter_spacing_em,
+            word_spacing_em=word_spacing_em,
+            uppercase_advance_scale=uppercase_advance_scale,
+        )
+    )
 
 
 def _distance(a: _Point, b: _Point) -> float:
@@ -395,7 +542,11 @@ def _resample_stroke_preserving_features(
 
 def _apply_text_vector_cleanup(
     strokes: tuple[tuple[_Point, ...], ...],
+    *,
+    glyph_source: str | None = None,
 ) -> tuple[tuple[_Point, ...], ...]:
+    if glyph_source in {'relief_svg', 'hershey_svg'}:
+        return strokes
     defaults = _text_vector_cleanup_defaults()
     simplify_epsilon = max(0.0, float(defaults.simplify_epsilon_m))
     resample_step_m = max(0.0, float(defaults.resample_step_m))
@@ -454,8 +605,8 @@ def _log_text_source_policy_once(policy: str) -> None:
     _LOGGED_TEXT_SOURCE_POLICIES.add(policy)
     if policy == 'relief_svg':
         _LOG.info('Text vector source policy: Relief SingleLine SVG font.')
-    elif policy == 'stick_font':
-        _LOG.info('Text vector source policy: stick font fallback.')
+    elif policy == 'hershey_svg':
+        _LOG.info('Text vector source policy: Hershey Sans 1-stroke SVG font.')
     elif policy == 'outline_font':
         _LOG.info('Text vector source policy: bundled outline font.')
     elif policy == 'legacy_fallback':
@@ -512,6 +663,10 @@ def _log_text_font_source_once(source: str) -> None:
         _LOG.info('Text vector font source: Relief SingleLine SVG (installed).')
     elif source == 'relief_svg_source':
         _LOG.info('Text vector font source: Relief SingleLine SVG (source tree).')
+    elif source == 'hershey_svg_installed':
+        _LOG.info('Text vector font source: Hershey Sans 1-stroke SVG (installed).')
+    elif source == 'hershey_svg_source':
+        _LOG.info('Text vector font source: Hershey Sans 1-stroke SVG (source tree).')
     elif source == 'bundled_installed':
         _LOG.info('Text vector font source: bundled installed font.')
     elif source == 'bundled_source':
@@ -550,19 +705,24 @@ def _bundled_font_candidates() -> tuple[tuple[str, Path], ...]:
     return tuple(candidates)
 
 
-def _relief_svg_font_candidates() -> tuple[tuple[str, Path], ...]:
+def _svg_stroke_font_candidates(
+    *,
+    font_name: str,
+    installed_source: str,
+    source_tree_source: str,
+) -> tuple[tuple[str, Path], ...]:
     candidates: list[tuple[str, Path]] = []
     try:
         installed = (
             Path(get_package_share_directory(_PACKAGE_NAME))
             / 'fonts'
-            / _RELIEF_SVG_FONT_NAME
+            / font_name
         )
-        candidates.append(('relief_svg_installed', installed))
+        candidates.append((installed_source, installed))
     except PackageNotFoundError:
         pass
-    source_tree = Path(__file__).resolve().parents[1] / 'fonts' / _RELIEF_SVG_FONT_NAME
-    candidates.append(('relief_svg_source', source_tree))
+    source_tree = Path(__file__).resolve().parents[1] / 'fonts' / font_name
+    candidates.append((source_tree_source, source_tree))
     return tuple(candidates)
 
 
@@ -584,19 +744,34 @@ def _parse_svg_float(value: str | None, default: float = 0.0) -> float:
     return float(cleaned)
 
 
-@lru_cache(maxsize=1)
-def _load_relief_svg_font() -> ReliefSvgFont:
-    """Load the Relief SingleLine SVG font and cache it."""
+@lru_cache(maxsize=4)
+def _load_svg_stroke_font(font_source: str) -> SvgStrokeFont:
+    normalized_source = _normalize_text_font_source(font_source)
+    if normalized_source == _TEXT_FONT_SOURCE_RELIEF:
+        font_name = _RELIEF_SVG_FONT_NAME
+        installed_source = 'relief_svg_installed'
+        source_tree_source = 'relief_svg_source'
+    elif normalized_source == _TEXT_FONT_SOURCE_HERSHEY:
+        font_name = _HERSHEY_SVG_FONT_NAME
+        installed_source = 'hershey_svg_installed'
+        source_tree_source = 'hershey_svg_source'
+    else:
+        raise ValueError(f'Unsupported SVG stroke font source: {font_source!r}')
+
     svg_path: Path | None = None
-    source = 'relief_svg_source'
-    for candidate_source, candidate_path in _relief_svg_font_candidates():
+    source = source_tree_source
+    for candidate_source, candidate_path in _svg_stroke_font_candidates(
+        font_name=font_name,
+        installed_source=installed_source,
+        source_tree_source=source_tree_source,
+    ):
         if candidate_path.is_file():
             svg_path = candidate_path
             source = candidate_source
             break
     if svg_path is None:
         raise FileNotFoundError(
-            f'Unable to locate Relief SVG font {_RELIEF_SVG_FONT_NAME!r} '
+            f'Unable to locate SVG stroke font {font_name!r} '
             'in package share or source tree.'
         )
     root = ET.parse(svg_path).getroot()
@@ -631,10 +806,10 @@ def _load_relief_svg_font() -> ReliefSvgFont:
         )
     _log_text_font_source_once(source)
     _LOG.info(
-        'Relief SVG font loaded: %d glyphs, cap_height=%.1f, source=%s',
+        'SVG stroke font loaded: %d glyphs, cap_height=%.1f, source=%s',
         len(glyphs), cap_height, source,
     )
-    return ReliefSvgFont(
+    return SvgStrokeFont(
         glyphs=glyphs,
         default_advance=default_advance,
         cap_height=cap_height,
@@ -642,18 +817,21 @@ def _load_relief_svg_font() -> ReliefSvgFont:
     )
 
 
-def _parse_svg_path_d(
+def _parse_svg_font_path_d(
     path_data: str,
     cap_height: float,
     curve_tolerance: float,
 ) -> tuple[tuple[_Point, ...], ...]:
     """Parse an SVG path 'd' attribute into polyline strokes.
 
-    SVG font glyphs use an inverted Y axis (Y grows upward), so we
-    flip the Y coordinate by dividing by cap_height and negating.
-    The result is in normalized coordinates where cap-height = 1.0
-    and Y grows downward (matching our stroke convention where
-    (0,0) is top-left and (1,1) is bottom-right of the em square).
+    SVG font glyphs should be normalized into the same glyph space used by the
+    legacy line-font templates:
+      - X grows to the right
+      - Y grows upward
+      - cap height = 1.0
+
+    The line layout stage later applies the single Y inversion needed for
+    top-to-bottom text placement on the board, so we must NOT flip Y here.
     """
     token_pattern = re.compile(
         r'[MmLlHhVvCcSsQqZz]|[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?'
@@ -673,7 +851,7 @@ def _parse_svg_path_d(
     last_cubic_control: _Point | None = None
 
     def norm(x: float, y: float) -> _Point:
-        return (x / cap_height, 1.0 - (y / cap_height))
+        return (x / cap_height, y / cap_height)
 
     def flush_stroke() -> None:
         nonlocal stroke
@@ -875,39 +1053,77 @@ def _parse_svg_path_d(
     return tuple(tuple(s) for s in strokes)
 
 
-def _glyph_template_from_relief_svg(
+@lru_cache(maxsize=4)
+def _svg_stroke_font_render_scale(font_source: str) -> float:
+    normalized_source = _normalize_text_font_source(font_source)
+    if normalized_source != _TEXT_FONT_SOURCE_HERSHEY:
+        return 1.0
+
+    font = _load_svg_stroke_font(normalized_source)
+    reference = font.glyphs.get('H')
+    if reference is None or not reference[0]:
+        return 1.0
+
+    try:
+        raw_strokes = _parse_svg_font_path_d(
+            reference[0],
+            1.0,
+            _RELIEF_SVG_MIN_CURVE_TOLERANCE,
+        )
+        reference_height = _strokes_bounds(raw_strokes).height
+    except Exception as exc:
+        _LOG.debug('Hershey SVG reference-height detection failed: %s', exc)
+        return 1.0
+
+    if reference_height <= _EPS:
+        return 1.0
+    return min(1.0, max(0.1, float(font.cap_height) / float(reference_height)))
+
+
+def _glyph_template_from_svg_stroke_font(
     char: str,
     *,
+    font_source: str,
     curve_tolerance: float,
     simplify_epsilon: float,
 ) -> TextGlyphTemplate:
-    font = _load_relief_svg_font()
+    normalized_source = _normalize_text_font_source(font_source)
+    font = _load_svg_stroke_font(normalized_source or _TEXT_FONT_SOURCE_RELIEF)
     if char not in font.glyphs:
         raise KeyError(char)
     path_data, raw_advance = font.glyphs[char]
     normalized_advance = float(raw_advance) / font.cap_height
+    glyph_source = (
+        'relief_svg' if normalized_source == _TEXT_FONT_SOURCE_RELIEF else 'hershey_svg'
+    )
+    render_scale = _svg_stroke_font_render_scale(normalized_source or _TEXT_FONT_SOURCE_RELIEF)
     if char.isspace() or not path_data:
         return TextGlyphTemplate(
             text=char,
             strokes=tuple(),
             bbox=None,
-            advance=normalized_advance,
-            source='relief_svg',
+            advance=normalized_advance * render_scale,
+            source=glyph_source,
         )
     effective_curve_tolerance = max(curve_tolerance, _RELIEF_SVG_MIN_CURVE_TOLERANCE)
-    raw_strokes = _parse_svg_path_d(
+    raw_strokes = _parse_svg_font_path_d(
         path_data,
         font.cap_height,
         effective_curve_tolerance,
     )
+    if render_scale != 1.0:
+        raw_strokes = tuple(
+            tuple((point[0] * render_scale, point[1] * render_scale) for point in stroke)
+            for stroke in raw_strokes
+        )
     if simplify_epsilon > 0.0:
         raw_strokes = _simplify_strokes(raw_strokes, simplify_epsilon)
     return TextGlyphTemplate(
         text=char,
         strokes=raw_strokes,
         bbox=_strokes_bounds(raw_strokes) if raw_strokes else None,
-        advance=normalized_advance,
-        source='relief_svg',
+        advance=normalized_advance * render_scale,
+        source=glyph_source,
     )
 
 
@@ -983,19 +1199,6 @@ def _glyph_template_from_textpath(
     )
 
 
-def _glyph_template_from_stick_font(char: str) -> TextGlyphTemplate:
-    glyph = get_stick_glyph(char)
-    strokes = tuple(tuple((point[0], point[1]) for point in stroke) for stroke in glyph.strokes)
-    bbox = _strokes_bounds(strokes) if strokes else None
-    return TextGlyphTemplate(
-        text=char,
-        strokes=strokes,
-        bbox=bbox,
-        advance=float(glyph.advance),
-        source='stick_font',
-    )
-
-
 def _glyph_template_from_legacy_fallback(char: str) -> TextGlyphTemplate:
     glyph = get_legacy_glyph(char)
     strokes = tuple(tuple((point[0], point[1]) for point in stroke) for stroke in glyph.strokes)
@@ -1013,9 +1216,31 @@ def _glyph_template_from_legacy_fallback(char: str) -> TextGlyphTemplate:
 def _cached_text_glyph_template(
     char: str,
     font_family: str | None,
+    font_source: str | None,
     curve_tolerance: float,
     simplify_epsilon: float,
 ) -> TextGlyphTemplate:
+    def _is_problematic_uppercase(candidate: str) -> bool:
+        return (
+            len(candidate) == 1
+            and candidate.isalpha()
+            and candidate.upper() == candidate
+            and candidate.lower() != candidate
+        )
+
+    if font_source is not None:
+        try:
+            return _glyph_template_from_svg_stroke_font(
+                char,
+                font_source=font_source,
+                curve_tolerance=curve_tolerance,
+                simplify_epsilon=simplify_epsilon,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f'text glyph {char!r} is not available in font_source {font_source!r}.'
+            ) from exc
+
     if font_family is not None:
         try:
             return _glyph_template_from_textpath(
@@ -1030,10 +1255,11 @@ def _cached_text_glyph_template(
             _log_text_fallback_once(str(exc))
             return _glyph_template_from_legacy_fallback(char)
 
-    # 1. Try Relief SingleLine SVG font first (best quality single-line strokes)
+    # 1. Try Relief SingleLine SVG font first
     try:
-        return _glyph_template_from_relief_svg(
+        return _glyph_template_from_svg_stroke_font(
             char,
+            font_source=_TEXT_FONT_SOURCE_RELIEF,
             curve_tolerance=curve_tolerance,
             simplify_epsilon=simplify_epsilon,
         )
@@ -1042,13 +1268,26 @@ def _cached_text_glyph_template(
     except Exception as exc:
         _LOG.debug('Relief SVG glyph %r load failed: %s', char, exc)
 
-    # 2. Stick font fallback for basic characters
-    try:
-        return _glyph_template_from_stick_font(char)
-    except KeyError:
-        pass
+    # 2. For uppercase letters, prefer TextPath before the legacy fallback.
+    if _is_problematic_uppercase(char):
+        try:
+            template = _glyph_template_from_textpath(
+                char,
+                font_family=None,
+                curve_tolerance=curve_tolerance,
+                simplify_epsilon=simplify_epsilon,
+            )
+            _LOG.info(
+                'Uppercase glyph %r: using TextPath fallback before legacy fallback.',
+                char,
+            )
+            return template
+        except TextDensityError:
+            raise
+        except Exception as exc:
+            _LOG.debug('TextPath uppercase glyph %r load failed: %s', char, exc)
 
-    # 3. DejaVu outline font via matplotlib TextPath
+    # 3. For non-uppercase cases, or if uppercase TextPath failed, try TextPath here
     try:
         return _glyph_template_from_textpath(
             char,
@@ -1067,21 +1306,25 @@ def get_text_glyph_template(
     char: str,
     *,
     font_family: str | None = None,
+    font_source: str | None = None,
     curve_tolerance: float = _DEFAULT_TEXT_CURVE_TOLERANCE,
     simplify_epsilon: float = 0.0,
 ) -> TextGlyphTemplate:
     if not isinstance(char, str) or len(char) != 1:
         raise ValueError('char must be a single-character string.')
+    normalized_font_source = _normalize_text_font_source(font_source)
     template = _cached_text_glyph_template(
         normalize_text_for_text_mode(char),
         font_family.strip() if isinstance(font_family, str) and font_family.strip() else None,
+        normalized_font_source,
         float(curve_tolerance),
         float(simplify_epsilon),
     )
+    template = _normalize_text_glyph_template(template)
     if template.source == 'relief_svg':
         _log_text_source_policy_once('relief_svg')
-    elif template.source == 'stick_font':
-        _log_text_source_policy_once('stick_font')
+    elif template.source == 'hershey_svg':
+        _log_text_source_policy_once('hershey_svg')
     elif template.source == 'text_vector_font_fallback':
         _log_text_source_policy_once('legacy_fallback')
     else:
@@ -1201,54 +1444,90 @@ def _vectorize_text_grouped_with_templates(
     text: str,
     *,
     font_family: str | None,
+    font_source: str | None,
     line_height: float,
     curve_tolerance: float,
     simplify_epsilon: float,
+    max_line_width_units: float | None,
 ) -> tuple[TextGlyphOutline, ...]:
     letter_spacing_em, word_spacing_em, uppercase_advance_scale = _normalized_text_spacing_defaults()
+    usable_line_width_em = (
+        float(max_line_width_units)
+        if max_line_width_units is not None
+        else _text_wrap_line_width_units()
+    )
+    if usable_line_width_em <= _EPS:
+        raise ValueError('Configured text line width must be positive.')
     glyphs: list[TextGlyphOutline] = []
     y_offset = 0.0
-    for line_index, raw_line in enumerate(text.split('\n')):
+    line_index = 0
+    for raw_line in text.split('\n'):
         cursor_x = 0.0
         word_index = -1
-        in_word = False
-        for char in raw_line:
-            template = get_text_glyph_template(
-                char,
+        line_has_content = False
+        pending_space_width = 0.0
+        tokens = re.findall(r'\S+|\s+', raw_line)
+        for token in tokens:
+            if token.isspace():
+                if not line_has_content:
+                    continue
+                pending_space_width += _measure_text_token_width(
+                    token,
+                    font_family=font_family,
+                    font_source=font_source,
+                    curve_tolerance=curve_tolerance,
+                    simplify_epsilon=simplify_epsilon,
+                    letter_spacing_em=letter_spacing_em,
+                    word_spacing_em=word_spacing_em,
+                    uppercase_advance_scale=uppercase_advance_scale,
+                )
+                continue
+
+            word_entries = _text_token_layout_entries(
+                token,
                 font_family=font_family,
+                font_source=font_source,
                 curve_tolerance=curve_tolerance,
                 simplify_epsilon=simplify_epsilon,
-            )
-            advance_em = _effective_text_advance_em(
-                char,
-                base_advance=template.advance,
                 letter_spacing_em=letter_spacing_em,
                 word_spacing_em=word_spacing_em,
                 uppercase_advance_scale=uppercase_advance_scale,
             )
-            if char.isspace():
-                cursor_x += advance_em
-                in_word = False
-                continue
-            if not in_word:
-                word_index += 1
-                in_word = True
-            translated_strokes = tuple(
-                tuple((point[0] + cursor_x, y_offset - point[1]) for point in stroke)
-                for stroke in template.strokes
-            )
-            if translated_strokes:
-                glyphs.append(
-                    TextGlyphOutline(
-                        line_index=line_index,
-                        word_index=max(word_index, 0),
-                        text=char,
-                        strokes=translated_strokes,
-                        bbox=_strokes_bounds(translated_strokes),
-                        advance=advance_em,
-                    )
+            word_width = sum(entry[2] for entry in word_entries)
+            pending_width = word_width + (pending_space_width if line_has_content else 0.0)
+            if line_has_content and (cursor_x + pending_width) > usable_line_width_em:
+                line_index += 1
+                y_offset += line_height
+                cursor_x = 0.0
+                word_index = -1
+                line_has_content = False
+                pending_space_width = 0.0
+            elif line_has_content and pending_space_width > 0.0:
+                cursor_x += pending_space_width
+                pending_space_width = 0.0
+
+            word_index += 1
+            for char, template, advance_em in word_entries:
+                translated_strokes = tuple(
+                    tuple((point[0] + cursor_x, y_offset - point[1]) for point in stroke)
+                    for stroke in template.strokes
                 )
-            cursor_x += advance_em
+                if translated_strokes:
+                    glyphs.append(
+                        TextGlyphOutline(
+                            line_index=line_index,
+                            word_index=max(word_index, 0),
+                            text=char,
+                            strokes=translated_strokes,
+                            bbox=_strokes_bounds(translated_strokes),
+                            advance=advance_em,
+                            source=template.source,
+                        )
+                    )
+                cursor_x += advance_em
+            line_has_content = True
+            pending_space_width = 0.0
+        line_index += 1
         y_offset += line_height
     glyph_tuple = tuple(glyphs)
     _guard_grouped_text_density(glyph_tuple)
@@ -1259,9 +1538,11 @@ def vectorize_text_grouped(
     text: str,
     *,
     font_family: str | None = None,
+    font_source: str | None = None,
     line_height: float = 1.35,
     curve_tolerance: float = _DEFAULT_TEXT_CURVE_TOLERANCE,
     simplify_epsilon: float = 0.0,
+    max_line_width_units: float | None = None,
 ) -> tuple[TextGlyphOutline, ...]:
     normalized_text = normalize_text_for_text_mode(text)
     if not text.strip():
@@ -1269,9 +1550,11 @@ def vectorize_text_grouped(
     return _vectorize_text_grouped_with_templates(
         normalized_text,
         font_family=font_family.strip() if isinstance(font_family, str) and font_family.strip() else None,
+        font_source=_normalize_text_font_source(font_source),
         line_height=line_height,
         curve_tolerance=curve_tolerance,
         simplify_epsilon=simplify_epsilon,
+        max_line_width_units=max_line_width_units,
     )
 
 
@@ -1279,16 +1562,20 @@ def vectorize_text(
     text: str,
     *,
     font_family: str | None = None,
+    font_source: str | None = None,
     line_height: float = 1.35,
     curve_tolerance: float = _DEFAULT_TEXT_CURVE_TOLERANCE,
     simplify_epsilon: float = 0.0,
+    max_line_width_units: float | None = None,
 ) -> tuple[tuple[_Point, ...], ...]:
     glyphs = vectorize_text_grouped(
         text,
         font_family=font_family,
+        font_source=font_source,
         line_height=line_height,
         curve_tolerance=curve_tolerance,
         simplify_epsilon=simplify_epsilon,
+        max_line_width_units=max_line_width_units,
     )
     all_strokes = tuple(stroke for glyph in glyphs for stroke in glyph.strokes)
     if not all_strokes:
@@ -1792,12 +2079,15 @@ def place_grouped_text_on_board(
             tuple((point[0], point[1] + y_bias) for point in stroke)
             for stroke in placed_strokes
         )
-    cleaned_strokes = _apply_text_vector_cleanup(placed_strokes)
     placed_glyphs: list[TextGlyphOutline] = []
     offset = 0
     for glyph, stroke_count in zip(glyphs, stroke_counts):
-        glyph_strokes = tuple(cleaned_strokes[offset:offset + stroke_count])
+        glyph_strokes = tuple(placed_strokes[offset:offset + stroke_count])
         offset += stroke_count
+        glyph_strokes = _apply_text_vector_cleanup(
+            glyph_strokes,
+            glyph_source=glyph.source,
+        )
         placed_glyphs.append(
             TextGlyphOutline(
                 line_index=glyph.line_index,
@@ -1806,6 +2096,7 @@ def place_grouped_text_on_board(
                 strokes=glyph_strokes,
                 bbox=_strokes_bounds(glyph_strokes),
                 advance=glyph.advance,
+                source=glyph.source,
             )
         )
     placed_tuple = tuple(placed_glyphs)

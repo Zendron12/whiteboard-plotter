@@ -1,6 +1,8 @@
 import os
+import re
 import socket
 import shutil
+import subprocess
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -50,6 +52,76 @@ def _select_webots_port(requested_port: int, *, attempts: int = 32) -> int:
     )
 
 
+def _active_x_displays() -> list[str]:
+    try:
+        result = subprocess.run(
+            ['ps', '-eo', 'args='],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return []
+
+    displays: list[str] = []
+    for line in result.stdout.splitlines():
+        if not any(server in line for server in ('Xorg', 'Xwayland', 'Xvfb')):
+            continue
+        for match in re.finditer(r'(?<!\d)(:\d+)\b', line):
+            display = match.group(1)
+            if display not in displays:
+                displays.append(display)
+    return displays
+
+
+def _candidate_xauthority_paths() -> list[str]:
+    candidates: list[str] = []
+
+    def add_candidate(path: str | None) -> None:
+        if not path:
+            return
+        candidate = Path(path)
+        if candidate.is_file():
+            resolved = str(candidate)
+            if resolved not in candidates:
+                candidates.append(resolved)
+
+    add_candidate(os.environ.get('XAUTHORITY'))
+
+    runtime_dir = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime_dir:
+        for path in sorted(Path(runtime_dir).glob('xauth_*')):
+            add_candidate(str(path))
+
+    run_user_root = Path('/run/user')
+    if run_user_root.is_dir():
+        for path in sorted(run_user_root.glob('*/xauth_*')):
+            add_candidate(str(path))
+
+    return candidates
+
+
+def _resolve_webots_display_environment() -> dict[str, str]:
+    active_displays = _active_x_displays()
+    if not active_displays:
+        return {}
+
+    current_display = os.environ.get('DISPLAY')
+    if current_display in active_displays:
+        selected_display = current_display
+    elif ':0' in active_displays:
+        selected_display = ':0'
+    else:
+        selected_display = active_displays[0]
+
+    environment = {'DISPLAY': selected_display}
+    for path in _candidate_xauthority_paths():
+        environment['XAUTHORITY'] = path
+        break
+
+    return environment
+
+
 def generate_launch_description():
     package_name = 'wall_climber'
     pkg_dir = get_package_share_directory(package_name)
@@ -61,11 +133,19 @@ def generate_launch_description():
         raise RuntimeError(
             f'WEBOTS_PORT must be an integer, got {requested_webots_port!r}.'
         ) from exc
+    display_environment = _resolve_webots_display_environment()
     webots_port = str(selected_webots_port)
     if webots_port != requested_webots_port:
         print(
             f'[wall_climber.launch] Requested Webots port {requested_webots_port} is busy; '
             f'using {webots_port} instead.'
+        )
+    selected_display = display_environment.get('DISPLAY')
+    current_display = os.environ.get('DISPLAY')
+    if selected_display and selected_display != current_display:
+        print(
+            f'[wall_climber.launch] DISPLAY {current_display!r} is not active; '
+            f'using {selected_display!r} for Webots.'
         )
     webots_runtime_root = Path('/tmp') / 'webots' / os.environ.get('USER', 'user')
     try:
@@ -173,6 +253,10 @@ def generate_launch_description():
         SetEnvironmentVariable('ALSOFT_DRIVERS', 'null'),
         SetEnvironmentVariable('WEBOTS_TMPDIR', '/tmp'),
         SetEnvironmentVariable('TMPDIR', '/tmp'),
+        *[
+            SetEnvironmentVariable(name, value)
+            for name, value in display_environment.items()
+        ],
         webots,
         supervisor_action,
         climber_spawner,

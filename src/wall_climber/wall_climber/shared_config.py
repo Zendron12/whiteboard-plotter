@@ -115,6 +115,7 @@ class DrawExecutionDefaults:
     draw_resample_step_m: float
     travel_resample_step_m: float
     publish_period_sec: float
+    text_end_retreat_m: float
 
 
 @dataclass(frozen=True)
@@ -314,6 +315,7 @@ class SharedConfig:
             'draw_resample_step_m': self.draw_execution.draw_resample_step_m,
             'travel_resample_step_m': self.draw_execution.travel_resample_step_m,
             'publish_period_sec': self.draw_execution.publish_period_sec,
+            'text_end_retreat_m': self.draw_execution.text_end_retreat_m,
             'writable_x_min': writable['x_min'],
             'writable_x_max': writable['x_max'],
             'writable_y_min': writable['y_min'],

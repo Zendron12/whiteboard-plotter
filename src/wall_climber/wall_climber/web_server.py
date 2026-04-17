@@ -46,7 +46,6 @@ from wall_climber.vector_pipeline import (
     default_placement,
     draw_plan_to_dict,
     draw_segments_from_pen_strokes,
-    get_text_glyph_template,
     normalize_placement,
     normalize_text_plan_input,
     place_grouped_text_on_board,
@@ -500,20 +499,28 @@ def _resolve_text_start_placement(
     text_layout_defaults,
 ) -> VectorPlacement:
     min_x = safe_bounds['x_min'] + float(text_layout_defaults.left_margin)
-    max_x = safe_bounds['x_max'] - float(text_layout_defaults.right_margin)
+
+    # Keep left protection, but do not shrink the right side with a text right-margin.
+    max_x = safe_bounds['x_max']
+
     min_y = safe_bounds['y_min'] + float(text_layout_defaults.top_margin)
     max_y = safe_bounds['y_max'] - float(text_layout_defaults.bottom_margin)
+
     default_x = min_x
     default_y = min_y
     default_scale = 1.0
+
     if raw_placement is None:
         return VectorPlacement(x=default_x, y=default_y, scale=default_scale)
+
     if not isinstance(raw_placement, dict):
         raise HTTPException(
             status_code=422,
             detail=f'{request_name}.placement must be an object with x, y, and scale',
         )
+
     _reject_extra_fields(raw_placement, {'x', 'y', 'scale'}, f'{request_name}.placement')
+
     x = _coerce_float(
         raw_placement.get('x', default_x),
         field_name=f'{request_name}.placement.x',
@@ -528,64 +535,10 @@ def _resolve_text_start_placement(
         minimum=0.05,
         maximum=10.0,
     )
+
     x = min(max(x, min_x), max_x)
     y = min(max(y, min_y), max_y)
     return VectorPlacement(x=x, y=y, scale=scale)
-
-
-def _wrap_text_for_line_width(
-    text: str,
-    *,
-    max_line_width_units: float,
-    font_family: str | None,
-    curve_tolerance: float,
-    simplify_epsilon: float,
-    letter_spacing_units: float = 0.0,
-    word_spacing_units: float = 0.0,
-    uppercase_advance_scale: float = 1.0,
-) -> str:
-    def _effective_advance(char: str, base_advance: float) -> float:
-        advance = max(0.0, float(base_advance))
-        if char.isspace():
-            return max(advance, float(word_spacing_units))
-        if char.isalpha() and char.upper() == char and char.lower() != char:
-            advance *= max(0.1, float(uppercase_advance_scale))
-        return advance + max(0.0, float(letter_spacing_units))
-
-    max_width = float(max_line_width_units)
-    if max_width <= 1.0e-6:
-        raise ValueError('line width must be positive')
-    wrapped_lines: list[str] = []
-    for raw_line in text.split('\n'):
-        current_chars: list[str] = []
-        cursor_x = 0.0
-        for char in raw_line:
-            template = get_text_glyph_template(
-                char,
-                font_family=font_family,
-                curve_tolerance=curve_tolerance,
-                simplify_epsilon=simplify_epsilon,
-            )
-            advance = _effective_advance(char, float(template.advance))
-            if char.isspace():
-                if not current_chars:
-                    continue
-                if cursor_x > 0.0 and (cursor_x + advance) > max_width:
-                    wrapped_lines.append(''.join(current_chars).rstrip())
-                    current_chars = []
-                    cursor_x = 0.0
-                    continue
-                current_chars.append(' ')
-                cursor_x += advance
-                continue
-            if cursor_x > 0.0 and (cursor_x + advance) > max_width:
-                wrapped_lines.append(''.join(current_chars).rstrip())
-                current_chars = []
-                cursor_x = 0.0
-            current_chars.append(char)
-            cursor_x += advance
-        wrapped_lines.append(''.join(current_chars).rstrip())
-    return '\n'.join(wrapped_lines)
 
 
 def _grouped_text_bounds(glyphs: tuple[TextGlyphOutline, ...]) -> dict[str, float]:
@@ -605,38 +558,31 @@ def _grouped_text_bounds(glyphs: tuple[TextGlyphOutline, ...]) -> dict[str, floa
     }
 
 
-def _stroke_inside_writable_bounds(
-    stroke: tuple[tuple[float, float], ...],
-    writable_bounds: dict[str, float],
-) -> bool:
-    for point in stroke:
-        if not (
-            writable_bounds['x_min'] <= point[0] <= writable_bounds['x_max']
-            and writable_bounds['y_min'] <= point[1] <= writable_bounds['y_max']
-        ):
-            return False
-    return True
+def _normalize_text_font_source(font_source: Any) -> str:
+    normalized = str(font_source or 'relief_singleline').strip().lower()
+    if normalized not in {'relief_singleline', 'hershey_sans_1'}:
+        raise ValueError('font_source must be one of ["relief_singleline", "hershey_sans_1"]')
+    return normalized
 
 
-def _apply_text_stroke_weight(
-    strokes: tuple[tuple[tuple[float, float], ...], ...],
+def _expand_preview_bounds(
+    bounds: dict[str, float],
     *,
-    writable_bounds: dict[str, float],
-    pass_offset_m: float,
-) -> tuple[tuple[tuple[float, float], ...], ...]:
-    offset = max(0.0, float(pass_offset_m))
-    if offset <= 0.0:
-        return strokes
-    offsets = ((0.0, 0.0), (0.0, -offset), (0.0, offset))
-    weighted: list[tuple[tuple[float, float], ...]] = []
-    for stroke in strokes:
-        for dx, dy in offsets:
-            shifted = tuple((point[0] + dx, point[1] + dy) for point in stroke)
-            if _stroke_inside_writable_bounds(shifted, writable_bounds):
-                weighted.append(shifted)
-    if not weighted:
-        return strokes
-    return tuple(weighted)
+    pad_m: float,
+) -> dict[str, float]:
+    pad = max(1.0e-4, float(pad_m))
+    x_min = float(bounds['x_min']) - pad
+    x_max = float(bounds['x_max']) + pad
+    y_min = float(bounds['y_min']) - pad
+    y_max = float(bounds['y_max']) + pad
+    return {
+        'x_min': x_min,
+        'x_max': x_max,
+        'y_min': y_min,
+        'y_max': y_max,
+        'width': x_max - x_min,
+        'height': y_max - y_min,
+    }
 
 
 def _preview_payload_from_strokes(
@@ -649,17 +595,24 @@ def _preview_payload_from_strokes(
     draw_plan = strokes_to_draw_plan(placed_strokes)
     preview_strokes = [stroke['points'] for stroke in draw_plan['strokes']]
     stats = stroke_stats(placed_strokes)
+
+    # Add preview-only padding so letters touching the text bounds
+    # do not appear visually clipped in the browser.
+    preview_pad_m = max(0.003, float(placement_result.final_scale) * 0.10)
+    padded_bounds = _expand_preview_bounds(stats['bounds'], pad_m=preview_pad_m)
+
     can_commit = placement_result.outside_points == 0 and outside_safe_points == 0
     validation_error = None
     if placement_result.outside_points != 0:
         validation_error = 'geometry exceeds carriage-safe writable bounds'
     elif outside_safe_points != 0:
         validation_error = 'geometry exits the configured safe cable workspace'
+
     return {
         'strokes': preview_strokes,
         'stroke_count': stats['stroke_count'],
         'point_count': stats['point_count'],
-        'bounds': stats['bounds'],
+        'bounds': padded_bounds,
         'placement': {
             'x': placement_result.placement.x,
             'y': placement_result.placement.y,
@@ -938,7 +891,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         allowed = {
             'text',
             'placement',
-            'font_family',
+            'font_source',
             'line_height',
             'curve_tolerance',
             'simplify_epsilon',
@@ -953,18 +906,14 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f'{request_name}.text invalid: {exc}')
-        font_family = raw.get('font_family')
-        if font_family is not None and (
-            not isinstance(font_family, str) or not font_family.strip()
-        ):
+        try:
+            font_source = _normalize_text_font_source(raw.get('font_source', 'relief_singleline'))
+        except ValueError as exc:
             raise HTTPException(
                 status_code=422,
-                detail=f'{request_name}.font_family must be a non-empty string when provided',
+                detail=f'{request_name}.font_source invalid: {exc}',
             )
-        default_line_height = max(
-            1.05,
-            float(shared.board.line_height) / max(float(text_layout_defaults.glyph_height), 1.0e-6),
-        )
+        default_line_height = 1.75
         line_height = _coerce_float(
             raw.get('line_height', default_line_height),
             field_name=f'{request_name}.line_height',
@@ -1001,15 +950,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         glyph_scale_m = float(text_layout_defaults.glyph_height) * text_start.scale
         if glyph_scale_m <= 0.0:
             raise HTTPException(status_code=422, detail=f'{request_name}.placement.scale must be > 0')
-        base_glyph_height_m = max(float(text_layout_defaults.glyph_height), 1.0e-6)
-        letter_spacing_units = max(0.0, float(text_layout_defaults.letter_spacing) / base_glyph_height_m)
-        word_spacing_units = max(
-            letter_spacing_units,
-            float(text_layout_defaults.word_spacing) / base_glyph_height_m,
-        )
-        uppercase_advance_scale = max(0.1, float(text_layout_defaults.uppercase_advance_scale))
         available_width_m = (
-            safe_bounds['x_max'] - float(text_layout_defaults.right_margin) - text_start.x
+            safe_bounds['x_max'] - text_start.x
         )
         if available_width_m <= 0.0:
             raise HTTPException(
@@ -1022,23 +964,14 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 status_code=422,
                 detail=f'{request_name}.placement.scale is too large for the remaining carriage-safe width',
             )
-        wrapped_text = _wrap_text_for_line_width(
-            normalized_text,
-            max_line_width_units=max_line_width_units,
-            font_family=font_family.strip() if isinstance(font_family, str) else None,
-            curve_tolerance=curve_tolerance,
-            simplify_epsilon=simplify_epsilon,
-            letter_spacing_units=letter_spacing_units,
-            word_spacing_units=word_spacing_units,
-            uppercase_advance_scale=uppercase_advance_scale,
-        )
         try:
             grouped_source = vectorize_text_grouped(
-                wrapped_text,
-                font_family=font_family.strip() if isinstance(font_family, str) else None,
+                normalized_text,
+                font_source=font_source,
                 line_height=line_height,
                 curve_tolerance=curve_tolerance,
                 simplify_epsilon=simplify_epsilon,
+                max_line_width_units=max_line_width_units,
             )
             source_bounds = _grouped_text_bounds(grouped_source)
             board_width = writable_bounds['x_max'] - writable_bounds['x_min']
@@ -1064,13 +997,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             placed_strokes = tuple(
                 stroke for glyph in placed_groups for stroke in glyph.strokes
             )
-            weighted_strokes = _apply_text_stroke_weight(
-                placed_strokes,
-                writable_bounds=writable_bounds,
-                pass_offset_m=0.0,
-            )
             cleaned_strokes = cleanup_draw_strokes(
-                weighted_strokes,
+                placed_strokes,
                 simplify_tolerance_m=draw_execution_defaults.draw_path_simplify_tolerance_m,
                 preserve_order=True,
             )
@@ -1094,9 +1022,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
         )
         commit_request = {
-            'text': wrapped_text,
+            'text': normalized_text,
             'placement': {'x': text_start.x, 'y': text_start.y, 'scale': text_start.scale},
-            'font_family': font_family.strip() if isinstance(font_family, str) else None,
+            'font_source': font_source,
             'line_height': line_height,
             'curve_tolerance': curve_tolerance,
             'simplify_epsilon': simplify_epsilon,

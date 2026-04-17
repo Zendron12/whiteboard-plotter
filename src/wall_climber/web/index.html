@@ -1044,6 +1044,15 @@
               <div id="tool-text-panel" class="tool-panel active">
                 <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping, board limits, and carriage-safe start positions are handled by the backend.</p>
                 <textarea id="text-input" placeholder="Write text here. Example: HELLO&#10;WORLD"></textarea>
+                <div class="field-grid">
+                  <div class="field">
+                    <label for="text-font-source">Text Font Source</label>
+                    <select id="text-font-source">
+                      <option value="relief_singleline" selected>Relief SingleLine</option>
+                      <option value="hershey_sans_1">Hershey Sans 1-stroke</option>
+                    </select>
+                  </div>
+                </div>
                 <div class="action-row">
                   <button id="text-preview-btn" class="secondary-btn" type="button">Preview Text</button>
                   <button id="text-submit-btn" class="primary-btn" type="button">Write Text</button>
@@ -1157,7 +1166,7 @@
         body_safe_x_max: 6.2,
         body_safe_y_min: 0.12,
         body_safe_y_max: 2.9,
-        line_height: 0.14,
+        line_height: 0.150,
         corner_keepout_radius: 0.24,
         anchors: {
           left: { x: 0, y: 0 },
@@ -1230,6 +1239,7 @@
         toolSvgPanel: document.getElementById('tool-svg-panel'),
         toolImagePanel: document.getElementById('tool-image-panel'),
         textInput: document.getElementById('text-input'),
+        textFontSource: document.getElementById('text-font-source'),
         textPreviewBtn: document.getElementById('text-preview-btn'),
         textSubmitBtn: document.getElementById('text-submit-btn'),
         textHelloBtn: document.getElementById('text-hello-btn'),
@@ -1448,6 +1458,20 @@
         return { x, y, scale };
       }
 
+      function setTextFontSource(value) {
+        const normalized = typeof value === 'string' ? value.trim().toLowerCase() : 'relief_singleline';
+        const allowed = new Set(['relief_singleline', 'hershey_sans_1']);
+        dom.textFontSource.value = allowed.has(normalized) ? normalized : 'relief_singleline';
+      }
+
+      function readTextOptions() {
+        return {
+          font_source: typeof dom.textFontSource.value === 'string'
+            ? dom.textFontSource.value.trim().toLowerCase()
+            : 'relief_singleline',
+        };
+      }
+
       function parseJsonResponse(response) {
         return response.text().then((text) => {
           if (!text) {
@@ -1558,6 +1582,13 @@
 
         if (payload.commit_request && payload.commit_request.placement) {
           setPlacementInputs(payload.commit_request.placement);
+        }
+        if (
+          sourceType === 'text'
+          && payload.commit_request
+          && Object.prototype.hasOwnProperty.call(payload.commit_request, 'font_source')
+        ) {
+          setTextFontSource(payload.commit_request.font_source);
         }
 
         if (preview.validation_error) {
@@ -2130,12 +2161,14 @@
         if (!text) {
           throw new Error('Enter text before preview.');
         }
+        const textOptions = readTextOptions();
         const payload = await apiRequest('/api/vector/text/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text,
             placement: readPlacement(),
+            ...textOptions,
           }),
         });
         applyVectorPreview('text', payload);
@@ -2163,7 +2196,7 @@
         const maxY = textSafe.yMax - 0.02;
         const minRemainingWidth = Math.max(0.025, 0.3 * lineAdvance);
 
-        let nextX = endX + 0.013;
+        let nextX = endX + 0.030;
         let nextY = Number(currentPlacement.y);
         if (!Number.isFinite(nextY)) {
           nextY = startY;
@@ -2182,6 +2215,7 @@
 
       async function commitText(text) {
         const currentPlacement = readPlacement();
+        const textOptions = readTextOptions();
         await ensureMode('text');
         const payload = await apiRequest('/api/text', {
           method: 'POST',
@@ -2189,6 +2223,7 @@
           body: JSON.stringify({
             text,
             placement: currentPlacement,
+            ...textOptions,
           }),
         });
         applyVectorPreview('text', payload);
@@ -2563,6 +2598,7 @@
       pushFeed('UI initialized. Waiting for backend and rosbridge.', 'info');
       syncPlacementLabels();
       syncPlacementDefaults(true);
+      setTextFontSource('relief_singleline');
       clearVectorPreview(false);
       updateSummary();
       updateMetrics();

@@ -48,6 +48,27 @@ _SEGMENTS: dict[str, tuple[tuple[tuple[float, float], ...], ...]] = {
     'colon_top_tick': (_poly((0.50, 0.74), (0.50, 0.64)),),
     'colon_bottom_tick': (_poly((0.50, 0.26), (0.50, 0.16)),),
     'question_stem': (_poly((0.50, 0.50), (0.50, 0.22)),),
+    'lc_top': (_poly((0.15, 0.72), (0.85, 0.72)),),
+    'lc_middle': (_poly((0.15, 0.36), (0.85, 0.36)),),
+    'lc_bottom': (_poly((0.15, 0.00), (0.85, 0.00)),),
+    'lc_left_full': (_poly((0.15, 0.72), (0.15, 0.00)),),
+    'lc_left_upper': (_poly((0.15, 0.72), (0.15, 0.36)),),
+    'lc_left_lower': (_poly((0.15, 0.36), (0.15, 0.00)),),
+    'lc_center_full': (_poly((0.50, 0.72), (0.50, 0.00)),),
+    'lc_center_upper': (_poly((0.50, 0.72), (0.50, 0.36)),),
+    'lc_center_lower': (_poly((0.50, 0.36), (0.50, 0.00)),),
+    'lc_right_full': (_poly((0.85, 0.72), (0.85, 0.00)),),
+    'lc_right_upper': (_poly((0.85, 0.72), (0.85, 0.36)),),
+    'lc_right_lower': (_poly((0.85, 0.36), (0.85, 0.00)),),
+    'lc_inner_left_full': (_poly((0.35, 0.72), (0.35, 0.00)),),
+    'lc_inner_right_full': (_poly((0.65, 0.72), (0.65, 0.00)),),
+    'lc_middle_left': (_poly((0.15, 0.36), (0.50, 0.36)),),
+    'lc_middle_right': (_poly((0.50, 0.36), (0.85, 0.36)),),
+    'lc_left_desc_full': (_poly((0.15, 0.72), (0.15, -0.20)),),
+    'lc_center_desc_full': (_poly((0.50, 0.72), (0.50, -0.20)),),
+    'lc_right_desc_full': (_poly((0.85, 0.72), (0.85, -0.20)),),
+    'lc_dot': (_poly((0.50, 0.96), (0.50, 0.84)),),
+    'j_hook': (_poly((0.50, 0.72), (0.50, -0.20), (0.15, -0.20)),),
 }
 
 
@@ -81,6 +102,32 @@ _GLYPHS: dict[str, Glyph] = {
     'X': Glyph(strokes=_segments('left_full', 'right_full', 'middle'), advance=1.00),
     'Y': Glyph(strokes=_segments('top', 'center_full'), advance=1.00),
     'Z': Glyph(strokes=_segments('top', 'middle', 'bottom', 'right_upper', 'left_lower'), advance=1.00),
+    'a': Glyph(strokes=_segments('lc_top', 'lc_middle', 'lc_bottom', 'lc_left_lower', 'lc_right_full'), advance=0.90),
+    'b': Glyph(strokes=_segments('left_full', 'lc_top', 'lc_middle', 'lc_bottom', 'lc_right_full'), advance=0.95),
+    'c': Glyph(strokes=_segments('lc_top', 'lc_left_full', 'lc_bottom'), advance=0.88),
+    'd': Glyph(strokes=_segments('right_full', 'lc_top', 'lc_middle', 'lc_bottom', 'lc_left_full'), advance=0.95),
+    'e': Glyph(strokes=_segments('lc_top', 'lc_left_full', 'lc_middle', 'lc_bottom'), advance=0.90),
+    'f': Glyph(strokes=_segments('center_full', 'lc_top', 'lc_middle'), advance=0.75),
+    'g': Glyph(strokes=_segments('lc_top', 'lc_left_full', 'lc_middle', 'lc_bottom', 'lc_right_desc_full'), advance=0.95),
+    'h': Glyph(strokes=_segments('left_full', 'lc_right_full', 'lc_middle'), advance=0.95),
+    'i': Glyph(strokes=_segments('lc_center_full', 'lc_dot'), advance=0.50),
+    'j': Glyph(strokes=_segments('j_hook', 'lc_dot'), advance=0.58),
+    'k': Glyph(strokes=_segments('left_full', 'lc_middle', 'lc_right_upper', 'lc_right_lower'), advance=0.90),
+    'l': Glyph(strokes=_segments('left_full'), advance=0.55),
+    'm': Glyph(strokes=_segments('lc_left_full', 'lc_inner_left_full', 'lc_inner_right_full', 'lc_right_full', 'lc_top'), advance=1.10),
+    'n': Glyph(strokes=_segments('lc_left_full', 'lc_right_full', 'lc_top'), advance=0.95),
+    'o': Glyph(strokes=_segments('lc_top', 'lc_bottom', 'lc_left_full', 'lc_right_full'), advance=0.92),
+    'p': Glyph(strokes=_segments('lc_left_desc_full', 'lc_top', 'lc_middle', 'lc_right_upper'), advance=0.95),
+    'q': Glyph(strokes=_segments('lc_right_desc_full', 'lc_top', 'lc_middle', 'lc_left_upper', 'lc_bottom'), advance=0.95),
+    'r': Glyph(strokes=_segments('lc_left_full', 'lc_top', 'lc_middle_right'), advance=0.75),
+    's': Glyph(strokes=_segments('lc_top', 'lc_left_upper', 'lc_middle', 'lc_right_lower', 'lc_bottom'), advance=0.88),
+    't': Glyph(strokes=_segments('center_full', 'lc_middle'), advance=0.78),
+    'u': Glyph(strokes=_segments('lc_left_full', 'lc_right_full', 'lc_bottom'), advance=0.95),
+    'v': Glyph(strokes=_segments('lc_left_lower', 'lc_right_lower', 'lc_bottom'), advance=0.90),
+    'w': Glyph(strokes=_segments('lc_left_full', 'lc_inner_left_full', 'lc_inner_right_full', 'lc_right_full', 'lc_bottom'), advance=1.10),
+    'x': Glyph(strokes=_segments('lc_left_full', 'lc_right_full', 'lc_middle'), advance=0.90),
+    'y': Glyph(strokes=_segments('lc_left_full', 'lc_right_desc_full', 'lc_bottom'), advance=0.95),
+    'z': Glyph(strokes=_segments('lc_top', 'lc_middle', 'lc_bottom', 'lc_right_upper', 'lc_left_lower'), advance=0.90),
     '0': Glyph(strokes=_segments('top', 'bottom', 'left_full', 'right_full'), advance=1.00),
     '1': Glyph(strokes=_segments('center_full', 'bottom'), advance=0.80),
     '2': Glyph(strokes=_segments('top', 'right_upper', 'middle', 'left_lower', 'bottom'), advance=1.00),
@@ -102,7 +149,7 @@ _GLYPHS: dict[str, Glyph] = {
 
 
 def normalize_char(char: str) -> str:
-    return char.upper()
+    return char
 
 
 def _validate_glyph_table(glyphs: dict[str, Glyph] | None = None) -> None:

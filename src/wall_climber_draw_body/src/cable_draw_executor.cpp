@@ -74,6 +74,7 @@ class CableDrawExecutor final : public rclcpp::Node {
     declare_parameter("draw_resample_step_m", 0.012);
     declare_parameter("travel_resample_step_m", 0.025);
     declare_parameter("publish_period_sec", 0.05);
+    declare_parameter("text_end_retreat_m", 0.018);
     declare_parameter("writable_x_min", 0.10);
     declare_parameter("writable_x_max", 6.20);
     declare_parameter("writable_y_min", 0.10);
@@ -149,6 +150,7 @@ class CableDrawExecutor final : public rclcpp::Node {
     double body_safe_safe_y_max;
     double corner_keepout_radius;
     double pen_down_settle_sec;
+    double text_end_retreat_m;
   };
 
   GeometryParams read_geometry_params() const {
@@ -186,6 +188,7 @@ class CableDrawExecutor final : public rclcpp::Node {
       get_parameter("body_safe_safe_y_max").as_double(),
       std::max(0.0, get_parameter("corner_keepout_radius").as_double()),
       std::max(0.0, get_parameter("pen_down_settle_sec").as_double()),
+      std::max(0.0, get_parameter("text_end_retreat_m").as_double()),
     };
   }
 
@@ -221,6 +224,47 @@ class CableDrawExecutor final : public rclcpp::Node {
     const double right_dist = distance_xy(point, params.anchor_right);
     return left_dist >= params.corner_keepout_radius &&
            right_dist >= params.corner_keepout_radius;
+  }
+
+  bool point_valid_for_pen_motion(const Point2D & point, const GeometryParams & params) const {
+    return finite_point(point) &&
+           point_within_writable(point, params) &&
+           point_keeps_body_on_board(point, params) &&
+           point_within_body_safe_workspace(point, params) &&
+           point_within_safe_workspace(point, params);
+  }
+
+  void append_optional_text_park(
+    const Point2D & cursor,
+    const GeometryParams & params,
+    const int32_t segment_index,
+    std::vector<Point2D> * out_points,
+    std::vector<bool> * out_pen_down,
+    std::vector<int32_t> * out_segment_indices,
+    double * total_length) const
+  {
+    if (active_mode_ != "text") {
+      return;
+    }
+
+    const Point2D park_point{
+      params.body_safe_safe_x_min,
+      params.body_safe_safe_y_max,
+    };
+    if (!point_valid_for_pen_motion(park_point, params) ||
+        approximately_equal(cursor, park_point)) {
+      return;
+    }
+
+    append_resampled_segment(
+      std::vector<Point2D>{cursor, park_point},
+      false,
+      segment_index,
+      params.travel_resample_step_m,
+      out_points,
+      out_pen_down,
+      out_segment_indices,
+      total_length);
   }
 
   Point2D pen_to_carriage_center(const Point2D & pen_point, const GeometryParams & params) const {
@@ -403,44 +447,14 @@ class CableDrawExecutor final : public rclcpp::Node {
       cursor = raw_points.back();
     }
 
-    // After text execution, park near the lower-left safe corner with pen lifted.
-    if (active_mode_ == "text") {
-      const Point2D park_point{params.body_safe_safe_x_min, params.body_safe_safe_y_max};
-      if (finite_point(park_point) &&
-          point_keeps_body_on_board(park_point, params) &&
-          point_within_safe_workspace(park_point, params) &&
-          !approximately_equal(cursor, park_point)) {
-        const Point2D park_waypoint{cursor.x, params.body_safe_safe_y_max};
-        const int32_t park_segment_index = static_cast<int32_t>(plan.segments.size());
-        if (!approximately_equal(cursor, park_waypoint) &&
-            point_keeps_body_on_board(park_waypoint, params) &&
-            point_within_safe_workspace(park_waypoint, params)) {
-          std::vector<Point2D> travel_down{cursor, park_waypoint};
-          append_resampled_segment(
-            travel_down,
-            false,
-            park_segment_index,
-            params.travel_resample_step_m,
-            &sampled_points,
-            &sampled_pen_down,
-            &sampled_segment_indices,
-            &total_length);
-          cursor = park_waypoint;
-        }
-        if (!approximately_equal(cursor, park_point)) {
-          std::vector<Point2D> travel_left{cursor, park_point};
-          append_resampled_segment(
-            travel_left,
-            false,
-            park_segment_index,
-            params.travel_resample_step_m,
-            &sampled_points,
-            &sampled_pen_down,
-            &sampled_segment_indices,
-            &total_length);
-        }
-      }
-    }
+    append_optional_text_park(
+      cursor,
+      params,
+      static_cast<int32_t>(plan.segments.size()),
+      &sampled_points,
+      &sampled_pen_down,
+      &sampled_segment_indices,
+      &total_length);
 
     if (sampled_points.empty()) {
       *failure = "draw plan produced no executable samples";

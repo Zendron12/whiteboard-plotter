@@ -8,7 +8,7 @@ board:
   margin_right: 0.10
   margin_top: 0.10
   margin_bottom: 0.10
-  line_height: 0.14
+  line_height: 0.150
 
 anchors:
   left_x: 0.0
@@ -56,9 +56,9 @@ text_layout:
   right_margin: 0.020
   top_margin: 0.020
   bottom_margin: 0.020
-  glyph_height: 0.094
-  letter_spacing: 0.013
-  word_spacing: 0.046
+  glyph_height: 0.086
+  letter_spacing: 0.020
+  word_spacing: 0.042
   uppercase_advance_scale: 0.84
   glyph_cluster_max_chars: 2
   text_upward_bias_em: 0.05
@@ -73,10 +73,11 @@ text_vector:
 draw_execution:
   fixed_draw_theta_rad: 0.0
   draw_scale_fit_margin_m: 0.030
-  draw_path_simplify_tolerance_m: 0.0007
-  draw_resample_step_m: 0.008
-  travel_resample_step_m: 0.015
-  publish_period_sec: 0.03
+  draw_path_simplify_tolerance_m: 0.0004
+  draw_resample_step_m: 0.004
+  travel_resample_step_m: 0.012
+  publish_period_sec: 0.02
+  text_end_retreat_m: 0.018
 
 visuals:
   trail_enabled_default: false
