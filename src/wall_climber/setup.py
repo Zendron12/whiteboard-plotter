@@ -18,7 +18,7 @@ def package_files(directory: str, install_root: str):
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test', 'test.*']),
+    packages=find_packages(exclude=['test']),
     data_files=[
         # Ament index resource marker (REQUIRED for ament_python packages)
         ('share/ament_index/resource_index/packages',
@@ -33,7 +33,6 @@ setup(
         *package_files('fonts', os.path.join('share', package_name, 'fonts')),
         (os.path.join('share', package_name, 'urdf'), glob('urdf/*.xacro')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*')),
-        *package_files('docs', os.path.join('share', package_name, 'docs')),
 
         # Web UI assets
         *package_files('web', os.path.join('share', package_name, 'web')),
@@ -49,8 +48,9 @@ setup(
     zip_safe=True,
     maintainer='hisham',
     maintainer_email='2144934@std.hu.edu.jo',
-    description='ROS 2/Webots whiteboard drawing robots: legacy cable/Y wall plotter and X/CoreXY plotter foundation',
+    description='Two-cable Webots drawing robot package',
     license='Apache-2.0',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'urdf_spawner = wall_climber.urdf_spawner:main',
