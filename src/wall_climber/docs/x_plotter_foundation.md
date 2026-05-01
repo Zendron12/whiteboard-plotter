@@ -14,6 +14,18 @@ The existing Y/cable robot remains unchanged and usable as the legacy implementa
 
 The new X/CoreXY path is added beside it as the main graduation-demo direction. It starts with a clean rectangular frame, crossed-belt visual mechanism, moving carriage, and pen up/down control without replacing the legacy cable path.
 
+The new X/CoreXY files are:
+
+- `src/wall_climber/launch/x_plotter_simulation.launch.py`
+- `src/wall_climber/config/x_plotter.yaml`
+- `src/wall_climber/urdf/x_plotter_robot.urdf.xacro`
+- `src/wall_climber/worlds/x_plotter_world.wbt`
+- `src/wall_climber/wall_climber/x_plotter/`
+
+## Docs Policy
+
+Installable ROS package docs live in `src/wall_climber/docs` and are installed to `share/wall_climber/docs` by `colcon build`. The root `docs/README.md` file is repository navigation only and links back to these package docs.
+
 ## Architecture
 
 The X plotter foundation uses temporary primitive-direct execution:
@@ -117,4 +129,3 @@ ros2 launch wall_climber my_robot.launch.py
 - There is no dedicated CoreXY motor executor yet.
 - The current `PrimitivePathPlan` transport is preserved temporarily.
 - A later task should introduce a unified `DrawingPathPlan`, refactor `vector_pipeline.py`, and then connect the hybrid image pipeline, voice commands, image library, and any dedicated CoreXY executor.
-

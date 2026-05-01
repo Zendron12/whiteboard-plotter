@@ -3,7 +3,7 @@
 <package format="3">
   <name>wall_climber</name>
   <version>0.0.0</version>
-  <description>Two-cable Webots drawing robot package.</description>
+  <description>ROS 2/Webots whiteboard drawing robots: legacy cable/Y wall plotter and X/CoreXY plotter foundation.</description>
   <maintainer email="2144934@std.hu.edu.jo">hisham</maintainer>
   <license>Apache-2.0</license>
 

@@ -288,7 +288,7 @@ def test_executor_source_declares_chunked_execution_controls() -> None:
 
 def test_legacy_compatibility_rfc_exists() -> None:
     source = (
-        Path(__file__).resolve().parents[3] / 'docs' / 'legacy-compatibility.md'
+        Path(__file__).resolve().parents[1] / 'docs' / 'legacy-compatibility.md'
     ).read_text(encoding='utf-8')
     assert 'CanonicalPathPlan' in source
     assert 'raw draw-plan ingestion remains disabled' in source
@@ -297,7 +297,7 @@ def test_legacy_compatibility_rfc_exists() -> None:
 
 def test_primitive_transport_rfc_exists() -> None:
     source = (
-        Path(__file__).resolve().parents[3] / 'docs' / 'primitive-transport.md'
+        Path(__file__).resolve().parents[1] / 'docs' / 'primitive-transport.md'
     ).read_text(encoding='utf-8')
     assert 'PrimitivePathPlan' in source
     assert '/wall_climber/primitive_path_plan' in source
