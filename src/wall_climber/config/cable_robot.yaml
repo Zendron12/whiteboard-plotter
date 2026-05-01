@@ -11,6 +11,14 @@ board:
   line_height: 0.150
 
 anchors:
+  top_left_x: 0.0
+  top_left_y: 0.0
+  top_right_x: 6.3
+  top_right_y: 0.0
+  bottom_left_x: 0.0
+  bottom_left_y: 3.0
+  bottom_right_x: 6.3
+  bottom_right_y: 3.0
   left_x: 0.0
   left_y: 0.0
   right_x: 6.3
@@ -29,6 +37,14 @@ carriage:
   mass: 1.8
   root_to_chassis_z: 0.0
   plane_y: 2.360
+  attachment_top_left_x: -0.104
+  attachment_top_left_y: -0.075
+  attachment_top_right_x: 0.104
+  attachment_top_right_y: -0.075
+  attachment_bottom_left_x: -0.104
+  attachment_bottom_left_y: 0.075
+  attachment_bottom_right_x: 0.104
+  attachment_bottom_right_y: 0.075
   attachment_left_x: -0.104
   attachment_left_y: -0.075
   attachment_right_x: 0.104
