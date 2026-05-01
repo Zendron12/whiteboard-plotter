@@ -450,6 +450,34 @@
       gap: 10px;
     }
 
+    .sketch-preview-box {
+      display: none;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--paper-line);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.62);
+    }
+
+    .sketch-preview-box.active {
+      display: grid;
+    }
+
+    .sketch-preview-box img {
+      width: 100%;
+      max-height: 180px;
+      object-fit: contain;
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      border-radius: var(--radius-sm);
+      background: #fff;
+    }
+
+    .sketch-preview-diag {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
     .live-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1158,12 +1186,28 @@
               <div id="tool-file-panel" class="tool-panel">
                 <p class="helper-copy">Upload either an SVG file or a raster image. The backend auto-routes SVG files to vector ingestion and PNG/JPG/WebP files to the image tracing pipeline.</p>
                 <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg">
+                <div class="field-grid">
+                  <div class="field">
+                    <label for="sketch-margin">Sketch Margin (m)</label>
+                    <input id="sketch-margin" type="number" min="0" step="0.01" value="0.05">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-min-component">Sketch Noise Area (px)</label>
+                    <input id="sketch-min-component" type="number" min="1" step="1" value="8">
+                  </div>
+                </div>
                 <div class="action-row">
                   <button id="file-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
                   <button id="file-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
+                  <button id="sketch-preview-btn" class="quiet-btn" type="button">Preview as Sketch Centerline</button>
                   <button id="file-commit-btn" class="primary-btn" type="button">Commit File</button>
                 </div>
                 <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
+                <p class="helper-copy">Sketch Centerline preview only — drawing integration comes later.</p>
+                <div id="sketch-preview-box" class="sketch-preview-box">
+                  <img id="sketch-preview-img" alt="Sketch Centerline SVG preview">
+                  <div id="sketch-preview-diag" class="sketch-preview-diag">No sketch preview loaded yet.</div>
+                </div>
               </div>
 
               <div id="tool-svg-panel" class="tool-panel">
@@ -1377,6 +1421,12 @@
         filePreviewBtn: document.getElementById('file-preview-btn'),
         fileCommitBtn: document.getElementById('file-commit-btn'),
         fileMeta: document.getElementById('file-meta'),
+        sketchMargin: document.getElementById('sketch-margin'),
+        sketchMinComponent: document.getElementById('sketch-min-component'),
+        sketchPreviewBtn: document.getElementById('sketch-preview-btn'),
+        sketchPreviewBox: document.getElementById('sketch-preview-box'),
+        sketchPreviewImg: document.getElementById('sketch-preview-img'),
+        sketchPreviewDiag: document.getElementById('sketch-preview-diag'),
         svgInput: document.getElementById('svg-input'),
         svgPreviewBtn: document.getElementById('svg-preview-btn'),
         svgSubmitBtn: document.getElementById('svg-submit-btn'),
@@ -1433,6 +1483,7 @@
         previewRefreshTimer: null,
         uploadStatusTimer: null,
         previewInteraction: null,
+        sketchPreviewUrl: null,
       };
 
       function escapeHtml(text) {
@@ -1779,6 +1830,9 @@
         if (!state.vectorPreview) {
           return 'rgba(201, 95, 56, 0.95)';
         }
+        if (state.vectorPreview.sourceType === 'sketch_centerline') {
+          return 'rgba(45, 143, 132, 0.95)';
+        }
         if (state.vectorPreview.sourceType === 'svg') {
           return 'rgba(54, 86, 111, 0.92)';
         }
@@ -1813,11 +1867,19 @@
 
       function revokePreviewResources(previewState) {
         if (!previewState || !previewState.rasterOverlay) {
+          if (state.sketchPreviewUrl) {
+            URL.revokeObjectURL(state.sketchPreviewUrl);
+            state.sketchPreviewUrl = null;
+          }
           return;
         }
         const imageUrl = previewState.rasterOverlay.imageUrl;
         if (typeof imageUrl === 'string' && imageUrl.startsWith('blob:')) {
           URL.revokeObjectURL(imageUrl);
+        }
+        if (state.sketchPreviewUrl) {
+          URL.revokeObjectURL(state.sketchPreviewUrl);
+          state.sketchPreviewUrl = null;
         }
       }
 
@@ -1936,7 +1998,7 @@
           return;
         }
         const origin = previewRequestOrigin(previewState);
-        if (!origin || origin === 'text') {
+        if (!origin || origin === 'text' || origin === 'sketch_centerline') {
           return;
         }
         if (state.previewRefreshTimer) {
@@ -1964,6 +2026,15 @@
         if (state.previewRefreshTimer) {
           clearTimeout(state.previewRefreshTimer);
           state.previewRefreshTimer = null;
+        }
+        if (dom.sketchPreviewBox) {
+          dom.sketchPreviewBox.classList.remove('active');
+        }
+        if (dom.sketchPreviewImg) {
+          dom.sketchPreviewImg.removeAttribute('src');
+        }
+        if (dom.sketchPreviewDiag) {
+          dom.sketchPreviewDiag.textContent = 'No sketch preview loaded yet.';
         }
         dom.previewChip.innerHTML = '<strong>Preview</strong> none';
         dom.summaryPreview.textContent = 'No preview loaded yet.';
@@ -2040,6 +2111,15 @@
             }
           })();
         revokePreviewResources(state.vectorPreview);
+        if (dom.sketchPreviewBox) {
+          dom.sketchPreviewBox.classList.remove('active');
+        }
+        if (dom.sketchPreviewImg) {
+          dom.sketchPreviewImg.removeAttribute('src');
+        }
+        if (dom.sketchPreviewDiag) {
+          dom.sketchPreviewDiag.textContent = 'No sketch preview loaded yet.';
+        }
         state.vectorPreview = {
           sourceType,
           preview: payload.preview,
@@ -2199,6 +2279,10 @@
           state.latestUploadStatus &&
           state.latestUploadStatus.state === 'ready'
         );
+        const sketchPreviewActive = Boolean(
+          state.vectorPreview &&
+          state.vectorPreview.sourceType === 'sketch_centerline'
+        );
 
         dom.modeButtons.forEach((button) => {
           const active = state.runtime && state.runtime.active_mode === button.dataset.mode;
@@ -2220,7 +2304,8 @@
         dom.svgSubmitBtn.disabled = !runtimeReady;
         dom.fileUploadBtn.disabled = !backendHealthy;
         dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
-        dom.fileCommitBtn.disabled = !(runtimeReady && fileReady);
+        dom.sketchPreviewBtn.disabled = !backendHealthy;
+        dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
       }
 
       function setOverlay(title, copy, visible) {
@@ -2831,6 +2916,9 @@
         if (!previewIsBoardVisible(previewState)) {
           return;
         }
+        if (previewState.sourceType === 'sketch_centerline') {
+          return;
+        }
         const bounds = transformedPreviewBounds(previewState);
         if (!bounds) {
           return;
@@ -2862,6 +2950,9 @@
       }
 
       function previewHandleHit(layout, canvasX, canvasY) {
+        if (state.vectorPreview && state.vectorPreview.sourceType === 'sketch_centerline') {
+          return null;
+        }
         const bounds = transformedPreviewBounds();
         if (!bounds) {
           return null;
@@ -3214,6 +3305,93 @@
         updateUploadMeta(payload);
       }
 
+      function formatSketchBounds(bounds) {
+        if (!bounds) {
+          return '--';
+        }
+        const xMin = Number(bounds.x_min);
+        const xMax = Number(bounds.x_max);
+        const yMin = Number(bounds.y_min);
+        const yMax = Number(bounds.y_max);
+        if (![xMin, xMax, yMin, yMax].every(Number.isFinite)) {
+          return '--';
+        }
+        return `x ${formatRange(xMin, xMax)} · y ${formatRange(yMin, yMax)}`;
+      }
+
+      function sketchDiagnosticsText(payload) {
+        const metadata = payload.metadata || {};
+        const preview = payload.preview || {};
+        const threshold = Number(metadata.threshold_value);
+        const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
+          ? ` · warnings ${payload.warnings.length}`
+          : '';
+        return [
+          `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
+          `bounds ${formatSketchBounds(payload.bounds)}`,
+          `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}`,
+          `skeleton ${metadata.skeleton_backend || '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}${warnings}`,
+        ].join('\n');
+      }
+
+      function renderSketchPreviewSvg(payload) {
+        if (!dom.sketchPreviewBox || !dom.sketchPreviewImg || !dom.sketchPreviewDiag) {
+          return;
+        }
+        if (state.sketchPreviewUrl) {
+          URL.revokeObjectURL(state.sketchPreviewUrl);
+          state.sketchPreviewUrl = null;
+        }
+        const svgText = String(payload.preview_svg || '');
+        if (svgText) {
+          const blob = new Blob([svgText], { type: 'image/svg+xml' });
+          state.sketchPreviewUrl = URL.createObjectURL(blob);
+          dom.sketchPreviewImg.src = state.sketchPreviewUrl;
+        } else {
+          dom.sketchPreviewImg.removeAttribute('src');
+        }
+        dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
+        dom.sketchPreviewBox.classList.add('active');
+      }
+
+      function applySketchCenterlinePreview(payload) {
+        const preview = payload.preview || {};
+        const wrappedPreview = {
+          strokes: Array.isArray(preview.strokes) ? preview.strokes : [],
+          stroke_count: Number(payload.stroke_count || 0),
+          point_count: Number(payload.point_count || 0),
+          bounds: payload.bounds || null,
+          can_commit: false,
+          validation_error: 'Sketch Centerline preview only — drawing integration comes later.',
+          diagnostics: {
+            sketch_centerline: {
+              canonical_command_count: Number(payload.canonical_command_count || 0),
+              metadata: payload.metadata || {},
+              metrics: payload.metrics || {},
+              preview,
+              warnings: payload.warnings || [],
+            },
+          },
+        };
+        revokePreviewResources(state.vectorPreview);
+        state.vectorPreview = {
+          sourceType: 'sketch_centerline',
+          preview: wrappedPreview,
+          commitRequest: null,
+          origin: 'sketch_centerline',
+          boardVisible: true,
+          basePlacement: { x: 0, y: 0, scale: 1 },
+          displayPlacement: { x: 0, y: 0, scale: 1 },
+          rasterOverlay: null,
+        };
+        renderSketchPreviewSvg(payload);
+        dom.previewChip.innerHTML = `<strong>Preview</strong> sketch · ${Number(payload.stroke_count || 0)} strokes`;
+        dom.summaryPreview.textContent = `Sketch Centerline preview only with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Drawing integration comes later.`;
+        setNotice('warning', 'Sketch preview only', 'Sketch Centerline preview only — drawing integration comes later.');
+        pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
+        refreshUiState({ redrawBoard: true });
+      }
+
       function scheduleUploadStatusPoll(delayMs = 650) {
         stopUploadStatusPolling();
         if (!state.latestUploadId) {
@@ -3282,6 +3460,9 @@
           method: 'POST',
           body: form,
         });
+        if (dom.sketchPreviewBox) {
+          dom.sketchPreviewBox.classList.remove('active');
+        }
         recordUploadState(payload);
         if (payload.source_type === 'image' && payload.raster_overlay) {
           const imageUrl = URL.createObjectURL(file);
@@ -3296,6 +3477,28 @@
         pushFeed('File uploaded and queued for background preprocessing.', 'info');
         scheduleUploadStatusPoll();
         refreshUiState({ redrawBoard: true });
+      }
+
+      async function previewSketchCenterlineFile(file) {
+        if (!file) {
+          throw new Error('Choose a PNG or JPG sketch first.');
+        }
+        const name = String(file.name || '').toLowerCase();
+        const type = String(file.type || '').toLowerCase();
+        const isSketchImage = type === 'image/png' || type === 'image/jpeg' || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg');
+        if (!isSketchImage) {
+          throw new Error('Sketch Centerline preview accepts PNG or JPG files.');
+        }
+        stopUploadStatusPolling();
+        const form = new FormData();
+        form.append('file', file);
+        form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
+        form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 8)))));
+        const payload = await apiRequest('/api/sketch-centerline/preview', {
+          method: 'POST',
+          body: form,
+        });
+        applySketchCenterlinePreview(payload);
       }
 
       function buildUploadPayload() {
@@ -3323,6 +3526,9 @@
           progress: 1,
           message: 'Vector preview is ready.',
         };
+        if (dom.sketchPreviewBox) {
+          dom.sketchPreviewBox.classList.remove('active');
+        }
         applyVectorPreview(payload.source_type || 'image', payload, { origin: 'file', boardVisible: true });
       }
 
@@ -3503,6 +3709,15 @@
           await previewUploadedFile();
         } catch (error) {
           handleError('File preview failed', error);
+        }
+      });
+
+      dom.sketchPreviewBtn.addEventListener('click', async () => {
+        const file = dom.fileInput.files && dom.fileInput.files[0];
+        try {
+          await previewSketchCenterlineFile(file);
+        } catch (error) {
+          handleError('Sketch Centerline preview failed', error);
         }
       });
 

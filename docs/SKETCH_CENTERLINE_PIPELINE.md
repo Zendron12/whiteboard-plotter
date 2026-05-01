@@ -83,6 +83,24 @@ Response fields:
 The SVG preview uses the board dimensions as its `viewBox` and preserves the
 board coordinate frame: origin at top-left, x right, y down.
 
+## Existing UI Preview
+
+The existing File upload section exposes this mode as a preview-only option.
+Choose a PNG/JPG in the normal file input, optionally adjust `Sketch Margin (m)`
+and `Sketch Noise Area (px)`, then click `Preview as Sketch Centerline`.
+
+The UI calls `/api/sketch-centerline/preview`, displays the returned
+`preview_svg`, and draws the returned board-space preview strokes on the board
+canvas. It also shows stroke and point counts, canonical command count, bounds,
+preview truncation status, skeleton backend, threshold information, and any
+warnings.
+
+This path does not set an upload id, does not create a commit request, and does
+not publish to the robot. `Commit File` is disabled while the Sketch Centerline
+preview is active. Drawing/commit integration remains a later task; the normal
+`Upload + Preview`, `Re-Preview`, and `Commit File` flow continues to use the
+existing upload/vector pipeline.
+
 ## Runtime Status
 
 The endpoint validates that the produced `DrawingPathPlan` can convert through
@@ -99,4 +117,3 @@ stable and endpoint-level safety checks are added.
 - It does not optimize stroke ordering beyond preserving traced order.
 - It does not implement SVG parsing, photo outlines, hatching, voice commands,
   or numbered-library runtime behavior.
-
