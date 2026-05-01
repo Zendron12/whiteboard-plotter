@@ -1,5 +1,6 @@
 """Neutral image-pipeline type definitions for future plan builders."""
 
+from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
 from wall_climber.image_pipeline.types import (
     DrawingPathPlan,
     PipelineMetrics,
@@ -14,4 +15,5 @@ __all__ = [
     'PipelineMode',
     'Point2D',
     'Stroke',
+    'drawing_path_plan_to_canonical',
 ]

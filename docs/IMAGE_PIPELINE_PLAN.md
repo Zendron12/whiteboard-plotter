@@ -2,6 +2,8 @@
 
 This document defines the future best-practice image pipeline for the Webots cable-driven whiteboard robot. It is a design plan only. The current task does not replace the existing production image pipeline.
 
+An offline adapter design exists for converting tested `DrawingPathPlan` output into the current `CanonicalPathPlan` model. It is not enabled in runtime endpoints. Future PNG, SVG, photo, voice, and numbered-library paths should produce `DrawingPathPlan` first, with runtime connection added later after mode-specific tests exist.
+
 ## A. Sketch Centerline Mode
 
 Purpose:

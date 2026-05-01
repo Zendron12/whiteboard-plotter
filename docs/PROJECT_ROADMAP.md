@@ -31,6 +31,8 @@ Planned layers:
 - Metrics/evaluation dashboard: exposes stroke counts, point counts, travel length, drawing length, pen lifts, estimated time, and optional similarity metrics.
 - Webots execution adapter: converts approved plans into the existing `CanonicalPathPlan` and `PrimitivePathPlan` execution path after tests prove parity.
 
+The first offline adapter design from `DrawingPathPlan` to `CanonicalPathPlan` now exists as a tested foundation. It is not enabled in runtime endpoints; future PNG, SVG, photo, voice, and numbered-library pipelines should emit `DrawingPathPlan` first, then connect to runtime only after pipeline tests and parity checks exist.
+
 ## Hybrid Image Pipeline Modes
 
 ### Sketch Centerline Mode
@@ -137,7 +139,7 @@ Do not move image processing to C++ unless there is a measured performance reaso
 
 1. Keep current Webots Y-shape/two-cable behavior stable.
 2. Add `DrawingPathPlan` as a neutral type-only foundation.
-3. Add a future adapter from `DrawingPathPlan` to `CanonicalPathPlan` with tests, but do not wire it into production first.
+3. Keep the tested `DrawingPathPlan` to `CanonicalPathPlan` adapter offline until runtime integration is explicitly planned.
 4. Add a manifest-backed numbered image library.
 5. Add a voice parser that maps commands to existing backend actions or future plan builders.
 6. Add a metrics dashboard section backed by existing diagnostics and future pipeline metrics.
