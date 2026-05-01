@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": 1,
+      "name": "Simple Sketch",
+      "file": "examples/simple_sketch.png",
+      "default_mode": "sketch_centerline",
+      "description": "Example black and white sketch intended for centerline tracing."
+    },
+    {
+      "id": 2,
+      "name": "Logo Vector Image",
+      "file": "examples/logo_vector.svg",
+      "default_mode": "svg_vector",
+      "description": "Example logo or vector image intended for SVG path sampling."
+    },
+    {
+      "id": 3,
+      "name": "Photo Outline Demo",
+      "file": "examples/photo_outline_demo.jpg",
+      "default_mode": "photo_outline",
+      "description": "Example photo-like input intended for outline extraction."
+    }
+  ]
+}
