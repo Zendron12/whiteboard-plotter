@@ -37,6 +37,14 @@ class BoardDefaults:
 
 @dataclass(frozen=True)
 class AnchorDefaults:
+    top_left_x: float
+    top_left_y: float
+    top_right_x: float
+    top_right_y: float
+    bottom_left_x: float
+    bottom_left_y: float
+    bottom_right_x: float
+    bottom_right_y: float
     left_x: float
     left_y: float
     right_x: float
@@ -59,6 +67,14 @@ class CarriageDefaults:
     mass: float
     root_to_chassis_z: float
     plane_y: float
+    attachment_top_left_x: float
+    attachment_top_left_y: float
+    attachment_top_right_x: float
+    attachment_top_right_y: float
+    attachment_bottom_left_x: float
+    attachment_bottom_left_y: float
+    attachment_bottom_right_x: float
+    attachment_bottom_right_y: float
     attachment_left_x: float
     attachment_left_y: float
     attachment_right_x: float
@@ -287,6 +303,34 @@ class SharedConfig:
         right_dist_sq = (x - self.anchors.right_x) ** 2 + (y - self.anchors.right_y) ** 2
         min_dist_sq = self.workspace.corner_keepout_radius ** 2
         return left_dist_sq >= min_dist_sq and right_dist_sq >= min_dist_sq
+
+    def four_cable_anchors(self) -> dict[str, tuple[float, float]]:
+        return {
+            'top_left': (self.anchors.top_left_x, self.anchors.top_left_y),
+            'top_right': (self.anchors.top_right_x, self.anchors.top_right_y),
+            'bottom_left': (self.anchors.bottom_left_x, self.anchors.bottom_left_y),
+            'bottom_right': (self.anchors.bottom_right_x, self.anchors.bottom_right_y),
+        }
+
+    def four_cable_attachments(self) -> dict[str, tuple[float, float]]:
+        return {
+            'top_left': (
+                self.carriage.attachment_top_left_x,
+                self.carriage.attachment_top_left_y,
+            ),
+            'top_right': (
+                self.carriage.attachment_top_right_x,
+                self.carriage.attachment_top_right_y,
+            ),
+            'bottom_left': (
+                self.carriage.attachment_bottom_left_x,
+                self.carriage.attachment_bottom_left_y,
+            ),
+            'bottom_right': (
+                self.carriage.attachment_bottom_right_x,
+                self.carriage.attachment_bottom_right_y,
+            ),
+        }
 
     def initial_spawn_translation(self) -> tuple[float, float, float]:
         world_x = self.board_left + self.carriage.initial_center_x

@@ -16,7 +16,7 @@ Existing docs describe the canonical path and primitive transport migration:
 
 ## Webots World, Plugin, And Controller Flow
 
-The current simulation is a Y-shape / two-cable Webots wall robot. It is not a CNC rail system.
+The simulation is a Webots cable-driven wall robot. It is not a CNC rail system.
 
 Primary launch entrypoint:
 
@@ -35,8 +35,8 @@ Launch starts:
 
 World files:
 
-- `src/wall_climber/worlds/wall_world.wbt`: break-room world that preserves the original whiteboard coordinates and includes the whiteboard, two cable anchor mounts, and an external `cable_supervisor` robot.
-- `src/wall_climber/worlds/wall_world_basic.wbt`: simpler lab world with the same two-cable board concept.
+- `src/wall_climber/worlds/wall_world.wbt`: break-room world that preserves the original whiteboard coordinates and includes the whiteboard, existing top anchor mounts, and an external `cable_supervisor` robot.
+- `src/wall_climber/worlds/wall_world_basic.wbt`: simpler lab world with the same board concept.
 
 Robot xacro files:
 
@@ -44,15 +44,15 @@ Robot xacro files:
 - `urdf/cable_supervisor.urdf.xacro`: declares the supervisor plugin properties, board dimensions, anchors, carriage geometry, pen properties, safety bounds, cable visuals, and optional Webots trail settings.
 - `urdf/base_body.xacro`, `urdf/simple_pen_mount.xacro`, and `urdf/robot_face_screen.xacro`: visual and mechanical structure for the robot body, pen mount, and display.
 
-## How The Y-Shape Robot Moves In Webots
+## How The Cable Robot Moves In Webots
 
 The runtime path is:
 
 1. Browser/API input creates text, SVG, or image drawing requests.
 2. Python builds a `CanonicalPathPlan`.
 3. The backend exports a `PrimitivePathPlan` and publishes `/wall_climber/primitive_path_plan`.
-4. `wall_climber_draw_body/cable_draw_executor` samples the primitives, validates board and cable safety bounds, converts pen points to carriage center and cable lengths, then publishes `/wall_climber/cable_setpoint`.
-5. `CableSupervisorPlugin` receives cable setpoints, solves the two cable lengths against the configured top-left and top-right anchors, and applies the resulting board-space carriage pose to the Webots robot.
+4. `wall_climber_draw_body/cable_draw_executor` samples the primitives, validates board and cable safety bounds, converts pen points to carriage center and legacy top-cable lengths, then publishes `/wall_climber/cable_setpoint`.
+5. `CableSupervisorPlugin` receives cable setpoints, uses `CableSetpoint.carriage_pose.x/y` as the board-space carriage center, computes four kinematic cable lengths, and applies the resulting pose to the Webots robot.
 6. `CableRobotPlugin` receives the same setpoint and controls the pen slide up/down state.
 
 The supervisor plugin intentionally drives the simulation through a plugin-level cable model and pose application. This avoids implementing full cable physics or dynamics in this task.
@@ -64,7 +64,7 @@ The supervisor plugin intentionally drives the simulation through a plugin-level
 - Reads board, anchor, carriage, pen, workspace, and visual settings from xacro properties generated from `config/cable_robot.yaml`.
 - Publishes board metadata, robot pose, pen pose, pen contact, pen gap, and supervisor status.
 - Subscribes to `/wall_climber/cable_setpoint` and manual pen mode.
-- Solves two cable lengths into carriage center coordinates.
+- Computes four kinematic cable lengths from `CableSetpoint.carriage_pose`, four board anchors, and four carriage attachment offsets.
 - Applies the target robot translation and rotation in Webots.
 - Creates visual cable lines and optional trail mesh.
 - Tracks pen contact using the pen tip geometry or fallback geometry.
@@ -84,7 +84,7 @@ The supervisor plugin intentionally drives the simulation through a plugin-level
 - Samples lines, arcs, quadratic Beziers, and cubic Beziers.
 - Builds travel and draw paths.
 - Validates writable board bounds, carriage-safe bounds, safe cable workspace, and anchor keepout.
-- Computes left and right cable lengths from carriage attachment points.
+- Computes legacy left and right top-cable lengths from carriage attachment points while also publishing `carriage_pose` as the carriage center.
 - Publishes `/wall_climber/cable_setpoint`.
 - Publishes executor status and JSON diagnostics.
 
@@ -190,10 +190,10 @@ Observed results during this audit:
 
 ## Recommended Next Steps
 
-1. Keep the Webots plugin-based two-cable simulation stable and covered by tests before changing launch, xacro, or plugin behavior.
+1. Keep the Webots plugin-based four-cable kinematic simulation covered by tests before changing launch, xacro, or plugin behavior again.
 2. Add a future adapter from the new `DrawingPathPlan` DTO to the existing `CanonicalPathPlan`, but do not wire it into production until tests cover parity.
 3. Add focused tests for any new image pipeline module before replacing existing vectorization behavior.
 4. Add voice command parsing as a separate Python layer that produces the same neutral drawing plan format.
 5. Add a small numbered image library service around the manifest after the manifest contract is reviewed.
 6. Consider fixing Python test discovery in colcon and removing the `tests_require` warning.
-7. Treat four-cable wall robot work as a separate future design task with its own kinematics, safety, tests, and simulator plan.
+7. Treat any move beyond kinematic four-cable behavior, such as tension or slack modeling, as a separate future design task with its own tests and simulator plan.

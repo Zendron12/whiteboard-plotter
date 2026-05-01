@@ -2,20 +2,20 @@
 
 ## Project Identity
 
-This project is a Webots-based cable-driven whiteboard drawing robot for large boards. The current robot is a Y-shape / two-cable wall robot, not a rail-based CNC machine or Cartesian XY plotter.
+This project is a Webots-based cable-driven whiteboard drawing robot for large boards. It is not a rail-based CNC machine or Cartesian XY plotter.
 
 The existing Webots plugin-based simulation is intentional and must be preserved. The project should not replace the current plugin approach with full cable physics or cable dynamics unless that becomes an explicit, measured future requirement.
 
-## Future Optional Mechanical Extension
+## Mechanical Direction
 
-A future version may explore a more stable four-cable wall robot with:
+The original simulation used a Y-shape / two-cable supervisor. The integrated mechanical direction is now a four-cable kinematic supervisor with:
 
 - top-left anchor
 - top-right anchor
 - bottom-left anchor
 - bottom-right anchor
 
-This is documentation only for now. Do not implement four-cable kinematics, cable dynamics, new anchors, or a rewritten world in the current architecture foundation task.
+This remains plugin-based and kinematic. Do not replace it with a CNC rail model, a separate duplicate Webots world, a parallel runtime, or full cable physics.
 
 ## Target Software Architecture
 
@@ -137,10 +137,14 @@ Do not move image processing to C++ unless there is a measured performance reaso
 
 ## Near-Term Milestones
 
-1. Keep current Webots Y-shape/two-cable behavior stable.
+1. Keep the Webots plugin-based cable simulation stable as it moves from the original two-cable setup to the integrated four-cable kinematic supervisor model.
 2. Add `DrawingPathPlan` as a neutral type-only foundation.
 3. Keep the tested `DrawingPathPlan` to `CanonicalPathPlan` adapter offline until runtime integration is explicitly planned.
 4. Add a manifest-backed numbered image library.
 5. Add a voice parser that maps commands to existing backend actions or future plan builders.
 6. Add a metrics dashboard section backed by existing diagnostics and future pipeline metrics.
-7. Evaluate four-cable mechanics as a separate future design task.
+7. Extend four-cable diagnostics and evaluation only after the kinematic supervisor behavior is covered by tests.
+
+## Four-Cable Kinematic Supervisor Note
+
+The existing Webots supervisor plugin is being upgraded in place to a four-cable kinematic model. This remains plugin-based and pose-driven; it is not a separate world, duplicate runtime, visual-only cable decoration, or full rope-physics simulation.

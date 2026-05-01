@@ -13,16 +13,20 @@
   <xacro:property name="safe_y_min" value="${board_cfg['margin_top'] + workspace_cfg['top_clearance']}"/>
   <xacro:property name="safe_y_max" value="${board_cfg['height'] - board_cfg['margin_bottom'] - workspace_cfg['safety_margin_bottom']}"/>
   <xacro:property name="chassis_root_local_z" value="${carriage_cfg['root_to_chassis_z']}"/>
-  <xacro:property name="cable_mount_left_local_y" value="${-carriage_cfg['attachment_left_y']}"/>
-  <xacro:property name="cable_mount_right_local_y" value="${-carriage_cfg['attachment_right_y']}"/>
+  <xacro:property name="cable_mount_left_local_y" value="${-carriage_cfg['attachment_top_left_y']}"/>
+  <xacro:property name="cable_mount_right_local_y" value="${-carriage_cfg['attachment_top_right_y']}"/>
   <xacro:property name="cable_mount_local_z" value="${chassis_root_local_z - (carriage_cfg['depth'] / 2.0) + 0.002}"/>
 
   <xacro:property name="board_left_world_x" value="${board_cfg['center_x'] - (board_cfg['width'] / 2.0)}"/>
   <xacro:property name="board_top_world_z" value="${board_cfg['center_z'] + (board_cfg['height'] / 2.0)}"/>
-  <xacro:property name="left_anchor_world_x" value="${board_left_world_x + anchor_cfg['left_x']}"/>
-  <xacro:property name="left_anchor_world_z" value="${board_top_world_z - anchor_cfg['left_y']}"/>
-  <xacro:property name="right_anchor_world_x" value="${board_left_world_x + anchor_cfg['right_x']}"/>
-  <xacro:property name="right_anchor_world_z" value="${board_top_world_z - anchor_cfg['right_y']}"/>
+  <xacro:property name="left_anchor_world_x" value="${board_left_world_x + anchor_cfg['top_left_x']}"/>
+  <xacro:property name="left_anchor_world_z" value="${board_top_world_z - anchor_cfg['top_left_y']}"/>
+  <xacro:property name="right_anchor_world_x" value="${board_left_world_x + anchor_cfg['top_right_x']}"/>
+  <xacro:property name="right_anchor_world_z" value="${board_top_world_z - anchor_cfg['top_right_y']}"/>
+  <xacro:property name="bottom_left_anchor_world_x" value="${board_left_world_x + anchor_cfg['bottom_left_x']}"/>
+  <xacro:property name="bottom_left_anchor_world_z" value="${board_top_world_z - anchor_cfg['bottom_left_y']}"/>
+  <xacro:property name="bottom_right_anchor_world_x" value="${board_left_world_x + anchor_cfg['bottom_right_x']}"/>
+  <xacro:property name="bottom_right_anchor_world_z" value="${board_top_world_z - anchor_cfg['bottom_right_y']}"/>
 
   <xacro:macro name="board_anchor_visual" params="name world_x world_z x_sign">
     <joint name="${name}_joint" type="fixed">
@@ -79,6 +83,8 @@
 
   <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="1"/>
   <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="-1"/>
+  <xacro:board_anchor_visual name="bottom_left_board_anchor" world_x="${bottom_left_anchor_world_x}" world_z="${bottom_left_anchor_world_z}" x_sign="1"/>
+  <xacro:board_anchor_visual name="bottom_right_board_anchor" world_x="${bottom_right_anchor_world_x}" world_z="${bottom_right_anchor_world_z}" x_sign="-1"/>
 
   <webots>
     <plugin type="wall_climber.cable_supervisor_plugin.CableSupervisorPlugin">
@@ -99,19 +105,35 @@
       <safe_y_min>${safe_y_min}</safe_y_min>
       <safe_y_max>${safe_y_max}</safe_y_max>
       <corner_keepout_radius>${workspace_cfg['corner_keepout_radius']}</corner_keepout_radius>
+      <anchor_top_left_x>${anchor_cfg['top_left_x']}</anchor_top_left_x>
+      <anchor_top_left_y>${anchor_cfg['top_left_y']}</anchor_top_left_y>
+      <anchor_top_right_x>${anchor_cfg['top_right_x']}</anchor_top_right_x>
+      <anchor_top_right_y>${anchor_cfg['top_right_y']}</anchor_top_right_y>
+      <anchor_bottom_left_x>${anchor_cfg['bottom_left_x']}</anchor_bottom_left_x>
+      <anchor_bottom_left_y>${anchor_cfg['bottom_left_y']}</anchor_bottom_left_y>
+      <anchor_bottom_right_x>${anchor_cfg['bottom_right_x']}</anchor_bottom_right_x>
+      <anchor_bottom_right_y>${anchor_cfg['bottom_right_y']}</anchor_bottom_right_y>
       <anchor_left_x>${anchor_cfg['left_x']}</anchor_left_x>
       <anchor_left_y>${anchor_cfg['left_y']}</anchor_left_y>
       <anchor_right_x>${anchor_cfg['right_x']}</anchor_right_x>
       <anchor_right_y>${anchor_cfg['right_y']}</anchor_right_y>
+      <carriage_attachment_top_left_x>${carriage_cfg['attachment_top_left_x']}</carriage_attachment_top_left_x>
+      <carriage_attachment_top_left_y>${carriage_cfg['attachment_top_left_y']}</carriage_attachment_top_left_y>
+      <carriage_attachment_top_right_x>${carriage_cfg['attachment_top_right_x']}</carriage_attachment_top_right_x>
+      <carriage_attachment_top_right_y>${carriage_cfg['attachment_top_right_y']}</carriage_attachment_top_right_y>
+      <carriage_attachment_bottom_left_x>${carriage_cfg['attachment_bottom_left_x']}</carriage_attachment_bottom_left_x>
+      <carriage_attachment_bottom_left_y>${carriage_cfg['attachment_bottom_left_y']}</carriage_attachment_bottom_left_y>
+      <carriage_attachment_bottom_right_x>${carriage_cfg['attachment_bottom_right_x']}</carriage_attachment_bottom_right_x>
+      <carriage_attachment_bottom_right_y>${carriage_cfg['attachment_bottom_right_y']}</carriage_attachment_bottom_right_y>
       <carriage_attachment_left_x>${carriage_cfg['attachment_left_x']}</carriage_attachment_left_x>
       <carriage_attachment_left_y>${carriage_cfg['attachment_left_y']}</carriage_attachment_left_y>
       <carriage_attachment_right_x>${carriage_cfg['attachment_right_x']}</carriage_attachment_right_x>
       <carriage_attachment_right_y>${carriage_cfg['attachment_right_y']}</carriage_attachment_right_y>
       <carriage_width>${carriage_cfg['width']}</carriage_width>
       <carriage_height>${carriage_cfg['height']}</carriage_height>
-      <cable_mount_left_local_x>${carriage_cfg['attachment_left_x']}</cable_mount_left_local_x>
+      <cable_mount_left_local_x>${carriage_cfg['attachment_top_left_x']}</cable_mount_left_local_x>
       <cable_mount_left_local_y>${cable_mount_left_local_y}</cable_mount_left_local_y>
-      <cable_mount_right_local_x>${carriage_cfg['attachment_right_x']}</cable_mount_right_local_x>
+      <cable_mount_right_local_x>${carriage_cfg['attachment_top_right_x']}</cable_mount_right_local_x>
       <cable_mount_right_local_y>${cable_mount_right_local_y}</cable_mount_right_local_y>
       <cable_mount_local_z>${cable_mount_local_z}</cable_mount_local_z>
       <pen_offset_x>${carriage_cfg['pen_offset_x']}</pen_offset_x>

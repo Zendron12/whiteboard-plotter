@@ -7,6 +7,7 @@ import rclpy
 from geometry_msgs.msg import PointStamped, Pose2D
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64, String
+from wall_climber.four_cable_kinematics import FOUR_CABLE_NAMES, compute_four_cable_lengths
 from wall_climber_interfaces.msg import CableSetpoint
 from wall_climber.runtime_topics import (
     MANUAL_PEN_MODE_TOPIC,
@@ -56,22 +57,63 @@ class CableSupervisorPlugin:
         self._safe_y_max = float(properties.get('safe_y_max', '2.82'))
         self._corner_keepout_radius = float(properties.get('corner_keepout_radius', '0.36'))
 
-        self._anchor_left = (
+        legacy_anchor_left = (
             float(properties.get('anchor_left_x', '0.0')),
             float(properties.get('anchor_left_y', '0.0')),
         )
-        self._anchor_right = (
+        legacy_anchor_right = (
             float(properties.get('anchor_right_x', f'{self._board_width}')),
             float(properties.get('anchor_right_y', '0.0')),
         )
-        self._attach_left = (
+        self._four_cable_anchors = {
+            'top_left': (
+                float(properties.get('anchor_top_left_x', str(legacy_anchor_left[0]))),
+                float(properties.get('anchor_top_left_y', str(legacy_anchor_left[1]))),
+            ),
+            'top_right': (
+                float(properties.get('anchor_top_right_x', str(legacy_anchor_right[0]))),
+                float(properties.get('anchor_top_right_y', str(legacy_anchor_right[1]))),
+            ),
+            'bottom_left': (
+                float(properties.get('anchor_bottom_left_x', str(legacy_anchor_left[0]))),
+                float(properties.get('anchor_bottom_left_y', f'{self._board_height}')),
+            ),
+            'bottom_right': (
+                float(properties.get('anchor_bottom_right_x', str(legacy_anchor_right[0]))),
+                float(properties.get('anchor_bottom_right_y', f'{self._board_height}')),
+            ),
+        }
+        self._anchor_left = self._four_cable_anchors['top_left']
+        self._anchor_right = self._four_cable_anchors['top_right']
+
+        legacy_attach_left = (
             float(properties.get('carriage_attachment_left_x', '-0.104')),
             float(properties.get('carriage_attachment_left_y', '-0.075')),
         )
-        self._attach_right = (
+        legacy_attach_right = (
             float(properties.get('carriage_attachment_right_x', '0.104')),
             float(properties.get('carriage_attachment_right_y', '-0.075')),
         )
+        self._four_cable_attachments = {
+            'top_left': (
+                float(properties.get('carriage_attachment_top_left_x', str(legacy_attach_left[0]))),
+                float(properties.get('carriage_attachment_top_left_y', str(legacy_attach_left[1]))),
+            ),
+            'top_right': (
+                float(properties.get('carriage_attachment_top_right_x', str(legacy_attach_right[0]))),
+                float(properties.get('carriage_attachment_top_right_y', str(legacy_attach_right[1]))),
+            ),
+            'bottom_left': (
+                float(properties.get('carriage_attachment_bottom_left_x', str(legacy_attach_left[0]))),
+                float(properties.get('carriage_attachment_bottom_left_y', str(abs(legacy_attach_left[1])))),
+            ),
+            'bottom_right': (
+                float(properties.get('carriage_attachment_bottom_right_x', str(legacy_attach_right[0]))),
+                float(properties.get('carriage_attachment_bottom_right_y', str(abs(legacy_attach_right[1])))),
+            ),
+        }
+        self._attach_left = self._four_cable_attachments['top_left']
+        self._attach_right = self._four_cable_attachments['top_right']
         self._carriage_width = float(properties.get('carriage_width', '0.29'))
         self._carriage_height = float(properties.get('carriage_height', '0.20'))
         self._mount_left_local = (
@@ -123,6 +165,7 @@ class CableSupervisorPlugin:
         )
 
         self._latest_setpoint = None
+        self._latest_four_cable_lengths = None
         self._pen_down_requested = False
         self._manual_pen_mode = PEN_MODE_AUTO
         self._pen_contact_latched = False
@@ -183,34 +226,31 @@ class CableSupervisorPlugin:
         except Exception:
             self._root_children = None
 
-        self._board_info_json = json.dumps(
-            {
-                'frame_origin': 'top_left',
-                'frame_x_axis': 'right',
-                'frame_y_axis': 'down',
-                'width': self._board_width,
-                'height': self._board_height,
-                'writable_x_min': self._writable_x_min,
-                'writable_x_max': self._writable_x_max,
-                'writable_y_min': self._writable_y_min,
-                'writable_y_max': self._writable_y_max,
-                'safe_x_min': self._safe_x_min,
-                'safe_x_max': self._safe_x_max,
-                'safe_y_min': self._safe_y_min,
-                'safe_y_max': self._safe_y_max,
-                'body_safe_x_min': self._body_safe_x_min,
-                'body_safe_x_max': self._body_safe_x_max,
-                'body_safe_y_min': self._body_safe_y_min,
-                'body_safe_y_max': self._body_safe_y_max,
-                'corner_keepout_radius': self._corner_keepout_radius,
-                'line_height': self._line_height,
-                'anchors': {
-                    'left': {'x': self._anchor_left[0], 'y': self._anchor_left[1]},
-                    'right': {'x': self._anchor_right[0], 'y': self._anchor_right[1]},
-                },
+        self._base_board_info = {
+            'frame_origin': 'top_left',
+            'frame_x_axis': 'right',
+            'frame_y_axis': 'down',
+            'width': self._board_width,
+            'height': self._board_height,
+            'writable_x_min': self._writable_x_min,
+            'writable_x_max': self._writable_x_max,
+            'writable_y_min': self._writable_y_min,
+            'writable_y_max': self._writable_y_max,
+            'safe_x_min': self._safe_x_min,
+            'safe_x_max': self._safe_x_max,
+            'safe_y_min': self._safe_y_min,
+            'safe_y_max': self._safe_y_max,
+            'body_safe_x_min': self._body_safe_x_min,
+            'body_safe_x_max': self._body_safe_x_max,
+            'body_safe_y_min': self._body_safe_y_min,
+            'body_safe_y_max': self._body_safe_y_max,
+            'corner_keepout_radius': self._corner_keepout_radius,
+            'line_height': self._line_height,
+            'anchors': {
+                'left': {'x': self._anchor_left[0], 'y': self._anchor_left[1]},
+                'right': {'x': self._anchor_right[0], 'y': self._anchor_right[1]},
             },
-            separators=(',', ':'),
-        )
+        }
         self._publish_board_info()
         self._set_status('starting')
 
@@ -237,9 +277,30 @@ class CableSupervisorPlugin:
         msg.data = status
         self._status_pub.publish(msg)
 
+    def _point_map_json(self, points):
+        return {
+            name: {'x': float(value[0]), 'y': float(value[1])}
+            for name, value in points.items()
+        }
+
+    def _board_info_payload(self):
+        payload = dict(self._base_board_info)
+        payload['four_cable_kinematics'] = {
+            'model': 'four_cable_kinematic',
+            'pose_source': 'CableSetpoint.carriage_pose',
+            'anchors': self._point_map_json(self._four_cable_anchors),
+            'attachments': self._point_map_json(self._four_cable_attachments),
+            'lengths': (
+                {name: float(length) for name, length in self._latest_four_cable_lengths.items()}
+                if self._latest_four_cable_lengths is not None
+                else None
+            ),
+        }
+        return payload
+
     def _publish_board_info(self):
         msg = String()
-        msg.data = self._board_info_json
+        msg.data = json.dumps(self._board_info_payload(), separators=(',', ':'))
         self._board_info_pub.publish(msg)
 
     def _world_to_board(self, world_x, world_z):
@@ -629,34 +690,29 @@ class CableSupervisorPlugin:
             + float(orientation[8]) * local_point[2],
         )
 
-    def _solve_center_from_lengths(self, left_length, right_length):
-        center_left = (
-            self._anchor_left[0] - self._attach_left[0],
-            self._anchor_left[1] - self._attach_left[1],
+    def _pose_within_safe_workspace(self, center_x, center_y):
+        if not math.isfinite(center_x) or not math.isfinite(center_y):
+            return False
+        if not (
+            self._carriage_width * 0.5 <= center_x <= self._board_width - (self._carriage_width * 0.5)
+            and self._carriage_height * 0.5 <= center_y <= self._board_height - (self._carriage_height * 0.5)
+        ):
+            return False
+        pen_x = center_x + self._pen_offset[0]
+        pen_y = center_y + self._pen_offset[1]
+        return (
+            self._safe_x_min <= pen_x <= self._safe_x_max
+            and self._safe_y_min <= pen_y <= self._safe_y_max
+            and self._body_safe_x_min <= pen_x <= self._body_safe_x_max
+            and self._body_safe_y_min <= pen_y <= self._body_safe_y_max
         )
-        center_right = (
-            self._anchor_right[0] - self._attach_right[0],
-            self._anchor_right[1] - self._attach_right[1],
+
+    def _compute_four_cable_lengths(self, center_x, center_y):
+        return compute_four_cable_lengths(
+            (center_x, center_y),
+            self._four_cable_anchors,
+            self._four_cable_attachments,
         )
-        dx = center_right[0] - center_left[0]
-        dy = center_right[1] - center_left[1]
-        distance = math.hypot(dx, dy)
-        if distance <= 1.0e-9:
-            return None
-        if left_length + right_length < distance:
-            return None
-        if left_length + distance < right_length or right_length + distance < left_length:
-            return None
-        a = (left_length * left_length - right_length * right_length + distance * distance) / (2.0 * distance)
-        h_sq = max(0.0, left_length * left_length - a * a)
-        h = math.sqrt(h_sq)
-        px = center_left[0] + a * dx / distance
-        py = center_left[1] + a * dy / distance
-        rx = -dy * h / distance
-        ry = dx * h / distance
-        solution_a = (px + rx, py + ry)
-        solution_b = (px - rx, py - ry)
-        return solution_a if solution_a[1] >= solution_b[1] else solution_b
 
     def _apply_target_pose(self, center_x, center_y):
         if self._target is None:
@@ -735,6 +791,8 @@ class CableSupervisorPlugin:
         if self._root_children is None:
             return False
         self._drop_existing_node('CABLE_LINES')
+        zero_points = ', '.join(['0 0 0'] * 16)
+        coord_index = ' '.join(f'{index} {index + 1} -1' for index in range(0, 16, 2))
         node_str = (
             'DEF CABLE_LINES Transform { '
             'children [ Shape { '
@@ -742,8 +800,8 @@ class CableSupervisorPlugin:
             'material Material { diffuseColor 0.96 0.38 0.10 emissiveColor 0.22 0.07 0.02 } '
             '} '
             'geometry IndexedLineSet { '
-            'coord Coordinate { point [ 0 0 0, 0 0 0, 0 0 0, 0 0 0, 0 0 0, 0 0 0, 0 0 0, 0 0 0 ] } '
-            'coordIndex [ 0 1 -1 2 3 -1 4 5 -1 6 7 -1 ] '
+            f'coord Coordinate {{ point [ {zero_points} ] }} '
+            f'coordIndex [ {coord_index} ] '
             '} '
             '} ] '
             '}'
@@ -777,22 +835,17 @@ class CableSupervisorPlugin:
         if not self._ensure_cable_visuals():
             return
         anchor_y = self._board_surface_y - 0.002
-        left_anchor_world = self._board_to_world(self._anchor_left[0], self._anchor_left[1], anchor_y)
-        right_anchor_world = self._board_to_world(self._anchor_right[0], self._anchor_right[1], anchor_y)
-        left_attach_world = self._world_position(self._left_mount_node)
-        if left_attach_world is None:
-            left_attach_world = self._target_world_from_local(self._mount_left_local)
-        if left_attach_world is None:
-            left_attach_world = self._board_to_world(center_x + self._attach_left[0], center_y + self._attach_left[1], self._carriage_plane_y)
-        right_attach_world = self._world_position(self._right_mount_node)
-        if right_attach_world is None:
-            right_attach_world = self._target_world_from_local(self._mount_right_local)
-        if right_attach_world is None:
-            right_attach_world = self._board_to_world(center_x + self._attach_right[0], center_y + self._attach_right[1], self._carriage_plane_y)
-        points = [
-            *self._expanded_cable_points(left_anchor_world, left_attach_world),
-            *self._expanded_cable_points(right_anchor_world, right_attach_world),
-        ]
+        points = []
+        for cable_name in FOUR_CABLE_NAMES:
+            anchor = self._four_cable_anchors[cable_name]
+            attachment = self._four_cable_attachments[cable_name]
+            anchor_world = self._board_to_world(anchor[0], anchor[1], anchor_y)
+            attach_world = self._board_to_world(
+                center_x + attachment[0],
+                center_y + attachment[1],
+                self._carriage_plane_y,
+            )
+            points.extend(self._expanded_cable_points(anchor_world, attach_world))
         for index, point in enumerate(points):
             self._cable_points_field.setMFVec3f(index, [float(point[0]), float(point[1]), float(point[2])])
 
@@ -1008,17 +1061,27 @@ class CableSupervisorPlugin:
 
         if self._latest_setpoint is None:
             self._set_status('waiting_for_setpoint')
+            try:
+                self._latest_four_cable_lengths = self._compute_four_cable_lengths(
+                    self._current_center[0],
+                    self._current_center[1],
+                )
+            except ValueError:
+                self._latest_four_cable_lengths = None
             self._apply_target_pose(self._current_center[0], self._current_center[1])
         else:
-            solved_center = self._solve_center_from_lengths(
-                float(self._latest_setpoint.left_cable_length),
-                float(self._latest_setpoint.right_cable_length),
-            )
-            if solved_center is None:
+            center_x = float(self._latest_setpoint.carriage_pose.x)
+            center_y = float(self._latest_setpoint.carriage_pose.y)
+            if not self._pose_within_safe_workspace(center_x, center_y):
                 self._set_status('error')
             else:
-                self._apply_target_pose(solved_center[0], solved_center[1])
-                self._set_status('tracking')
+                try:
+                    self._latest_four_cable_lengths = self._compute_four_cable_lengths(center_x, center_y)
+                except ValueError:
+                    self._set_status('error')
+                else:
+                    self._apply_target_pose(center_x, center_y)
+                    self._set_status('tracking')
 
         self._publish_robot_pose(self._current_center[0], self._current_center[1])
         self._update_cable_visuals(self._current_center[0], self._current_center[1])
