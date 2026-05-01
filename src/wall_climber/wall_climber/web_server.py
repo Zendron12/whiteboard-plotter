@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 import threading
 import time
@@ -9,19 +9,62 @@ import uuid
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy
-import rclpy
 import uvicorn
-from ament_index_python.packages import get_package_share_directory
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from rclpy.executors import SingleThreadedExecutor
-from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
-from wall_climber_interfaces.msg import BoardPoint, PathPrimitive, PrimitivePathPlan
+
+try:
+    import rclpy
+    from ament_index_python.packages import get_package_share_directory
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.node import Node
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from std_msgs.msg import String
+    from wall_climber_interfaces.msg import BoardPoint, PathPrimitive, PrimitivePathPlan
+except ImportError as exc:
+    rclpy = None
+    _ROS_IMPORT_ERROR = exc
+
+    def get_package_share_directory(_package_name: str) -> str:
+        raise RuntimeError('ROS 2 Python dependencies are required for package share lookup.') from _ROS_IMPORT_ERROR
+
+    class SingleThreadedExecutor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError('ROS 2 Python dependencies are required for WebBackendNode.') from _ROS_IMPORT_ERROR
+
+    class Node:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError('ROS 2 Python dependencies are required for WebBackendNode.') from _ROS_IMPORT_ERROR
+
+    class ReliabilityPolicy:
+        RELIABLE = 'reliable'
+
+    class DurabilityPolicy:
+        TRANSIENT_LOCAL = 'transient_local'
+
+    class QoSProfile:
+        def __init__(self, *, depth: int, reliability: Any, durability: Any) -> None:
+            self.depth = depth
+            self.reliability = reliability
+            self.durability = durability
+
+    class String:
+        data: str
+
+    class BoardPoint:
+        x: float
+        y: float
+
+    class PathPrimitive:
+        pass
+
+    class PrimitivePathPlan:
+        pass
+else:
+    _ROS_IMPORT_ERROR = None
 
 from wall_climber.canonical_adapters import (
     SamplingPolicy,
@@ -65,6 +108,8 @@ from wall_climber.ingestion.upload_routing import (
     classify_uploaded_vector_file,
     infer_uploaded_source_type,
 )
+from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
@@ -106,6 +151,7 @@ _SEGMENT_EPS_M = 1.0e-4
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _MAX_SVG_BYTES = 256 * 1024
 _MAX_VECTOR_REQUEST_BYTES = 512 * 1024
+_SKETCH_PREVIEW_MAX_POINTS = 2400
 _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
@@ -1250,6 +1296,131 @@ def _validate_upload(upload: UploadFile, content: bytes) -> UploadedVectorFile:
         raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _validate_sketch_upload(upload: UploadFile, content: bytes) -> None:
+    if not content:
+        raise HTTPException(status_code=422, detail='uploaded file is empty')
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail='uploaded file exceeds the maximum allowed size')
+
+    suffix = Path(upload.filename or '').suffix.lower()
+    normalized_type = str(upload.content_type or '').split(';', 1)[0].strip().lower()
+    if suffix not in {'.png', '.jpg', '.jpeg'} and normalized_type not in {'image/png', 'image/jpeg'}:
+        raise HTTPException(status_code=415, detail='sketch preview accepts PNG or JPG uploads only')
+
+
+def _drawing_plan_bounds(plan) -> dict[str, float]:
+    points = [point for stroke in plan.strokes for point in stroke.points]
+    if not points:
+        raise ValueError('DrawingPathPlan has no points.')
+    x_min = min(float(point.x) for point in points)
+    x_max = max(float(point.x) for point in points)
+    y_min = min(float(point.y) for point in points)
+    y_max = max(float(point.y) for point in points)
+    return {
+        'x_min': x_min,
+        'x_max': x_max,
+        'y_min': y_min,
+        'y_max': y_max,
+        'width': x_max - x_min,
+        'height': y_max - y_min,
+    }
+
+
+def _downsample_points_for_preview(points, *, stride: int) -> list:
+    selected = list(points[::stride])
+    if selected and selected[-1] != points[-1]:
+        selected.append(points[-1])
+    if len(selected) < 2 and len(points) >= 2:
+        selected = [points[0], points[-1]]
+    return selected
+
+
+def _sketch_preview_strokes(plan, *, max_points: int | None = None) -> dict[str, Any]:
+    max_points = _SKETCH_PREVIEW_MAX_POINTS if max_points is None else max_points
+    max_points = max(2, int(max_points))
+    original_point_count = sum(len(stroke.points) for stroke in plan.strokes)
+    stride = max(1, int(numpy.ceil(original_point_count / float(max_points)))) if original_point_count else 1
+    preview_strokes: list[list[list[float]]] = []
+    returned_point_count = 0
+
+    for stroke in plan.strokes:
+        selected = _downsample_points_for_preview(tuple(stroke.points), stride=stride)
+        remaining = max_points - returned_point_count
+        if remaining <= 1:
+            break
+        if len(selected) > remaining:
+            selected = selected[:remaining]
+        if len(selected) < 2:
+            continue
+        preview_strokes.append([[float(point.x), float(point.y)] for point in selected])
+        returned_point_count += len(selected)
+
+    return {
+        'strokes': preview_strokes,
+        'max_points': max_points,
+        'returned_point_count': returned_point_count,
+        'original_point_count': original_point_count,
+        'truncated': returned_point_count < original_point_count,
+    }
+
+
+def _svg_number(value: float) -> str:
+    return f'{float(value):.6g}'
+
+
+def _sketch_preview_svg(
+    preview_strokes: list[list[list[float]]],
+    *,
+    board_width_m: float,
+    board_height_m: float,
+) -> str:
+    stroke_width = max(float(board_width_m), float(board_height_m)) / 360.0
+    polylines: list[str] = []
+    for stroke in preview_strokes:
+        if len(stroke) < 2:
+            continue
+        points = ' '.join(
+            f'{_svg_number(point[0])},{_svg_number(point[1])}'
+            for point in stroke
+        )
+        polylines.append(
+            f'<polyline points="{points}" fill="none" stroke="#111827" '
+            f'stroke-width="{_svg_number(stroke_width)}" '
+            'stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+    body = ''.join(polylines)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {_svg_number(board_width_m)} {_svg_number(board_height_m)}" '
+        f'width="{_svg_number(board_width_m)}" height="{_svg_number(board_height_m)}" '
+        'role="img" aria-label="Sketch centerline preview">'
+        f'<rect x="0" y="0" width="{_svg_number(board_width_m)}" '
+        f'height="{_svg_number(board_height_m)}" fill="white"/>'
+        f'{body}</svg>'
+    )
+
+
+def _sketch_preview_response(plan, *, canonical_command_count: int, board_width_m: float, board_height_m: float) -> dict[str, Any]:
+    preview = _sketch_preview_strokes(plan)
+    return {
+        'ok': True,
+        'mode': plan.mode.value,
+        'stroke_count': len(plan.strokes),
+        'point_count': sum(len(stroke.points) for stroke in plan.strokes),
+        'canonical_command_count': int(canonical_command_count),
+        'metrics': asdict(plan.metrics),
+        'metadata': dict(plan.metadata),
+        'bounds': _drawing_plan_bounds(plan),
+        'warnings': list(plan.metrics.warnings),
+        'preview_svg': _sketch_preview_svg(
+            preview['strokes'],
+            board_width_m=board_width_m,
+            board_height_m=board_height_m,
+        ),
+        'preview': preview,
+    }
+
+
 def _resolve_web_asset_path(web_dir: Path, asset_path: str) -> Path:
     normalized = asset_path.strip('/')
     rel_path = Path(normalized)
@@ -1332,6 +1503,76 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     async def last_curve_fit_debug() -> JSONResponse:
         payload = runtime.last_curve_fit_debug_snapshot()
         return JSONResponse(payload or {'available': False})
+
+    @app.post('/api/sketch-centerline/preview')
+    async def preview_sketch_centerline(
+        file: UploadFile = File(...),
+        margin_m: Optional[float] = Form(None),
+        max_image_dim: Optional[int] = Form(None),
+        min_component_area_px: Optional[int] = Form(None),
+        min_stroke_length_px: Optional[float] = Form(None),
+        simplify_epsilon_px: Optional[float] = Form(None),
+    ) -> JSONResponse:
+        try:
+            content = await file.read(_MAX_UPLOAD_BYTES + 1)
+            _validate_sketch_upload(file, content)
+            sketch_margin_m = _coerce_float(
+                0.05 if margin_m is None else margin_m,
+                field_name='margin_m',
+                minimum=0.0,
+                maximum=min(float(shared.board.width), float(shared.board.height)) * 0.45,
+            )
+            sketch_max_image_dim = _coerce_int(
+                1200 if max_image_dim is None else max_image_dim,
+                field_name='max_image_dim',
+                minimum=16,
+                maximum=4096,
+            )
+            sketch_min_component_area_px = _coerce_int(
+                8 if min_component_area_px is None else min_component_area_px,
+                field_name='min_component_area_px',
+                minimum=1,
+                maximum=100000,
+            )
+            sketch_min_stroke_length_px = _coerce_float(
+                4.0 if min_stroke_length_px is None else min_stroke_length_px,
+                field_name='min_stroke_length_px',
+                minimum=0.0,
+                maximum=100000.0,
+            )
+            sketch_simplify_epsilon_px = _coerce_float(
+                1.0 if simplify_epsilon_px is None else simplify_epsilon_px,
+                field_name='simplify_epsilon_px',
+                minimum=0.0,
+                maximum=10000.0,
+            )
+            try:
+                plan = vectorize_sketch_image_to_plan(
+                    content,
+                    board_width_m=float(shared.board.width),
+                    board_height_m=float(shared.board.height),
+                    margin_m=sketch_margin_m,
+                    max_image_dim=sketch_max_image_dim,
+                    min_component_area_px=sketch_min_component_area_px,
+                    min_stroke_length_px=sketch_min_stroke_length_px,
+                    simplify_epsilon_px=sketch_simplify_epsilon_px,
+                )
+                canonical_plan = drawing_path_plan_to_canonical(plan)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+
+            return JSONResponse(
+                _sketch_preview_response(
+                    plan,
+                    canonical_command_count=len(canonical_plan.commands),
+                    board_width_m=float(shared.board.width),
+                    board_height_m=float(shared.board.height),
+                )
+            )
+        finally:
+            await file.close()
 
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
@@ -2885,6 +3126,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
 
 
 def main(args=None) -> None:
+    if rclpy is None:
+        raise RuntimeError('ROS 2 Python dependencies are required to run web_server.') from _ROS_IMPORT_ERROR
     rclpy.init(args=args)
     node = WebBackendNode()
     runtime = BackendRuntime(node)

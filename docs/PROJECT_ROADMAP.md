@@ -31,7 +31,7 @@ Planned layers:
 - Metrics/evaluation dashboard: exposes stroke counts, point counts, travel length, drawing length, pen lifts, estimated time, and optional similarity metrics.
 - Webots execution adapter: converts approved plans into the existing `CanonicalPathPlan` and `PrimitivePathPlan` execution path after tests prove parity.
 
-The first offline adapter design from `DrawingPathPlan` to `CanonicalPathPlan` now exists as a tested foundation. It is not enabled in runtime endpoints; future PNG, SVG, photo, voice, and numbered-library pipelines should emit `DrawingPathPlan` first, then connect to runtime only after pipeline tests and parity checks exist.
+The first offline adapter design from `DrawingPathPlan` to `CanonicalPathPlan` now exists as a tested foundation. Sketch Centerline Mode also exists as an internal image-pipeline module with a preview-only backend endpoint for high-contrast sketch images. It is not enabled for robot drawing; future PNG, SVG, photo, voice, and numbered-library pipelines should emit `DrawingPathPlan` first, then connect to runtime only after pipeline tests and parity checks exist.
 
 ## Hybrid Image Pipeline Modes
 
@@ -41,15 +41,16 @@ Input:
 
 - Black/white sketches or clean line art.
 
-Future flow:
+Implemented internal foundation:
 
 - grayscale
-- adaptive threshold or Otsu threshold
+- Otsu threshold
 - cleanup
 - skeletonization
 - graph/path tracing
 - stroke simplification
 - output to `DrawingPathPlan`
+- preview endpoint returns diagnostics and SVG preview without publishing
 
 ### SVG/Vector Mode
 

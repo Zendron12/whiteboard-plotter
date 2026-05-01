@@ -44,6 +44,7 @@ setup(
         'uvicorn',
         'python-multipart',
         'matplotlib',
+        'scikit-image',
     ],
     zip_safe=True,
     maintainer='hisham',
