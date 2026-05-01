@@ -28,6 +28,7 @@ class CableSupervisorPlugin:
     _BOARD_FRAME_ID = 'board'
     _DEFAULT_ROTATION = [1.0, 0.0, 0.0, 1.5708]
     _SAFE_UNAVAILABLE_GAP = 1.0
+    _SAFETY_EPSILON = 1.0e-9
 
     def init(self, webots_node, properties):
         self._supervisor = webots_node.robot
@@ -693,18 +694,23 @@ class CableSupervisorPlugin:
     def _pose_within_safe_workspace(self, center_x, center_y):
         if not math.isfinite(center_x) or not math.isfinite(center_y):
             return False
+        eps = self._SAFETY_EPSILON
+        center_x_min = self._carriage_width * 0.5
+        center_x_max = self._board_width - (self._carriage_width * 0.5)
+        center_y_min = self._carriage_height * 0.5
+        center_y_max = self._board_height - (self._carriage_height * 0.5)
         if not (
-            self._carriage_width * 0.5 <= center_x <= self._board_width - (self._carriage_width * 0.5)
-            and self._carriage_height * 0.5 <= center_y <= self._board_height - (self._carriage_height * 0.5)
+            center_x_min - eps <= center_x <= center_x_max + eps
+            and center_y_min - eps <= center_y <= center_y_max + eps
         ):
             return False
         pen_x = center_x + self._pen_offset[0]
         pen_y = center_y + self._pen_offset[1]
         return (
-            self._safe_x_min <= pen_x <= self._safe_x_max
-            and self._safe_y_min <= pen_y <= self._safe_y_max
-            and self._body_safe_x_min <= pen_x <= self._body_safe_x_max
-            and self._body_safe_y_min <= pen_y <= self._body_safe_y_max
+            self._safe_x_min - eps <= pen_x <= self._safe_x_max + eps
+            and self._safe_y_min - eps <= pen_y <= self._safe_y_max + eps
+            and self._body_safe_x_min - eps <= pen_x <= self._body_safe_x_max + eps
+            and self._body_safe_y_min - eps <= pen_y <= self._body_safe_y_max + eps
         )
 
     def _compute_four_cable_lengths(self, center_x, center_y):
