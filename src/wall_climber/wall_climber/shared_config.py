@@ -114,7 +114,11 @@ class DrawExecutionDefaults:
     draw_path_simplify_tolerance_m: float
     draw_resample_step_m: float
     travel_resample_step_m: float
+    text_draw_resample_step_m: float
+    text_travel_resample_step_m: float
     publish_period_sec: float
+    chunk_max_paths: int
+    chunk_max_samples: int
     text_end_retreat_m: float
 
 
@@ -314,7 +318,11 @@ class SharedConfig:
             'fixed_theta_rad': self.draw_execution.fixed_draw_theta_rad,
             'draw_resample_step_m': self.draw_execution.draw_resample_step_m,
             'travel_resample_step_m': self.draw_execution.travel_resample_step_m,
+            'text_draw_resample_step_m': self.draw_execution.text_draw_resample_step_m,
+            'text_travel_resample_step_m': self.draw_execution.text_travel_resample_step_m,
             'publish_period_sec': self.draw_execution.publish_period_sec,
+            'chunk_max_paths': self.draw_execution.chunk_max_paths,
+            'chunk_max_samples': self.draw_execution.chunk_max_samples,
             'text_end_retreat_m': self.draw_execution.text_end_retreat_m,
             'writable_x_min': writable['x_min'],
             'writable_x_max': writable['x_max'],

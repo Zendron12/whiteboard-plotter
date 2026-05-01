@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from std_msgs.msg import String
 from wall_climber_interfaces.msg import CableSetpoint
 from wall_climber.runtime_topics import (
@@ -13,12 +13,18 @@ from wall_climber.runtime_topics import (
     PEN_MODE_UP,
 )
 
+try:
+    from rclpy.executors import ShutdownException
+except ImportError:  # pragma: no cover - older rclpy versions do not expose this symbol
+    class ShutdownException(Exception):
+        pass
+
 
 class CableRobotPlugin:
     def init(self, webots_node, properties):
         self._robot = webots_node.robot
         self._pen_joint_name = str(properties.get('pen_joint_name', 'pen_slide_joint'))
-        self._pen_slide_velocity = max(0.01, float(properties.get('pen_slide_velocity', '0.30')))
+        self._pen_slide_velocity = max(0.01, float(properties.get('pen_slide_velocity', '0.55')))
         self._pen_up = float(properties.get('pen_up_position', '0.002'))
         self._pen_down = float(properties.get('pen_down_position', '-0.005'))
         self._spin_timeout_sec = max(0.001, float(properties.get('spin_timeout_sec', '0.01')))
@@ -76,8 +82,21 @@ class CableRobotPlugin:
             self._target_pen_position = self._pen_up
 
     def _spin_loop(self):
-        while self._spin_running and rclpy.ok():
-            self._executor.spin_once(timeout_sec=self._spin_timeout_sec)
+        while self._spin_running:
+            try:
+                if not rclpy.ok():
+                    break
+                self._executor.spin_once(timeout_sec=self._spin_timeout_sec)
+            except (ExternalShutdownException, ShutdownException):
+                break
+            except Exception:
+                if not self._spin_running or not rclpy.ok():
+                    break
+                try:
+                    self._node.get_logger().error('Cable robot plugin spin loop stopped unexpectedly.')
+                except Exception:
+                    pass
+                break
 
     def step(self):
         if self._pen_motor is not None:

@@ -1,0 +1,19 @@
+uint8 PEN_UP=0
+uint8 PEN_DOWN=1
+uint8 TRAVEL_MOVE=2
+uint8 LINE_SEGMENT=3
+uint8 ARC_SEGMENT=4
+uint8 QUADRATIC_BEZIER=5
+uint8 CUBIC_BEZIER=6
+
+uint8 type
+wall_climber_interfaces/BoardPoint start
+wall_climber_interfaces/BoardPoint end
+wall_climber_interfaces/BoardPoint control1
+wall_climber_interfaces/BoardPoint control2
+wall_climber_interfaces/BoardPoint center
+float64 radius
+float64 start_angle_rad
+float64 sweep_angle_rad
+bool clockwise
+bool pen_down

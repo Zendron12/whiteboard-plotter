@@ -6,9 +6,10 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/BoardPoint.msg"
   "msg/CableSetpoint.msg"
-  "msg/DrawPolyline.msg"
-  "msg/DrawPlan.msg"
+  "msg/PathPrimitive.msg"
+  "msg/PrimitivePathPlan.msg"
   DEPENDENCIES geometry_msgs
 )
 

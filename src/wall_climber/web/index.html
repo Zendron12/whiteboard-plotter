@@ -410,6 +410,46 @@
       flex: 0 0 auto;
     }
 
+    .overlay-controls {
+      width: 100%;
+      display: grid;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.66);
+    }
+
+    .overlay-toggle-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .overlay-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--paper-line);
+      background: rgba(255, 255, 255, 0.76);
+      color: var(--ink);
+      font-size: 0.83rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .overlay-toggle input {
+      accent-color: var(--accent);
+    }
+
+    .curve-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
     .live-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -752,6 +792,31 @@
       line-height: 1.45;
     }
 
+    .diag-panels {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .diag-panel {
+      padding: 12px;
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.72);
+      display: grid;
+      gap: 8px;
+    }
+
+    .diag-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+      font-size: 0.79rem;
+      line-height: 1.45;
+      color: var(--ink);
+    }
+
     .footer {
       padding: 0 6px;
       color: rgba(24, 34, 43, 0.55);
@@ -928,6 +993,34 @@
             <div class="legend-chip"><span class="legend-mark" style="background:#1a2026;"></span> Pen / trail</div>
           </div>
 
+          <div class="overlay-controls">
+            <div class="overlay-toggle-row">
+              <label class="overlay-toggle">
+                <input id="overlay-raw-toggle" type="checkbox">
+                <span>Show raw contour</span>
+              </label>
+              <label class="overlay-toggle">
+                <input id="overlay-curves-toggle" type="checkbox" checked>
+                <span>Show fitted curves</span>
+              </label>
+              <label class="overlay-toggle">
+                <input id="overlay-fallback-toggle" type="checkbox" checked>
+                <span>Highlight fallback lines</span>
+              </label>
+              <label class="overlay-toggle">
+                <input id="overlay-color-toggle" type="checkbox" checked>
+                <span>Color by primitive type</span>
+              </label>
+            </div>
+            <div class="curve-legend">
+              <div class="legend-chip"><span class="legend-mark" style="background:#c95f38;"></span> Line</div>
+              <div class="legend-chip"><span class="legend-mark" style="background:#2d8f84;"></span> Arc</div>
+              <div class="legend-chip"><span class="legend-mark" style="background:#5e7d36;"></span> Quadratic</div>
+              <div class="legend-chip"><span class="legend-mark" style="background:#36566f;"></span> Cubic</div>
+              <div class="legend-chip"><span class="legend-mark" style="background:#ba4657;"></span> Fallback line</div>
+            </div>
+          </div>
+
           <div class="live-grid">
             <div class="live-card">
               <div class="label">Board</div>
@@ -1031,15 +1124,15 @@
             <div class="section-head">
               <div class="section-title">
                 <h3>Input</h3>
-                <p>One panel for text, SVG, and traced images. Preview first, then send through the active cable execution path.</p>
+                <p>Preview first, then send text, uploaded files, or pasted SVG markup through the active cable execution path.</p>
               </div>
             </div>
             <div class="section-body">
-              <div class="tool-tabs">
-                <button id="tool-text-btn" data-tool="text" class="active" type="button">Text</button>
-                <button id="tool-svg-btn" data-tool="svg" type="button">SVG</button>
-                <button id="tool-image-btn" data-tool="image" type="button">Image</button>
-              </div>
+            <div class="tool-tabs">
+              <button id="tool-text-btn" data-tool="text" class="active" type="button">Text</button>
+              <button id="tool-file-btn" data-tool="file" type="button">File</button>
+              <button id="tool-svg-btn" data-tool="svg" type="button">SVG Markup</button>
+            </div>
 
               <div id="tool-text-panel" class="tool-panel active">
                 <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping, board limits, and carriage-safe start positions are handled by the backend.</p>
@@ -1050,6 +1143,7 @@
                     <select id="text-font-source">
                       <option value="relief_singleline" selected>Relief SingleLine</option>
                       <option value="hershey_sans_1">Hershey Sans 1-stroke</option>
+                      <option value="dejavu_sans">DejaVu Sans (outline)</option>
                     </select>
                   </div>
                 </div>
@@ -1061,25 +1155,25 @@
                 </div>
               </div>
 
+              <div id="tool-file-panel" class="tool-panel">
+                <p class="helper-copy">Upload either an SVG file or a raster image. The backend auto-routes SVG files to vector ingestion and PNG/JPG/WebP files to the image tracing pipeline.</p>
+                <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg">
+                <div class="action-row">
+                  <button id="file-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
+                  <button id="file-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
+                  <button id="file-commit-btn" class="primary-btn" type="button">Commit File</button>
+                </div>
+                <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
+              </div>
+
               <div id="tool-svg-panel" class="tool-panel">
-                <p class="helper-copy">SVG uses the draw-mode path. Placement is interpreted as a board-space center for the fitted vector.</p>
+                <p class="helper-copy">Paste raw SVG markup here when you want direct control over the vector source instead of uploading a file.</p>
                 <textarea id="svg-input" spellcheck="false" placeholder='&lt;svg viewBox="0 0 100 50"&gt;&lt;path d="M10 25 C25 5 75 45 90 25"/&gt;&lt;/svg&gt;'></textarea>
                 <div class="action-row">
                   <button id="svg-preview-btn" class="secondary-btn" type="button">Preview SVG</button>
                   <button id="svg-submit-btn" class="primary-btn" type="button">Commit SVG</button>
                   <button id="svg-clear-btn" class="quiet-btn" type="button">Clear</button>
                 </div>
-              </div>
-
-              <div id="tool-image-panel" class="tool-panel">
-                <p class="helper-copy">Upload line art, preview traced contours, then commit the saved upload through the draw path.</p>
-                <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp">
-                <div class="action-row">
-                  <button id="image-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
-                  <button id="image-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
-                  <button id="image-commit-btn" class="primary-btn" type="button">Commit Image</button>
-                </div>
-                <div id="image-meta" class="micro-pill"><strong>Upload</strong> none</div>
               </div>
             </div>
           </section>
@@ -1130,6 +1224,40 @@
                   <div class="diag-card">
                     <div class="label">Webots Trail</div>
                     <div id="runtime-webots-trail" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Preview Sampling</div>
+                    <div id="preview-sampling-diag" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Runtime Sampling</div>
+                    <div id="runtime-sampling-diag" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Preview / Runtime Parity</div>
+                    <div id="preview-parity-diag" class="value">--</div>
+                  </div>
+                  <div class="diag-card">
+                    <div class="label">Canonical Plan</div>
+                    <div id="canonical-plan-diag" class="value">--</div>
+                  </div>
+                </div>
+                <div class="diag-panels">
+                  <div class="diag-panel">
+                    <div class="label">Plan Inspector</div>
+                    <pre id="debug-plan-panel" class="diag-pre">No plan diagnostics yet.</pre>
+                  </div>
+                  <div class="diag-panel">
+                    <div class="label">Sampling / Parity</div>
+                    <pre id="debug-sampling-panel" class="diag-pre">No sampling diagnostics yet.</pre>
+                  </div>
+                  <div class="diag-panel">
+                    <div class="label">Execution / Profiling</div>
+                    <pre id="debug-execution-panel" class="diag-pre">No execution diagnostics yet.</pre>
+                  </div>
+                  <div class="diag-panel">
+                    <div class="label">Curve Fitting</div>
+                    <pre id="debug-curve-fit-panel" class="diag-pre">No curve-fit diagnostics yet.</pre>
                   </div>
                 </div>
               </details>
@@ -1236,23 +1364,23 @@
         placementHelper: document.getElementById('placement-helper'),
         toolButtons: Array.from(document.querySelectorAll('[data-tool]')),
         toolTextPanel: document.getElementById('tool-text-panel'),
+        toolFilePanel: document.getElementById('tool-file-panel'),
         toolSvgPanel: document.getElementById('tool-svg-panel'),
-        toolImagePanel: document.getElementById('tool-image-panel'),
         textInput: document.getElementById('text-input'),
         textFontSource: document.getElementById('text-font-source'),
         textPreviewBtn: document.getElementById('text-preview-btn'),
         textSubmitBtn: document.getElementById('text-submit-btn'),
         textHelloBtn: document.getElementById('text-hello-btn'),
         textClearBtn: document.getElementById('text-clear-btn'),
+        fileInput: document.getElementById('file-input'),
+        fileUploadBtn: document.getElementById('file-upload-btn'),
+        filePreviewBtn: document.getElementById('file-preview-btn'),
+        fileCommitBtn: document.getElementById('file-commit-btn'),
+        fileMeta: document.getElementById('file-meta'),
         svgInput: document.getElementById('svg-input'),
         svgPreviewBtn: document.getElementById('svg-preview-btn'),
         svgSubmitBtn: document.getElementById('svg-submit-btn'),
         svgClearBtn: document.getElementById('svg-clear-btn'),
-        imageInput: document.getElementById('image-input'),
-        imageUploadBtn: document.getElementById('image-upload-btn'),
-        imagePreviewBtn: document.getElementById('image-preview-btn'),
-        imageCommitBtn: document.getElementById('image-commit-btn'),
-        imageMeta: document.getElementById('image-meta'),
         activityFeed: document.getElementById('activity-feed'),
         runtimeActiveMode: document.getElementById('runtime-active-mode'),
         runtimeReady: document.getElementById('runtime-ready'),
@@ -1260,6 +1388,18 @@
         runtimeSafeWorkspace: document.getElementById('runtime-safe-workspace'),
         runtimeNotReady: document.getElementById('runtime-not-ready'),
         runtimeWebotsTrail: document.getElementById('runtime-webots-trail'),
+        previewSamplingDiag: document.getElementById('preview-sampling-diag'),
+        runtimeSamplingDiag: document.getElementById('runtime-sampling-diag'),
+        previewParityDiag: document.getElementById('preview-parity-diag'),
+        canonicalPlanDiag: document.getElementById('canonical-plan-diag'),
+        debugPlanPanel: document.getElementById('debug-plan-panel'),
+        debugSamplingPanel: document.getElementById('debug-sampling-panel'),
+        debugExecutionPanel: document.getElementById('debug-execution-panel'),
+        debugCurveFitPanel: document.getElementById('debug-curve-fit-panel'),
+        overlayRawToggle: document.getElementById('overlay-raw-toggle'),
+        overlayCurvesToggle: document.getElementById('overlay-curves-toggle'),
+        overlayFallbackToggle: document.getElementById('overlay-fallback-toggle'),
+        overlayColorToggle: document.getElementById('overlay-color-toggle'),
       };
 
       const ctx = dom.canvas.getContext('2d', { alpha: false });
@@ -1276,15 +1416,23 @@
         activeTool: 'text',
         placementTouched: false,
         vectorPreview: null,
-        latestImageUploadId: null,
-        imageCommitDefaults: null,
+        latestUploadId: null,
+        uploadCommitDefaults: null,
+        latestUploadSourceType: null,
+        latestUploadStatus: null,
         trailSegments: [],
         activeTrailSegment: null,
         trailPointCount: 0,
         lastTrailPoint: null,
         feedItems: [],
+        debugPlan: null,
+        debugExecution: null,
+        debugCurveFit: null,
         reconnectTimer: null,
         runtimeTimer: null,
+        previewRefreshTimer: null,
+        uploadStatusTimer: null,
+        previewInteraction: null,
       };
 
       function escapeHtml(text) {
@@ -1424,7 +1572,7 @@
         } else {
           dom.placementXLabel.textContent = 'Center X (m)';
           dom.placementYLabel.textContent = 'Center Y (m)';
-          dom.placementCopy.textContent = 'For SVG and Image, X and Y define the board-space center used for fitted vector placement.';
+          dom.placementCopy.textContent = 'For file uploads and SVG markup, X and Y define the board-space center used for fitted vector placement.';
           dom.placementHelper.textContent = 'Draw-mode previews show whether geometry leaves the writable area or exits the safe cable workspace before you commit.';
         }
       }
@@ -1460,7 +1608,7 @@
 
       function setTextFontSource(value) {
         const normalized = typeof value === 'string' ? value.trim().toLowerCase() : 'relief_singleline';
-        const allowed = new Set(['relief_singleline', 'hershey_sans_1']);
+        const allowed = new Set(['relief_singleline', 'hershey_sans_1', 'dejavu_sans']);
         dom.textFontSource.value = allowed.has(normalized) ? normalized : 'relief_singleline';
       }
 
@@ -1494,6 +1642,10 @@
         return payload;
       }
 
+      function prettyJson(value) {
+        return JSON.stringify(value, null, 2);
+      }
+
       async function refreshRuntime() {
         const runtime = await apiRequest('/api/runtime');
         state.runtime = runtime;
@@ -1508,6 +1660,85 @@
           runtime.ready ? 'ready' : 'connecting',
           runtime.ready ? `Runtime · ${runtime.active_mode || 'ready'}` : 'Runtime · waiting'
         );
+        await refreshDebugPanels();
+        refreshUiState({ redrawBoard: true });
+      }
+
+      async function refreshDebugPanels() {
+        const [planDebug, executionDebug, curveFitDebug] = await Promise.all([
+          apiRequest('/api/debug/last-plan'),
+          apiRequest('/api/debug/last-execution'),
+          apiRequest('/api/debug/last-curve-fit'),
+        ]);
+        state.debugPlan = planDebug;
+        state.debugExecution = executionDebug;
+        state.debugCurveFit = curveFitDebug;
+        renderDebugPanels();
+      }
+
+      function renderDebugPanels() {
+        const planDebug = state.debugPlan;
+        const executionDebug = state.debugExecution;
+
+        if (!planDebug || !planDebug.available) {
+          dom.debugPlanPanel.textContent = 'No plan diagnostics yet.';
+          dom.debugSamplingPanel.textContent = 'No sampling diagnostics yet.';
+        } else {
+          const routeMetadata = planDebug.route_metadata || null;
+          dom.debugPlanPanel.textContent = prettyJson({
+            source_type: planDebug.source_type,
+            committed: planDebug.committed,
+            route: routeMetadata && routeMetadata.route ? routeMetadata.route : null,
+            trace_mode: routeMetadata && routeMetadata.mode ? routeMetadata.mode : null,
+            primitive_counts: planDebug.plan ? planDebug.plan.primitive_counts : null,
+            sampled_bounds: planDebug.plan ? planDebug.plan.sampled_bounds : null,
+            optimizer_stats: planDebug.optimizer_stats || null,
+            route_metadata: routeMetadata,
+          });
+          dom.debugSamplingPanel.textContent = prettyJson({
+            preview_sampling: planDebug.preview_sampling || null,
+            runtime_sampling: planDebug.runtime_sampling || null,
+            parity: planDebug.parity || null,
+            point_budget: planDebug.point_budget || null,
+            timings_ms: planDebug.timings_ms || null,
+          });
+        }
+
+        if (!executionDebug || !executionDebug.available) {
+          dom.debugExecutionPanel.textContent = 'No execution diagnostics yet.';
+        } else {
+          const executorDebug = executionDebug.executor || null;
+          dom.debugExecutionPanel.textContent = prettyJson({
+            source_type: executionDebug.source_type,
+            chosen_transport: executionDebug.chosen_transport,
+            published_transports: executionDebug.published_transports,
+            transport_topics: executionDebug.transport_topics,
+            chunk_count: executorDebug ? executorDebug.chunk_count || null : null,
+            primitive_count: executorDebug ? executorDebug.primitive_count || null : null,
+            sampled_point_count: executorDebug ? executorDebug.sampled_point_count || null : null,
+            schedule_count: executorDebug ? executorDebug.schedule_count || null : null,
+            timings_ms: executionDebug.timings_ms || null,
+            executor: executorDebug,
+          });
+        }
+
+        const curveFitDebug = state.debugCurveFit;
+        if (!curveFitDebug || !curveFitDebug.available) {
+          dom.debugCurveFitPanel.textContent = 'No curve-fit diagnostics yet.';
+        } else {
+          dom.debugCurveFitPanel.textContent = prettyJson({
+            source_type: curveFitDebug.source_type,
+            route: curveFitDebug.route || null,
+            trace_mode: curveFitDebug.trace_mode || null,
+            image_size: curveFitDebug.image_size || null,
+            raw_contour_count: curveFitDebug.raw_contour_count,
+            span_count: curveFitDebug.span_count,
+            merge_stats: curveFitDebug.merge_stats || null,
+            fit_summary: curveFitDebug.fit_summary || null,
+            fit_tolerances: curveFitDebug.fit_tolerances || null,
+            worst_spans: curveFitDebug.worst_spans || null,
+          });
+        }
       }
 
       async function setMode(mode) {
@@ -1518,6 +1749,7 @@
         });
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : 'auto';
+        refreshUiState();
         pushFeed(`Mode switched to ${mode}.`, 'success');
         return payload.runtime;
       }
@@ -1530,6 +1762,7 @@
         });
         state.runtime = payload.runtime;
         state.manualPenMode = payload.runtime && payload.runtime.manual_pen_mode ? payload.runtime.manual_pen_mode : mode;
+        refreshUiState();
         const label = mode === 'down' ? 'press' : mode === 'up' ? 'release' : 'auto';
         pushFeed(`Arm test set to ${label}.`, 'success');
         return payload.runtime;
@@ -1555,20 +1788,267 @@
         return 'rgba(201, 95, 56, 0.96)';
       }
 
+      function clonePlacement(placement) {
+        if (!placement) {
+          return null;
+        }
+        return {
+          x: Number(placement.x),
+          y: Number(placement.y),
+          scale: Number(placement.scale),
+        };
+      }
+
+      function cloneBounds(bounds) {
+        if (!bounds) {
+          return null;
+        }
+        return {
+          xMin: Number(bounds.x_min ?? bounds.xMin),
+          xMax: Number(bounds.x_max ?? bounds.xMax),
+          yMin: Number(bounds.y_min ?? bounds.yMin),
+          yMax: Number(bounds.y_max ?? bounds.yMax),
+        };
+      }
+
+      function revokePreviewResources(previewState) {
+        if (!previewState || !previewState.rasterOverlay) {
+          return;
+        }
+        const imageUrl = previewState.rasterOverlay.imageUrl;
+        if (typeof imageUrl === 'string' && imageUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(imageUrl);
+        }
+      }
+
+      function previewBaseBounds(previewState = state.vectorPreview) {
+        if (!previewState) {
+          return null;
+        }
+        if (previewState.preview && previewState.preview.bounds) {
+          return cloneBounds(previewState.preview.bounds);
+        }
+        if (previewState.rasterOverlay && previewState.rasterOverlay.bounds) {
+          return cloneBounds(previewState.rasterOverlay.bounds);
+        }
+        return null;
+      }
+
+      function previewIsBoardVisible(previewState = state.vectorPreview) {
+        return Boolean(previewState && previewState.boardVisible && previewBaseBounds(previewState));
+      }
+
+      function previewDisplayPlacement(previewState = state.vectorPreview) {
+        if (!previewState) {
+          return null;
+        }
+        return clonePlacement(previewState.displayPlacement || previewState.basePlacement);
+      }
+
+      function transformedPreviewBounds(previewState = state.vectorPreview) {
+        const baseBounds = previewBaseBounds(previewState);
+        if (!previewState || !baseBounds) {
+          return null;
+        }
+        const basePlacement = clonePlacement(previewState.basePlacement);
+        const displayPlacement = clonePlacement(previewState.displayPlacement || previewState.basePlacement);
+        if (!basePlacement || !displayPlacement || basePlacement.scale <= 0) {
+          return null;
+        }
+        const xMin = Number(baseBounds.xMin);
+        const xMax = Number(baseBounds.xMax);
+        const yMin = Number(baseBounds.yMin);
+        const yMax = Number(baseBounds.yMax);
+        if (![xMin, xMax, yMin, yMax].every(Number.isFinite)) {
+          return null;
+        }
+        const scaleRatio = displayPlacement.scale / basePlacement.scale;
+        const transform = (x, y) => ({
+          x: displayPlacement.x + ((x - basePlacement.x) * scaleRatio),
+          y: displayPlacement.y + ((y - basePlacement.y) * scaleRatio),
+        });
+        const corners = [
+          transform(xMin, yMin),
+          transform(xMax, yMin),
+          transform(xMax, yMax),
+          transform(xMin, yMax),
+        ];
+        return {
+          xMin: Math.min(...corners.map((point) => point.x)),
+          xMax: Math.max(...corners.map((point) => point.x)),
+          yMin: Math.min(...corners.map((point) => point.y)),
+          yMax: Math.max(...corners.map((point) => point.y)),
+        };
+      }
+
+      function transformedPreviewStrokes(previewState = state.vectorPreview) {
+        if (!previewState || !previewState.preview || !Array.isArray(previewState.preview.strokes)) {
+          return [];
+        }
+        const basePlacement = clonePlacement(previewState.basePlacement);
+        const displayPlacement = clonePlacement(previewState.displayPlacement || previewState.basePlacement);
+        if (!basePlacement || !displayPlacement || basePlacement.scale <= 0) {
+          return previewState.preview.strokes;
+        }
+        const scaleRatio = displayPlacement.scale / basePlacement.scale;
+        return previewState.preview.strokes.map((stroke) => (
+          Array.isArray(stroke)
+            ? stroke.map((point) => [
+              displayPlacement.x + ((Number(point[0]) - basePlacement.x) * scaleRatio),
+              displayPlacement.y + ((Number(point[1]) - basePlacement.y) * scaleRatio),
+            ])
+            : stroke
+        ));
+      }
+
+      function syncPreviewPlacementInputs(placement) {
+        if (!placement) {
+          return;
+        }
+        setPlacementInputs(placement);
+        state.placementTouched = true;
+      }
+
+      function updatePreviewPlacement(nextPlacement, { syncInputs = true } = {}) {
+        if (!state.vectorPreview || !nextPlacement) {
+          return;
+        }
+        const cloned = clonePlacement(nextPlacement);
+        state.vectorPreview.displayPlacement = cloned;
+        if (state.vectorPreview.commitRequest) {
+          state.vectorPreview.commitRequest = {
+            ...state.vectorPreview.commitRequest,
+            placement: clonePlacement(nextPlacement),
+          };
+        }
+        if (syncInputs) {
+          syncPreviewPlacementInputs(cloned);
+        }
+      }
+
+      function previewRequestOrigin(previewState = state.vectorPreview) {
+        return previewState && previewState.origin ? String(previewState.origin) : null;
+      }
+
+      function schedulePreviewRefresh() {
+        const previewState = state.vectorPreview;
+        if (!previewIsBoardVisible(previewState) || !previewState || !previewState.preview) {
+          return;
+        }
+        const origin = previewRequestOrigin(previewState);
+        if (!origin || origin === 'text') {
+          return;
+        }
+        if (state.previewRefreshTimer) {
+          clearTimeout(state.previewRefreshTimer);
+        }
+        state.previewRefreshTimer = window.setTimeout(async () => {
+          state.previewRefreshTimer = null;
+          try {
+            if (origin === 'svg') {
+              await previewSvg();
+            } else if (origin === 'file') {
+              await previewUploadedFile();
+            }
+            clearNotice();
+          } catch (error) {
+            handleError('Preview placement refresh failed', error);
+          }
+        }, 150);
+      }
+
       function clearVectorPreview(pushMessage = false) {
+        revokePreviewResources(state.vectorPreview);
         state.vectorPreview = null;
+        state.previewInteraction = null;
+        if (state.previewRefreshTimer) {
+          clearTimeout(state.previewRefreshTimer);
+          state.previewRefreshTimer = null;
+        }
         dom.previewChip.innerHTML = '<strong>Preview</strong> none';
         dom.summaryPreview.textContent = 'No preview loaded yet.';
+        refreshUiState({ redrawBoard: true });
         if (pushMessage) {
           pushFeed('Preview cleared.', 'info');
         }
       }
 
-      function applyVectorPreview(sourceType, payload) {
+      function buildRasterOverlay(imageUrl, overlayPayload) {
+        if (!imageUrl || !overlayPayload || !overlayPayload.bounds) {
+          return null;
+        }
+        const imageElement = new Image();
+        const rasterOverlay = {
+          imageUrl,
+          imageElement,
+          loaded: false,
+          bounds: overlayPayload.bounds,
+          imageSize: overlayPayload.image_size || null,
+        };
+        imageElement.addEventListener('load', () => {
+          rasterOverlay.loaded = true;
+          refreshUiState({ redrawBoard: true });
+        });
+        imageElement.src = imageUrl;
+        return rasterOverlay;
+      }
+
+      function applyRasterPreview(sourceType, payload, imageUrl, { origin = null } = {}) {
+        const commitRequest = payload.commit_request || null;
+        const placement = commitRequest && commitRequest.placement
+          ? clonePlacement(commitRequest.placement)
+          : (() => {
+            try {
+              return readPlacement();
+            } catch (_error) {
+              return defaultPlacementForTool(state.activeTool);
+            }
+          })();
+        const nextState = {
+          sourceType,
+          preview: null,
+          commitRequest,
+          origin: origin || sourceType,
+          boardVisible: true,
+          basePlacement: placement,
+          displayPlacement: placement,
+          rasterOverlay: buildRasterOverlay(imageUrl, payload.raster_overlay),
+        };
+        revokePreviewResources(state.vectorPreview);
+        state.vectorPreview = nextState;
+        if (commitRequest && commitRequest.placement) {
+          setPlacementInputs(commitRequest.placement);
+        }
+        const imageInfo = payload.image_info || {};
+        const processing = payload.status || {};
+        dom.previewChip.innerHTML = `<strong>Preview</strong> ${escapeHtml(sourceType)} · processing`;
+        dom.summaryPreview.textContent = `${sourceType} upload stored. ${processing.message || 'Processing preview in background.'}`;
+        clearNotice();
+        pushFeed(`Upload stored for ${sourceType}; waiting for vector preview.`, 'info');
+        refreshUiState({ redrawBoard: true });
+      }
+
+      function applyVectorPreview(sourceType, payload, { origin = null, boardVisible = null } = {}) {
+        const commitRequest = payload.commit_request || null;
+        const placement = commitRequest && commitRequest.placement
+          ? clonePlacement(commitRequest.placement)
+          : (() => {
+            try {
+              return readPlacement();
+            } catch (_error) {
+              return defaultPlacementForTool(state.activeTool);
+            }
+          })();
+        revokePreviewResources(state.vectorPreview);
         state.vectorPreview = {
           sourceType,
           preview: payload.preview,
-          commitRequest: payload.commit_request || null,
+          commitRequest,
+          origin: origin || sourceType,
+          boardVisible: boardVisible === null ? sourceType !== 'text' : Boolean(boardVisible),
+          basePlacement: placement,
+          displayPlacement: placement,
+          rasterOverlay: null,
         };
 
         const preview = payload.preview || {};
@@ -1580,15 +2060,15 @@
           ? `${sourceType} preview is ready with ${strokeCount} strokes and ${pointCount} points.`
           : `${sourceType} preview is invalid: ${preview.validation_error || 'unknown validation issue'}.`;
 
-        if (payload.commit_request && payload.commit_request.placement) {
-          setPlacementInputs(payload.commit_request.placement);
+        if (commitRequest && commitRequest.placement) {
+          setPlacementInputs(commitRequest.placement);
         }
         if (
           sourceType === 'text'
-          && payload.commit_request
-          && Object.prototype.hasOwnProperty.call(payload.commit_request, 'font_source')
+          && commitRequest
+          && Object.prototype.hasOwnProperty.call(commitRequest, 'font_source')
         ) {
-          setTextFontSource(payload.commit_request.font_source);
+          setTextFontSource(commitRequest.font_source);
         }
 
         if (preview.validation_error) {
@@ -1598,6 +2078,8 @@
           clearNotice();
           pushFeed(`Preview ready for ${sourceType}.`, 'success');
         }
+        refreshUiState({ redrawBoard: true });
+        refreshDebugPanels().catch(() => {});
       }
 
       function updateSummary() {
@@ -1633,6 +2115,8 @@
 
       function updateDiagnostics() {
         const runtime = state.runtime;
+        const preview = state.vectorPreview && state.vectorPreview.preview ? state.vectorPreview.preview : null;
+        const previewDiagnostics = preview && preview.diagnostics ? preview.diagnostics : null;
         if (!runtime) {
           dom.runtimeActiveMode.textContent = '--';
           dom.runtimeReady.textContent = '--';
@@ -1640,27 +2124,60 @@
           dom.runtimeSafeWorkspace.textContent = '--';
           dom.runtimeNotReady.textContent = '--';
           dom.runtimeWebotsTrail.textContent = '--';
+        } else {
+          dom.runtimeActiveMode.textContent = runtime.active_mode || '--';
+          dom.runtimeReady.textContent = runtime.ready ? 'ready' : 'not_ready';
+          dom.runtimeNotReady.textContent = runtime.not_ready_reason || 'none';
+          dom.runtimeWebotsTrail.textContent = runtime.enable_webots_trail ? 'enabled' : 'disabled';
+
+          if (runtime.board_info) {
+            const info = runtime.board_info;
+            dom.runtimeBoardFrame.textContent = `${info.frame_origin || '--'} · x:${info.frame_x_axis || '--'} · y:${info.frame_y_axis || '--'}`;
+            const safeText = `${formatRange(info.safe_x_min, info.safe_x_max)} · ${formatRange(info.safe_y_min, info.safe_y_max)}`;
+            if (Number.isFinite(Number(info.body_safe_x_min))) {
+              dom.runtimeSafeWorkspace.textContent = `${safeText} · body ${formatRange(info.body_safe_x_min, info.body_safe_x_max)}`;
+            } else {
+              dom.runtimeSafeWorkspace.textContent = safeText;
+            }
+          } else {
+            dom.runtimeBoardFrame.textContent = '--';
+            dom.runtimeSafeWorkspace.textContent = '--';
+          }
+        }
+
+        if (!previewDiagnostics) {
+          dom.previewSamplingDiag.textContent = '--';
+          dom.runtimeSamplingDiag.textContent = '--';
+          dom.previewParityDiag.textContent = '--';
+          dom.canonicalPlanDiag.textContent = '--';
           return;
         }
 
-        dom.runtimeActiveMode.textContent = runtime.active_mode || '--';
-        dom.runtimeReady.textContent = runtime.ready ? 'ready' : 'not_ready';
-        dom.runtimeNotReady.textContent = runtime.not_ready_reason || 'none';
-        dom.runtimeWebotsTrail.textContent = runtime.enable_webots_trail ? 'enabled' : 'disabled';
+        const previewSampling = previewDiagnostics.preview_sampling || {};
+        const runtimeSampling = previewDiagnostics.runtime_sampling || {};
+        const parity = previewDiagnostics.parity || {};
+        const canonicalPlan = previewDiagnostics.canonical_plan || {};
+        const previewPolicy = previewSampling.policy || {};
+        const runtimePolicy = runtimeSampling.policy || {};
+        const pointBudget = previewDiagnostics.point_budget || {};
 
-        if (runtime.board_info) {
-          const info = runtime.board_info;
-          dom.runtimeBoardFrame.textContent = `${info.frame_origin || '--'} · x:${info.frame_x_axis || '--'} · y:${info.frame_y_axis || '--'}`;
-          const safeText = `${formatRange(info.safe_x_min, info.safe_x_max)} · ${formatRange(info.safe_y_min, info.safe_y_max)}`;
-          if (Number.isFinite(Number(info.body_safe_x_min))) {
-            dom.runtimeSafeWorkspace.textContent = `${safeText} · body ${formatRange(info.body_safe_x_min, info.body_safe_x_max)}`;
-          } else {
-            dom.runtimeSafeWorkspace.textContent = safeText;
-          }
-        } else {
-          dom.runtimeBoardFrame.textContent = '--';
-          dom.runtimeSafeWorkspace.textContent = '--';
+        dom.previewSamplingDiag.textContent = `draw ${previewSampling.draw_point_count || 0} pts / travel ${previewSampling.travel_point_count || 0} pts · step ${Number(previewPolicy.draw_step_m || previewPolicy.curve_tolerance_m || 0).toFixed(3)}m`;
+        dom.runtimeSamplingDiag.textContent = `draw ${runtimeSampling.draw_point_count || 0} pts / travel ${runtimeSampling.travel_point_count || 0} pts · step ${Number(runtimePolicy.draw_step_m || runtimePolicy.curve_tolerance_m || 0).toFixed(3)}m`;
+        dom.previewParityDiag.textContent = `${parity.status || '--'} · Δpts ${pointBudget.delta_points || 0} · Δbounds ${Number(parity.bounds_delta_max_m || 0).toFixed(4)}m`;
+        const primitiveCounts = canonicalPlan.primitive_counts || {};
+        dom.canonicalPlanDiag.textContent = `${canonicalPlan.command_count || 0} cmds · L ${primitiveCounts.LineSegment || 0} · A ${primitiveCounts.ArcSegment || 0} · Q ${primitiveCounts.QuadraticBezier || 0} · C ${primitiveCounts.CubicBezier || 0}`;
+      }
+
+      function refreshUiState({ redrawBoard = false } = {}) {
+        if (redrawBoard) {
+          renderBoard();
         }
+        updateSummary();
+        updateMetrics();
+        updateDiagnostics();
+        updateRuntimeTone();
+        syncControls();
+        refreshOverlay();
       }
 
       function updateRuntimeTone() {
@@ -1676,7 +2193,12 @@
       function syncControls() {
         const runtimeReady = Boolean(state.runtime && state.runtime.ready);
         const backendHealthy = state.backend !== 'error';
-        const imageReady = Boolean(state.latestImageUploadId);
+        const fileUploaded = Boolean(state.latestUploadId);
+        const fileReady = Boolean(
+          fileUploaded &&
+          state.latestUploadStatus &&
+          state.latestUploadStatus.state === 'ready'
+        );
 
         dom.modeButtons.forEach((button) => {
           const active = state.runtime && state.runtime.active_mode === button.dataset.mode;
@@ -1696,9 +2218,9 @@
         dom.textHelloBtn.disabled = !runtimeReady;
         dom.svgPreviewBtn.disabled = !backendHealthy;
         dom.svgSubmitBtn.disabled = !runtimeReady;
-        dom.imageUploadBtn.disabled = !backendHealthy;
-        dom.imagePreviewBtn.disabled = !(backendHealthy && imageReady);
-        dom.imageCommitBtn.disabled = !(runtimeReady && imageReady);
+        dom.fileUploadBtn.disabled = !backendHealthy;
+        dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
+        dom.fileCommitBtn.disabled = !(runtimeReady && fileReady);
       }
 
       function setOverlay(title, copy, visible) {
@@ -1871,6 +2393,13 @@
         return {
           x: layout.originX + ((x - layout.view.xMin) * layout.scale),
           y: layout.originY + ((y - layout.view.yMin) * layout.scale),
+        };
+      }
+
+      function canvasToBoard(layout, x, y) {
+        return {
+          x: layout.view.xMin + ((x - layout.originX) / layout.scale),
+          y: layout.view.yMin + ((y - layout.originY) / layout.scale),
         };
       }
 
@@ -2118,6 +2647,384 @@
         ctx.restore();
       }
 
+      function pointArrayToCanvas(layout, point) {
+        if (!Array.isArray(point) || point.length < 2) {
+          return null;
+        }
+        const x = safeNumber(point[0]);
+        const y = safeNumber(point[1]);
+        if (x === null || y === null) {
+          return null;
+        }
+        return boardToCanvas(layout, x, y);
+      }
+
+      function debugPointToArray(point) {
+        if (Array.isArray(point) && point.length >= 2) {
+          return [Number(point[0]), Number(point[1])];
+        }
+        if (point && typeof point === 'object') {
+          return [Number(point.x), Number(point.y)];
+        }
+        return null;
+      }
+
+      function drawStrokePath(layout, stroke, { strokeStyle, lineWidth, alpha = 1, dashed = false } = {}) {
+        if (!Array.isArray(stroke) || stroke.length < 2) {
+          return;
+        }
+        const first = pointArrayToCanvas(layout, stroke[0]);
+        if (!first) {
+          return;
+        }
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = strokeStyle || previewStrokeColor();
+        ctx.lineWidth = lineWidth || Math.max(1.3, Math.min(3.2, layout.scale * 0.012));
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        if (dashed) {
+          ctx.setLineDash([8, 7]);
+        }
+        ctx.beginPath();
+        ctx.moveTo(first.x, first.y);
+        for (let index = 1; index < stroke.length; index += 1) {
+          const point = pointArrayToCanvas(layout, stroke[index]);
+          if (!point) {
+            continue;
+          }
+          ctx.lineTo(point.x, point.y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function sampleDebugPrimitive(primitive) {
+        if (!primitive || typeof primitive !== 'object') {
+          return [];
+        }
+        const type = primitive.type;
+        if (type === 'line') {
+          const start = debugPointToArray(primitive.start);
+          const end = debugPointToArray(primitive.end);
+          return start && end ? [start, end] : [];
+        }
+        if (type === 'arc') {
+          const center = debugPointToArray(primitive.center);
+          const radius = Number(primitive.radius);
+          const startAngle = Number(primitive.start_angle_rad);
+          const sweep = Number(primitive.sweep_angle_rad);
+          if (!center || !Number.isFinite(radius) || !Number.isFinite(startAngle) || !Number.isFinite(sweep)) {
+            return [];
+          }
+          const segments = Math.max(12, Math.min(72, Math.ceil(Math.abs(sweep) / (Math.PI / 18))));
+          const points = [];
+          for (let index = 0; index <= segments; index += 1) {
+            const t = segments === 0 ? 0 : index / segments;
+            const angle = startAngle + (sweep * t);
+            points.push([
+              center[0] + (radius * Math.cos(angle)),
+              center[1] + (radius * Math.sin(angle)),
+            ]);
+          }
+          return points;
+        }
+        if (type === 'quadratic') {
+          const start = debugPointToArray(primitive.start);
+          const control = debugPointToArray(primitive.control);
+          const end = debugPointToArray(primitive.end);
+          if (!start || !control || !end) {
+            return [];
+          }
+          const points = [];
+          for (let index = 0; index <= 28; index += 1) {
+            const t = index / 28;
+            const omt = 1 - t;
+            points.push([
+              (omt * omt * start[0]) + (2 * omt * t * control[0]) + (t * t * end[0]),
+              (omt * omt * start[1]) + (2 * omt * t * control[1]) + (t * t * end[1]),
+            ]);
+          }
+          return points;
+        }
+        if (type === 'cubic') {
+          const start = debugPointToArray(primitive.start);
+          const control1 = debugPointToArray(primitive.control1);
+          const control2 = debugPointToArray(primitive.control2);
+          const end = debugPointToArray(primitive.end);
+          if (!start || !control1 || !control2 || !end) {
+            return [];
+          }
+          const points = [];
+          for (let index = 0; index <= 40; index += 1) {
+            const t = index / 40;
+            const omt = 1 - t;
+            points.push([
+              (omt ** 3 * start[0]) + (3 * omt * omt * t * control1[0]) + (3 * omt * t * t * control2[0]) + (t ** 3 * end[0]),
+              (omt ** 3 * start[1]) + (3 * omt * omt * t * control1[1]) + (3 * omt * t * t * control2[1]) + (t ** 3 * end[1]),
+            ]);
+          }
+          return points;
+        }
+        return [];
+      }
+
+      function primitiveColor(type, colorByType) {
+        if (!colorByType) {
+          return 'rgba(54, 86, 111, 0.86)';
+        }
+        if (type === 'arc') {
+          return 'rgba(45, 143, 132, 0.95)';
+        }
+        if (type === 'quadratic') {
+          return 'rgba(94, 125, 54, 0.95)';
+        }
+        if (type === 'cubic') {
+          return 'rgba(54, 86, 111, 0.95)';
+        }
+        return 'rgba(201, 95, 56, 0.95)';
+      }
+
+      function drawVectorPreview(layout) {
+        const previewState = state.vectorPreview;
+        if (!previewIsBoardVisible(previewState)) {
+          return;
+        }
+        const preview = previewState && previewState.preview ? previewState.preview : null;
+        if (!preview || !Array.isArray(preview.strokes) || preview.strokes.length === 0) {
+          const rasterOverlay = previewState && previewState.rasterOverlay ? previewState.rasterOverlay : null;
+          const bounds = transformedPreviewBounds(previewState);
+          if (!rasterOverlay || !bounds) {
+            return;
+          }
+          const topLeft = boardToCanvas(layout, bounds.xMin, bounds.yMin);
+          const bottomRight = boardToCanvas(layout, bounds.xMax, bounds.yMax);
+          const width = Math.max(4, bottomRight.x - topLeft.x);
+          const height = Math.max(4, bottomRight.y - topLeft.y);
+          ctx.save();
+          ctx.globalAlpha = 0.88;
+          if (rasterOverlay.loaded) {
+            ctx.drawImage(rasterOverlay.imageElement, topLeft.x, topLeft.y, width, height);
+          } else {
+            ctx.fillStyle = 'rgba(86, 113, 58, 0.10)';
+            ctx.fillRect(topLeft.x, topLeft.y, width, height);
+          }
+          ctx.strokeStyle = 'rgba(86, 113, 58, 0.78)';
+          ctx.lineWidth = 1.6;
+          ctx.strokeRect(topLeft.x, topLeft.y, width, height);
+          ctx.restore();
+          return;
+        }
+        const invalid = preview.can_commit === false;
+        transformedPreviewStrokes(previewState).forEach((stroke) => {
+          drawStrokePath(layout, stroke, {
+            strokeStyle: previewStrokeColor(),
+            lineWidth: Math.max(1.4, Math.min(3.1, layout.scale * 0.011)),
+            alpha: invalid ? 0.55 : 0.9,
+            dashed: invalid,
+          });
+        });
+      }
+
+      function drawPreviewPlacementControls(layout) {
+        const previewState = state.vectorPreview;
+        if (!previewIsBoardVisible(previewState)) {
+          return;
+        }
+        const bounds = transformedPreviewBounds(previewState);
+        if (!bounds) {
+          return;
+        }
+        const topLeft = boardToCanvas(layout, bounds.xMin, bounds.yMin);
+        const bottomRight = boardToCanvas(layout, bounds.xMax, bounds.yMax);
+        const width = Math.max(4, bottomRight.x - topLeft.x);
+        const height = Math.max(4, bottomRight.y - topLeft.y);
+        const handleRadius = Math.max(7, Math.min(14, layout.scale * 0.022));
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(54, 86, 111, 0.38)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([7, 5]);
+        ctx.strokeRect(topLeft.x, topLeft.y, width, height);
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(255, 253, 249, 0.96)';
+        ctx.strokeStyle = 'rgba(54, 86, 111, 0.88)';
+        ctx.lineWidth = 2.1;
+        ctx.beginPath();
+        ctx.arc(bottomRight.x, bottomRight.y, handleRadius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(54, 86, 111, 0.94)';
+        ctx.font = '600 11px var(--sans)';
+        ctx.fillText('drag', topLeft.x + 10, Math.max(14, topLeft.y - 10));
+        ctx.fillText('scale', bottomRight.x - 16, Math.max(14, bottomRight.y - 12));
+        ctx.restore();
+      }
+
+      function previewHandleHit(layout, canvasX, canvasY) {
+        const bounds = transformedPreviewBounds();
+        if (!bounds) {
+          return null;
+        }
+        const topLeft = boardToCanvas(layout, bounds.xMin, bounds.yMin);
+        const bottomRight = boardToCanvas(layout, bounds.xMax, bounds.yMax);
+        const handleRadius = Math.max(9, Math.min(18, layout.scale * 0.025));
+        const dx = canvasX - bottomRight.x;
+        const dy = canvasY - bottomRight.y;
+        if ((dx * dx) + (dy * dy) <= (handleRadius * handleRadius)) {
+          return {
+            mode: 'scale',
+            bounds,
+          };
+        }
+        if (
+          canvasX >= topLeft.x &&
+          canvasX <= bottomRight.x &&
+          canvasY >= topLeft.y &&
+          canvasY <= bottomRight.y
+        ) {
+          return {
+            mode: 'drag',
+            bounds,
+          };
+        }
+        return null;
+      }
+
+      function beginPreviewInteraction(event) {
+        const previewState = state.vectorPreview;
+        if (!previewIsBoardVisible(previewState)) {
+          return false;
+        }
+        const layout = computeLayout();
+        const rect = dom.canvas.getBoundingClientRect();
+        const canvasX = event.clientX - rect.left;
+        const canvasY = event.clientY - rect.top;
+        const hit = previewHandleHit(layout, canvasX, canvasY);
+        if (!hit) {
+          return false;
+        }
+        const boardPoint = canvasToBoard(layout, canvasX, canvasY);
+        state.previewInteraction = {
+          mode: hit.mode,
+          pointerId: event.pointerId,
+          anchorPoint: boardPoint,
+          anchorPlacement: previewDisplayPlacement(previewState),
+          anchorBounds: hit.bounds,
+        };
+        dom.canvas.setPointerCapture(event.pointerId);
+        dom.canvas.style.cursor = hit.mode === 'scale' ? 'nwse-resize' : 'grabbing';
+        return true;
+      }
+
+      function movePreviewInteraction(event) {
+        const interaction = state.previewInteraction;
+        if (!interaction) {
+          return false;
+        }
+        const layout = computeLayout();
+        const rect = dom.canvas.getBoundingClientRect();
+        const boardPoint = canvasToBoard(layout, event.clientX - rect.left, event.clientY - rect.top);
+        const previewPlacement = clonePlacement(interaction.anchorPlacement);
+        if (!previewPlacement) {
+          return false;
+        }
+        if (interaction.mode === 'drag') {
+          updatePreviewPlacement({
+            x: previewPlacement.x + (boardPoint.x - interaction.anchorPoint.x),
+            y: previewPlacement.y + (boardPoint.y - interaction.anchorPoint.y),
+            scale: previewPlacement.scale,
+          });
+          return true;
+        }
+        const anchorBounds = interaction.anchorBounds;
+        const anchorCenter = {
+          x: previewPlacement.x,
+          y: previewPlacement.y,
+        };
+        const anchorRadius = Math.max(
+          1.0e-4,
+          Math.hypot(anchorBounds.xMax - anchorCenter.x, anchorBounds.yMax - anchorCenter.y),
+        );
+        const currentRadius = Math.max(
+          1.0e-4,
+          Math.hypot(boardPoint.x - anchorCenter.x, boardPoint.y - anchorCenter.y),
+        );
+        const scaleRatio = currentRadius / anchorRadius;
+        updatePreviewPlacement({
+          x: previewPlacement.x,
+          y: previewPlacement.y,
+          scale: Math.max(0.05, previewPlacement.scale * scaleRatio),
+        });
+        return true;
+      }
+
+      function endPreviewInteraction(event) {
+        if (!state.previewInteraction) {
+          return false;
+        }
+        try {
+          dom.canvas.releasePointerCapture(event.pointerId);
+        } catch (_error) {
+          // ignore browsers that already released capture
+        }
+        state.previewInteraction = null;
+        dom.canvas.style.cursor = 'default';
+        schedulePreviewRefresh();
+        return true;
+      }
+
+      function drawCurveFitOverlay(layout) {
+        const preview = state.vectorPreview;
+        const curveFit = state.debugCurveFit;
+        if (!preview || preview.sourceType !== 'image' || !curveFit || !curveFit.available) {
+          return;
+        }
+
+        const overlay = curveFit.overlay_geometry || {};
+        const showRaw = Boolean(dom.overlayRawToggle && dom.overlayRawToggle.checked);
+        const showCurves = Boolean(dom.overlayCurvesToggle && dom.overlayCurvesToggle.checked);
+        const showFallback = Boolean(dom.overlayFallbackToggle && dom.overlayFallbackToggle.checked);
+        const colorByType = Boolean(dom.overlayColorToggle && dom.overlayColorToggle.checked);
+
+        if (showRaw) {
+          (overlay.raw_contours || []).forEach((stroke) => {
+            drawStrokePath(layout, stroke, {
+              strokeStyle: 'rgba(127, 140, 153, 0.55)',
+              lineWidth: Math.max(0.9, Math.min(2.0, layout.scale * 0.006)),
+              alpha: 0.85,
+              dashed: true,
+            });
+          });
+        }
+
+        if (showCurves) {
+          (overlay.fitted_primitives || []).forEach((primitive) => {
+            const sampled = sampleDebugPrimitive(primitive);
+            if (sampled.length < 2) {
+              return;
+            }
+            drawStrokePath(layout, sampled, {
+              strokeStyle: primitiveColor(primitive.type, colorByType),
+              lineWidth: Math.max(1.2, Math.min(2.8, layout.scale * 0.009)),
+              alpha: 0.92,
+              dashed: false,
+            });
+          });
+        }
+
+        if (showFallback) {
+          (overlay.fallback_line_spans || []).forEach((stroke) => {
+            drawStrokePath(layout, stroke, {
+              strokeStyle: 'rgba(186, 70, 87, 0.96)',
+              lineWidth: Math.max(1.8, Math.min(3.8, layout.scale * 0.013)),
+              alpha: 1,
+              dashed: false,
+            });
+          });
+        }
+      }
+
       function drawPen(layout) {
         if (!state.penPose) {
           return;
@@ -2140,19 +3047,16 @@
         drawBackground(layout);
         drawBoardBase(layout);
         drawZones(layout);
+        drawVectorPreview(layout);
+        drawPreviewPlacementControls(layout);
+        drawCurveFitOverlay(layout);
         drawTrail(layout);
         drawRobot(layout);
         drawPen(layout);
       }
 
       function render() {
-        renderBoard();
-        updateSummary();
-        updateMetrics();
-        updateDiagnostics();
-        updateRuntimeTone();
-        syncControls();
-        refreshOverlay();
+        refreshUiState({ redrawBoard: true });
         requestAnimationFrame(render);
       }
 
@@ -2171,7 +3075,7 @@
             ...textOptions,
           }),
         });
-        applyVectorPreview('text', payload);
+        applyVectorPreview('text', payload, { origin: 'text', boardVisible: false });
       }
 
       function computeNextTextPlacement(payload, currentPlacement) {
@@ -2189,6 +3093,8 @@
         const lineAdvance = (
           Number.isFinite(glyphHeightM) && glyphHeightM > 0 && Number.isFinite(lineHeightScale) && lineHeightScale > 0
         ) ? glyphHeightM * lineHeightScale : fallbackLineHeight;
+        const sentenceGap = Math.max(0.045, 0.38 * lineAdvance);
+        const wrappedSentenceGap = Math.max(0.020, 0.18 * lineAdvance);
 
         const startX = textSafe.xMin + 0.02;
         const maxX = textSafe.xMax - 0.02;
@@ -2196,14 +3102,14 @@
         const maxY = textSafe.yMax - 0.02;
         const minRemainingWidth = Math.max(0.025, 0.3 * lineAdvance);
 
-        let nextX = endX + 0.030;
+        let nextX = endX + sentenceGap;
         let nextY = Number(currentPlacement.y);
         if (!Number.isFinite(nextY)) {
           nextY = startY;
         }
         if (nextX + minRemainingWidth > maxX) {
           nextX = startX;
-          nextY += lineAdvance;
+          nextY += lineAdvance + wrappedSentenceGap;
         }
 
         return {
@@ -2226,12 +3132,13 @@
             ...textOptions,
           }),
         });
-        applyVectorPreview('text', payload);
+        applyVectorPreview('text', payload, { origin: 'text', boardVisible: false });
         const nextPlacement = computeNextTextPlacement(payload, currentPlacement);
         if (nextPlacement) {
           setPlacementInputs(nextPlacement);
           state.placementTouched = true;
         }
+        clearVectorPreview(false);
         clearNotice();
         pushFeed('Text plan committed through /api/text.', 'success');
       }
@@ -2249,7 +3156,7 @@
             placement: readPlacement(),
           }),
         });
-        applyVectorPreview('svg', payload);
+        applyVectorPreview('svg', payload, { origin: 'svg', boardVisible: true });
       }
 
       async function commitSvg() {
@@ -2266,64 +3173,179 @@
             placement: readPlacement(),
           }),
         });
-        applyVectorPreview('svg', payload);
+        applyVectorPreview('svg', payload, { origin: 'svg', boardVisible: true });
+        clearVectorPreview(false);
         clearNotice();
         pushFeed('SVG plan committed through draw mode.', 'success');
       }
 
-      async function uploadAndPreviewImage(file) {
-        const form = new FormData();
-        form.append('file', file);
-        const payload = await apiRequest('/api/draw/image', {
-          method: 'POST',
-          body: form,
-        });
-        state.latestImageUploadId = payload.upload && payload.upload.upload_id;
-        state.imageCommitDefaults = payload.commit_request || null;
-        if (state.latestImageUploadId && payload.image_info) {
-          dom.imageMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(state.latestImageUploadId)} · ${payload.image_info.width_px}×${payload.image_info.height_px}`;
-        } else {
-          dom.imageMeta.innerHTML = '<strong>Upload</strong> none';
-        }
-        if (payload.preview) {
-          applyVectorPreview('image', payload);
-        } else {
-          setNotice('warning', 'Image uploaded', payload.preview_error || 'Preview is waiting for board metadata.');
-          pushFeed('Image uploaded, but preview is not ready yet.', 'info');
+      function stopUploadStatusPolling() {
+        if (state.uploadStatusTimer) {
+          clearTimeout(state.uploadStatusTimer);
+          state.uploadStatusTimer = null;
         }
       }
 
-      function buildImagePayload() {
-        if (!state.latestImageUploadId) {
-          throw new Error('No uploaded image is available yet.');
+      function updateUploadMeta(payload) {
+        const uploadId = payload && payload.upload ? payload.upload.upload_id : null;
+        const status = payload && payload.status ? payload.status : null;
+        const sourceType = payload && payload.source_type ? payload.source_type : 'file';
+        const imageInfo = payload && payload.image_info ? payload.image_info : null;
+        if (!uploadId) {
+          dom.fileMeta.innerHTML = '<strong>Upload</strong> none';
+          return;
         }
-        return Object.assign({}, state.imageCommitDefaults || {}, {
-          upload_id: state.latestImageUploadId,
+        const originalName = payload.upload && payload.upload.original_filename
+          ? ` · ${escapeHtml(payload.upload.original_filename)}`
+          : '';
+        const stateLabel = status && status.state ? escapeHtml(status.state) : 'uploaded';
+        if (imageInfo && Number(imageInfo.width_px) > 0 && Number(imageInfo.height_px) > 0) {
+          dom.fileMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(uploadId)} · ${escapeHtml(sourceType)} · ${imageInfo.width_px}×${imageInfo.height_px}${originalName} · ${stateLabel}`;
+          return;
+        }
+        dom.fileMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(uploadId)} · ${escapeHtml(sourceType)}${originalName} · ${stateLabel}`;
+      }
+
+      function recordUploadState(payload) {
+        state.latestUploadId = payload.upload && payload.upload.upload_id;
+        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults || null;
+        state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType || null;
+        state.latestUploadStatus = payload.status || state.latestUploadStatus || null;
+        updateUploadMeta(payload);
+      }
+
+      function scheduleUploadStatusPoll(delayMs = 650) {
+        stopUploadStatusPolling();
+        if (!state.latestUploadId) {
+          return;
+        }
+        state.uploadStatusTimer = window.setTimeout(() => {
+          state.uploadStatusTimer = null;
+          refreshUploadedFileStatus().catch((error) => {
+            handleError('File status refresh failed', error);
+          });
+        }, delayMs);
+      }
+
+      async function refreshUploadedFileStatus({ autoPreview = true } = {}) {
+        if (!state.latestUploadId) {
+          return null;
+        }
+        const payload = await apiRequest(`/api/vector/file/status?upload_id=${encodeURIComponent(state.latestUploadId)}`);
+        recordUploadState(payload);
+        const status = payload.status || {};
+        if (
+          payload.source_type === 'image' &&
+          payload.raster_overlay &&
+          state.vectorPreview &&
+          !state.vectorPreview.preview &&
+          previewRequestOrigin(state.vectorPreview) === 'file'
+        ) {
+          state.vectorPreview.commitRequest = payload.commit_request || state.vectorPreview.commitRequest;
+          state.vectorPreview.basePlacement = clonePlacement(
+            (payload.commit_request && payload.commit_request.placement) || state.vectorPreview.basePlacement
+          );
+          if (state.vectorPreview.rasterOverlay) {
+            state.vectorPreview.rasterOverlay.bounds = payload.raster_overlay.bounds;
+            state.vectorPreview.rasterOverlay.imageSize = payload.raster_overlay.image_size || state.vectorPreview.rasterOverlay.imageSize;
+          } else {
+            state.vectorPreview.rasterOverlay = buildRasterOverlay(
+              null,
+              payload.raster_overlay
+            );
+          }
+        }
+        refreshUiState({ redrawBoard: true });
+        if (status.state === 'ready') {
+          stopUploadStatusPolling();
+          if (
+            autoPreview &&
+            (!state.vectorPreview || !state.vectorPreview.preview || previewRequestOrigin(state.vectorPreview) === 'file')
+          ) {
+            await previewUploadedFile();
+          }
+          return payload;
+        }
+        if (status.state === 'error') {
+          stopUploadStatusPolling();
+          throw new Error(status.message || 'Background preprocessing failed.');
+        }
+        scheduleUploadStatusPoll();
+        return payload;
+      }
+
+      async function uploadAndPreviewFile(file) {
+        stopUploadStatusPolling();
+        const form = new FormData();
+        form.append('file', file);
+        const payload = await apiRequest('/api/draw/file', {
+          method: 'POST',
+          body: form,
+        });
+        recordUploadState(payload);
+        if (payload.source_type === 'image' && payload.raster_overlay) {
+          const imageUrl = URL.createObjectURL(file);
+          applyRasterPreview(payload.source_type || 'image', payload, imageUrl, { origin: 'file' });
+        }
+        const status = payload.status || {};
+        if (status.state === 'ready') {
+          await previewUploadedFile();
+          return;
+        }
+        setNotice('warning', 'File uploaded', status.message || 'Preview is being prepared in the background.');
+        pushFeed('File uploaded and queued for background preprocessing.', 'info');
+        scheduleUploadStatusPoll();
+        refreshUiState({ redrawBoard: true });
+      }
+
+      function buildUploadPayload() {
+        if (!state.latestUploadId) {
+          throw new Error('No uploaded file is available yet.');
+        }
+        return Object.assign({}, state.uploadCommitDefaults || {}, {
+          upload_id: state.latestUploadId,
           placement: readPlacement(),
         });
       }
 
-      async function previewImage() {
-        const payload = await apiRequest('/api/vector/image/preview', {
+      async function previewUploadedFile() {
+        stopUploadStatusPolling();
+        const payload = await apiRequest('/api/vector/file/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildImagePayload()),
+          body: JSON.stringify(buildUploadPayload()),
         });
-        state.imageCommitDefaults = payload.commit_request || state.imageCommitDefaults;
-        applyVectorPreview('image', payload);
+        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults;
+        state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType;
+        state.latestUploadStatus = {
+          state: 'ready',
+          stage: 'ready',
+          progress: 1,
+          message: 'Vector preview is ready.',
+        };
+        applyVectorPreview(payload.source_type || 'image', payload, { origin: 'file', boardVisible: true });
       }
 
-      async function commitImage() {
+      async function commitUploadedFile() {
+        stopUploadStatusPolling();
         await ensureMode('draw');
-        const payload = await apiRequest('/api/vector/image/commit', {
+        const payload = await apiRequest('/api/vector/file/commit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildImagePayload()),
+          body: JSON.stringify(buildUploadPayload()),
         });
-        state.imageCommitDefaults = payload.commit_request || state.imageCommitDefaults;
-        applyVectorPreview('image', payload);
+        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults;
+        state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType;
+        state.latestUploadStatus = {
+          state: 'ready',
+          stage: 'committed',
+          progress: 1,
+          message: 'Drawing started.',
+        };
+        applyVectorPreview(payload.source_type || 'image', payload, { origin: 'file', boardVisible: true });
+        clearVectorPreview(false);
         clearNotice();
-        pushFeed('Image trace committed through draw mode.', 'success');
+        pushFeed('Uploaded file committed through draw mode.', 'success');
       }
 
       function handleError(prefix, error) {
@@ -2338,12 +3360,13 @@
           button.classList.toggle('active', button.dataset.tool === tool);
         });
         dom.toolTextPanel.classList.toggle('active', tool === 'text');
+        dom.toolFilePanel.classList.toggle('active', tool === 'file');
         dom.toolSvgPanel.classList.toggle('active', tool === 'svg');
-        dom.toolImagePanel.classList.toggle('active', tool === 'image');
         syncPlacementLabels();
         if (!state.placementTouched) {
           syncPlacementDefaults(true);
         }
+        refreshUiState({ redrawBoard: true });
       }
 
       dom.modeButtons.forEach((button) => {
@@ -2377,11 +3400,27 @@
       [dom.placementX, dom.placementY, dom.placementScale].forEach((input) => {
         input.addEventListener('input', () => {
           state.placementTouched = true;
+          if (previewIsBoardVisible()) {
+            try {
+              updatePreviewPlacement(readPlacement(), { syncInputs: false });
+              schedulePreviewRefresh();
+            } catch (_error) {
+              // Ignore partial numeric edits until inputs become valid again.
+            }
+          }
         });
       });
 
       dom.placementResetBtn.addEventListener('click', () => {
         syncPlacementDefaults(true);
+        if (previewIsBoardVisible()) {
+          try {
+            updatePreviewPlacement(readPlacement(), { syncInputs: false });
+            schedulePreviewRefresh();
+          } catch (_error) {
+            // Keep defaults even if the preview route is temporarily unavailable.
+          }
+        }
         pushFeed('Placement reset for the active tool.', 'info');
       });
 
@@ -2446,35 +3485,91 @@
         dom.svgInput.value = '';
       });
 
-      dom.imageUploadBtn.addEventListener('click', async () => {
-        const file = dom.imageInput.files && dom.imageInput.files[0];
+      dom.fileUploadBtn.addEventListener('click', async () => {
+        const file = dom.fileInput.files && dom.fileInput.files[0];
         if (!file) {
-          handleError('Image upload failed', new Error('Choose an image file first.'));
+          handleError('File upload failed', new Error('Choose an SVG or image file first.'));
           return;
         }
         try {
-          await uploadAndPreviewImage(file);
-          dom.imageInput.value = '';
+          await uploadAndPreviewFile(file);
         } catch (error) {
-          handleError('Image upload failed', error);
+          handleError('File upload failed', error);
         }
       });
 
-      dom.imagePreviewBtn.addEventListener('click', async () => {
+      dom.filePreviewBtn.addEventListener('click', async () => {
         try {
-          await previewImage();
+          await previewUploadedFile();
         } catch (error) {
-          handleError('Image preview failed', error);
+          handleError('File preview failed', error);
         }
       });
 
-      dom.imageCommitBtn.addEventListener('click', async () => {
+      dom.fileCommitBtn.addEventListener('click', async () => {
         try {
-          await commitImage();
+          await commitUploadedFile();
         } catch (error) {
-          handleError('Image commit failed', error);
+          handleError('File commit failed', error);
         }
       });
+
+      dom.canvas.addEventListener('pointerdown', (event) => {
+        if (beginPreviewInteraction(event)) {
+          event.preventDefault();
+        }
+      });
+
+      dom.canvas.addEventListener('pointermove', (event) => {
+        if (movePreviewInteraction(event)) {
+          event.preventDefault();
+          return;
+        }
+        if (!previewIsBoardVisible()) {
+          dom.canvas.style.cursor = 'default';
+          return;
+        }
+        const layout = computeLayout();
+        const rect = dom.canvas.getBoundingClientRect();
+        const hit = previewHandleHit(layout, event.clientX - rect.left, event.clientY - rect.top);
+        if (!hit) {
+          dom.canvas.style.cursor = 'default';
+          return;
+        }
+        dom.canvas.style.cursor = hit.mode === 'scale' ? 'nwse-resize' : 'grab';
+      });
+
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach((eventName) => {
+        dom.canvas.addEventListener(eventName, (event) => {
+          if (endPreviewInteraction(event)) {
+            event.preventDefault();
+          }
+        });
+      });
+
+      dom.canvas.addEventListener('wheel', (event) => {
+        if (!previewIsBoardVisible()) {
+          return;
+        }
+        const layout = computeLayout();
+        const rect = dom.canvas.getBoundingClientRect();
+        const hit = previewHandleHit(layout, event.clientX - rect.left, event.clientY - rect.top);
+        if (!hit) {
+          return;
+        }
+        event.preventDefault();
+        const placement = previewDisplayPlacement();
+        if (!placement) {
+          return;
+        }
+        const multiplier = event.deltaY < 0 ? 1.05 : 0.95;
+        updatePreviewPlacement({
+          x: placement.x,
+          y: placement.y,
+          scale: Math.max(0.05, placement.scale * multiplier),
+        });
+        schedulePreviewRefresh();
+      }, { passive: false });
 
       const ros = new ROSLIB.Ros({ url: WS_URL });
 
@@ -2578,6 +3673,7 @@
             setStatusPill(dom.backendPill, dom.backendText, 'error', 'Backend · unavailable');
             setStatusPill(dom.runtimePill, dom.runtimeText, 'error', 'Runtime · unavailable');
             setNotice('error', 'Runtime refresh failed', error.message);
+            refreshUiState({ redrawBoard: true });
           }
         };
         poll();
@@ -2600,11 +3696,7 @@
       syncPlacementDefaults(true);
       setTextFontSource('relief_singleline');
       clearVectorPreview(false);
-      updateSummary();
-      updateMetrics();
-      updateDiagnostics();
-      syncControls();
-      refreshOverlay();
+      refreshUiState({ redrawBoard: true });
       startRuntimePolling();
       requestAnimationFrame(render);
     })();

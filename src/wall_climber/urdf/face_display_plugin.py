@@ -4,8 +4,14 @@ import threading
 import time
 
 import rclpy
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from std_msgs.msg import String
+
+try:
+    from rclpy.executors import ShutdownException
+except ImportError:  # pragma: no cover - older rclpy versions do not expose this symbol
+    class ShutdownException(Exception):
+        pass
 
 
 class FaceDisplayPlugin:
@@ -66,8 +72,21 @@ class FaceDisplayPlugin:
             self._expression = value
 
     def _spin_loop(self):
-        while self._spin_running and rclpy.ok():
-            self._executor.spin_once(timeout_sec=self._spin_timeout_sec)
+        while self._spin_running:
+            try:
+                if not rclpy.ok():
+                    break
+                self._executor.spin_once(timeout_sec=self._spin_timeout_sec)
+            except (ExternalShutdownException, ShutdownException):
+                break
+            except Exception:
+                if not self._spin_running or not rclpy.ok():
+                    break
+                try:
+                    self._node.get_logger().error('Face display plugin spin loop stopped unexpectedly.')
+                except Exception:
+                    pass
+                break
 
     def _is_blinking(self) -> bool:
         now = time.monotonic()

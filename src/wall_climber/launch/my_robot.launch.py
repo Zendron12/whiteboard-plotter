@@ -160,7 +160,7 @@ def generate_launch_description():
     enable_webots_trail = LaunchConfiguration('enable_webots_trail')
     writer_mode = LaunchConfiguration('writer_mode')
 
-    world_path = os.path.join(pkg_dir, 'worlds', 'wall_world_basic.wbt')
+    world_path = os.path.join(pkg_dir, 'worlds', 'wall_world.wbt')
     climber_xacro_path = os.path.join(pkg_dir, 'urdf', 'my_robot.urdf.xacro')
     supervisor_xacro_path = os.path.join(pkg_dir, 'urdf', 'cable_supervisor.urdf.xacro')
 

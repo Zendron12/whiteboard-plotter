@@ -2,9 +2,14 @@
 build/
 install/
 log/
+CMakeFiles/
 
 # Do not upload compressed archives
 *.zip
+
+# Local browser automation artifacts
+.playwright-cli/
+output/
 
 # Python cache artifacts
 **/__pycache__/

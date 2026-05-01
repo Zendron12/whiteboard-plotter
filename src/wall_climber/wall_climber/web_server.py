@@ -1,32 +1,75 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 import threading
+import time
 import uuid
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy
 import rclpy
 import uvicorn
 from ament_index_python.packages import get_package_share_directory
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from geometry_msgs.msg import Point
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
-from wall_climber_interfaces.msg import DrawPlan, DrawPolyline
+from wall_climber_interfaces.msg import BoardPoint, PathPrimitive, PrimitivePathPlan
 
+from wall_climber.canonical_adapters import (
+    SamplingPolicy,
+    canonical_plan_debug_payload,
+    canonical_plan_diagnostics,
+    canonical_plan_to_draw_strokes,
+    canonical_plan_to_legacy_strokes,
+    canonical_plan_to_primitive_path_plan,
+    canonical_plan_to_sampled_paths,
+)
+from wall_climber.canonical_builders import (
+    draw_strokes_to_canonical_plan,
+    text_glyph_outlines_to_canonical_plan,
+)
+from wall_climber.canonical_optimizer import (
+    CanonicalOptimizationPolicy,
+    optimize_canonical_plan,
+)
+from wall_climber.canonical_path import CanonicalPathPlan
+from wall_climber.canonical_ops import (
+    cleanup_canonical_plan,
+    default_image_placement,
+    normalize_placement,
+    place_canonical_plan_on_board,
+    place_grouped_text_on_board,
+    stroke_stats,
+)
+from wall_climber.ingestion.image import vectorize_image_to_canonical_plan
+from wall_climber.ingestion.image_curve_fitting import (
+    curve_fit_debug_to_board,
+    map_curve_fit_command_metadata,
+)
+from wall_climber.ingestion.svg import vectorize_svg
+from wall_climber.ingestion.text import (
+    TextGlyphOutline,
+    normalize_text_plan_input,
+    vectorize_text_grouped,
+)
+from wall_climber.ingestion.upload_routing import (
+    UploadedVectorFile,
+    classify_uploaded_vector_file,
+    infer_uploaded_source_type,
+)
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
     CABLE_SUPERVISOR_STATUS_TOPIC,
-    DRAW_PLAN_TOPIC,
+    EXECUTION_DIAGNOSTICS_TOPIC,
     MANUAL_PEN_MODE_TOPIC,
     MODE_DRAW,
     MODE_OFF,
@@ -34,28 +77,12 @@ from wall_climber.runtime_topics import (
     PEN_MODE_AUTO,
     PEN_MODE_DOWN,
     PEN_MODE_UP,
+    PRIMITIVE_PATH_PLAN_TOPIC,
     VALID_MODES,
     VALID_MANUAL_PEN_MODES,
 )
 from wall_climber.shared_config import load_shared_config
-from wall_climber.vector_pipeline import (
-    DrawPathSegment,
-    TextGlyphOutline,
-    VectorPlacement,
-    cleanup_draw_strokes,
-    default_placement,
-    draw_plan_to_dict,
-    draw_segments_from_pen_strokes,
-    normalize_placement,
-    normalize_text_plan_input,
-    place_grouped_text_on_board,
-    place_draw_strokes_on_board,
-    stroke_stats,
-    strokes_to_draw_plan,
-    trace_line_art_image,
-    vectorize_svg,
-    vectorize_text_grouped,
-)
+from wall_climber.vector_pipeline import VectorPlacement
 
 
 _ACTIVE_MODE_QOS = QoSProfile(
@@ -79,16 +106,22 @@ _SEGMENT_EPS_M = 1.0e-4
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _MAX_SVG_BYTES = 256 * 1024
 _MAX_VECTOR_REQUEST_BYTES = 512 * 1024
-_ALLOWED_UPLOAD_TYPES = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/webp': '.webp',
-}
-_ALLOWED_UPLOAD_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp'}
 _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
 )
+_DEFAULT_IMAGE_PREP_OPTIONS = {
+    'min_perimeter_px': 8.0,
+    'contour_simplify_ratio': 0.001,
+    'max_strokes': 4096,
+}
+
+
+@dataclass(frozen=True)
+class PreparedImageArtifact:
+    image_result: Any
+    defaults: dict[str, Any]
+    timings_ms: dict[str, float]
 
 
 class WebBackendNode(Node):
@@ -117,13 +150,18 @@ class WebBackendNode(Node):
         self._statuses = {key: None for key in _REQUIRED_STATUS_KEYS}
         self._board_info: dict[str, Any] | None = None
         self._board_bounds: dict[str, float] | None = None
+        self._executor_diagnostics: dict[str, Any] | None = None
 
         self._active_mode_pub = self.create_publisher(
             String,
             ACTIVE_MODE_TOPIC,
             _ACTIVE_MODE_QOS,
         )
-        self._draw_plan_pub = self.create_publisher(DrawPlan, DRAW_PLAN_TOPIC, 10)
+        self._primitive_path_plan_pub = self.create_publisher(
+            PrimitivePathPlan,
+            PRIMITIVE_PATH_PLAN_TOPIC,
+            10,
+        )
         self._manual_pen_mode_pub = self.create_publisher(
             String,
             MANUAL_PEN_MODE_TOPIC,
@@ -148,6 +186,12 @@ class WebBackendNode(Node):
             MANUAL_PEN_MODE_TOPIC,
             self._manual_pen_mode_cb,
             _ACTIVE_MODE_QOS,
+        )
+        self.create_subscription(
+            String,
+            EXECUTION_DIAGNOSTICS_TOPIC,
+            self._executor_diagnostics_cb,
+            _STATUS_TOPIC_QOS,
         )
 
         self._publish_active_mode(self._active_mode)
@@ -205,6 +249,16 @@ class WebBackendNode(Node):
         with self._lock:
             self._manual_pen_mode = mode
 
+    def _executor_diagnostics_cb(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._lock:
+            self._executor_diagnostics = payload
+
     def _publish_active_mode(self, mode: str) -> None:
         msg = String()
         msg.data = mode
@@ -222,6 +276,10 @@ class WebBackendNode(Node):
             board_info = dict(self._board_info) if self._board_info is not None else None
             active_mode = self._active_mode
             manual_pen_mode = self._manual_pen_mode
+            executor_diagnostics = (
+                dict(self._executor_diagnostics)
+                if self._executor_diagnostics is not None else None
+            )
         ready = all(observed.values())
         return {
             'active_mode': active_mode,
@@ -231,6 +289,7 @@ class WebBackendNode(Node):
             'observed_statuses': observed,
             'statuses': statuses,
             'board_info': board_info,
+            'executor_diagnostics': executor_diagnostics,
             'enable_webots_trail': self.enable_webots_trail,
         }
 
@@ -262,7 +321,12 @@ class WebBackendNode(Node):
         self._publish_manual_pen_mode(mode)
         return self.runtime_snapshot()
 
-    def publish_draw_plan(self, plan: DrawPlan, *, allowed_modes: tuple[str, ...]) -> None:
+    def publish_execution_plan(
+        self,
+        primitive_plan: PrimitivePathPlan,
+        *,
+        allowed_modes: tuple[str, ...],
+    ) -> dict[str, Any]:
         snapshot = self.ensure_ready()
         if snapshot['active_mode'] not in allowed_modes:
             allowed = ', '.join(allowed_modes)
@@ -271,7 +335,15 @@ class WebBackendNode(Node):
             raise HTTPException(status_code=409, detail='manual arm test must be set to auto before drawing')
         if snapshot['statuses']['cable_executor_status'] == 'running':
             raise HTTPException(status_code=409, detail='cable executor is busy')
-        self._draw_plan_pub.publish(plan)
+        self._primitive_path_plan_pub.publish(primitive_plan)
+        return {
+            'published': 'primitive_path_plan',
+            'preferred_transport': 'primitive_path_plan',
+            'primitive_transport_published': True,
+            'topics': {
+                'primitive_path_plan': PRIMITIVE_PATH_PLAN_TOPIC,
+            },
+        }
 
     def writable_bounds(self) -> dict[str, float]:
         with self._lock:
@@ -291,6 +363,10 @@ class WebBackendNode(Node):
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
+    def executor_diagnostics_snapshot(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._executor_diagnostics) if self._executor_diagnostics is not None else None
+
 
 class BackendRuntime:
     def __init__(self, node: WebBackendNode) -> None:
@@ -298,6 +374,8 @@ class BackendRuntime:
         self._executor = SingleThreadedExecutor()
         self._executor_thread: threading.Thread | None = None
         self._shutdown_lock = threading.Lock()
+        self._debug_lock = threading.Lock()
+        self._upload_lock = threading.Lock()
         self._started = False
         self._stopped = False
         self._server: uvicorn.Server | None = None
@@ -305,6 +383,14 @@ class BackendRuntime:
         self._web_dir = self._share_dir / 'web'
         self._uploads_dir = Path.home() / '.ros' / 'wall_climber' / 'uploads'
         self._uploads_dir.mkdir(parents=True, exist_ok=True)
+        self._image_prepare_pool = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix='wall_climber_image_prepare',
+        )
+        self._upload_processing: dict[str, dict[str, Any]] = {}
+        self._last_plan_debug: dict[str, Any] | None = None
+        self._last_execution_debug: dict[str, Any] | None = None
+        self._last_curve_fit_debug: dict[str, Any] | None = None
 
     @property
     def node(self) -> WebBackendNode:
@@ -354,12 +440,22 @@ class BackendRuntime:
                 self._node.destroy_node()
             except Exception:
                 pass
+            try:
+                self._image_prepare_pool.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                self._image_prepare_pool.shutdown(wait=False)
             if rclpy.ok():
                 rclpy.shutdown()
 
-    def store_upload(self, upload: UploadFile, content: bytes) -> dict[str, Any]:
+    def store_upload(
+        self,
+        upload: UploadFile,
+        content: bytes,
+        *,
+        upload_details: UploadedVectorFile,
+    ) -> dict[str, Any]:
         upload_id = uuid.uuid4().hex
-        extension = _ALLOWED_UPLOAD_TYPES[upload.content_type]
+        extension = upload_details.extension
         payload_path = self._uploads_dir / f'{upload_id}{extension}'
         metadata_path = self._uploads_dir / f'{upload_id}.json'
         payload_path.write_bytes(content)
@@ -369,11 +465,21 @@ class BackendRuntime:
             'metadata_filename': metadata_path.name,
             'original_filename': upload.filename,
             'content_type': upload.content_type,
+            'normalized_content_type': upload_details.normalized_content_type,
+            'source_type': upload_details.source_type,
             'size_bytes': len(content),
             'stored_only': True,
             'created_at': datetime.now(timezone.utc).isoformat(),
         }
+        if upload_details.image_size is not None:
+            metadata['image_size'] = {
+                'width_px': int(upload_details.image_size[0]),
+                'height_px': int(upload_details.image_size[1]),
+            }
         metadata_path.write_text(json.dumps(metadata, separators=(',', ':'), indent=2), encoding='utf-8')
+        self._remember_upload(metadata)
+        if metadata['source_type'] == 'image':
+            self.ensure_upload_processing(upload_id, metadata=metadata, payload=content)
         return metadata
 
     def load_upload(self, upload_id: str) -> tuple[dict[str, Any], bytes]:
@@ -386,6 +492,12 @@ class BackendRuntime:
             raise HTTPException(status_code=500, detail=f'failed to read upload metadata: {exc}')
         if not isinstance(metadata, dict):
             raise HTTPException(status_code=500, detail='upload metadata is invalid')
+        metadata['source_type'] = infer_uploaded_source_type(
+            stored_filename=metadata.get('stored_filename'),
+            original_filename=metadata.get('original_filename'),
+            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
+            source_type=metadata.get('source_type'),
+        )
         stored_filename = metadata.get('stored_filename')
         if not isinstance(stored_filename, str) or not stored_filename:
             raise HTTPException(status_code=500, detail='upload metadata is missing stored filename')
@@ -397,6 +509,211 @@ class BackendRuntime:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f'failed to read upload payload: {exc}')
         return metadata, payload
+
+    def _default_processing_entry(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        source_type = infer_uploaded_source_type(
+            stored_filename=metadata.get('stored_filename'),
+            original_filename=metadata.get('original_filename'),
+            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
+            source_type=metadata.get('source_type'),
+        )
+        image_size = metadata.get('image_size') if isinstance(metadata.get('image_size'), dict) else None
+        entry = {
+            'upload_id': metadata.get('upload_id'),
+            'source_type': source_type,
+            'state': 'ready' if source_type == 'svg' else 'uploaded',
+            'stage': 'ready' if source_type == 'svg' else 'uploaded',
+            'progress': 1.0 if source_type == 'svg' else 0.0,
+            'message': 'SVG upload is ready.' if source_type == 'svg' else 'Upload stored and waiting for preprocessing.',
+            'image_size': dict(image_size) if image_size else None,
+            'route': None,
+            'timings_ms': {},
+            'curve_fit_summary': None,
+            'artifact': None,
+            'future': None,
+        }
+        return entry
+
+    def _remember_upload(self, metadata: dict[str, Any]) -> None:
+        upload_id = metadata.get('upload_id')
+        if not isinstance(upload_id, str) or not upload_id:
+            return
+        with self._upload_lock:
+            existing = self._upload_processing.get(upload_id)
+            if existing is None:
+                self._upload_processing[upload_id] = self._default_processing_entry(metadata)
+                return
+            if existing.get('image_size') is None and isinstance(metadata.get('image_size'), dict):
+                existing['image_size'] = dict(metadata['image_size'])
+            if existing.get('source_type') is None:
+                existing['source_type'] = metadata.get('source_type')
+
+    def ensure_upload_processing(
+        self,
+        upload_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        payload: bytes | None = None,
+    ) -> None:
+        if metadata is None:
+            metadata, payload = self.load_upload(upload_id)
+        self._remember_upload(metadata)
+        source_type = infer_uploaded_source_type(
+            stored_filename=metadata.get('stored_filename'),
+            original_filename=metadata.get('original_filename'),
+            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
+            source_type=metadata.get('source_type'),
+        )
+        if source_type != 'image':
+            return
+
+        with self._upload_lock:
+            entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
+            if entry.get('artifact') is not None and entry.get('state') == 'ready':
+                return
+            if entry.get('state') == 'error':
+                return
+            future = entry.get('future')
+            if isinstance(future, Future) and not future.done():
+                return
+            entry['state'] = 'processing'
+            entry['stage'] = 'vectorizing'
+            entry['progress'] = 0.15
+            entry['message'] = 'Preprocessing image in background.'
+            future = self._image_prepare_pool.submit(
+                self._prepare_image_upload_worker,
+                upload_id,
+                payload,
+            )
+            entry['future'] = future
+
+    def _prepare_image_upload_worker(self, upload_id: str, payload: bytes | None) -> None:
+        try:
+            if payload is None:
+                metadata, payload = self.load_upload(upload_id)
+            else:
+                metadata, _ = self.load_upload(upload_id)
+            defaults = dict(_DEFAULT_IMAGE_PREP_OPTIONS)
+            with self._upload_lock:
+                entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
+                entry['state'] = 'processing'
+                entry['stage'] = 'vectorizing'
+                entry['progress'] = 0.35
+                entry['message'] = 'Tracing and fitting image geometry.'
+            ingest_start = time.perf_counter()
+            image_result = vectorize_image_to_canonical_plan(
+                payload,
+                theta_ref=self._node._shared.draw_execution.fixed_draw_theta_rad,
+                **defaults,
+            )
+            timings_ms = {
+                'ingest_ms': max(0.0, (time.perf_counter() - ingest_start) * 1000.0),
+            }
+            artifact = PreparedImageArtifact(
+                image_result=image_result,
+                defaults=defaults,
+                timings_ms=timings_ms,
+            )
+            with self._upload_lock:
+                entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
+                entry['state'] = 'ready'
+                entry['stage'] = 'ready'
+                entry['progress'] = 1.0
+                entry['message'] = 'Vector preview is ready.'
+                entry['route'] = image_result.route_decision.to_dict()
+                entry['timings_ms'] = dict(timings_ms)
+                entry['curve_fit_summary'] = dict(image_result.to_metadata().get('pipeline', {}).get('curve_fit_summary') or {})
+                entry['artifact'] = artifact
+                entry['future'] = None
+        except Exception as exc:
+            with self._upload_lock:
+                entry = self._upload_processing.setdefault(upload_id, {
+                    'upload_id': upload_id,
+                })
+                entry['state'] = 'error'
+                entry['stage'] = 'error'
+                entry['progress'] = 1.0
+                entry['message'] = str(exc)
+                entry['artifact'] = None
+                entry['future'] = None
+
+    def upload_processing_snapshot(
+        self,
+        upload_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        payload: bytes | None = None,
+    ) -> dict[str, Any]:
+        if metadata is None:
+            metadata, payload = self.load_upload(upload_id)
+        self._remember_upload(metadata)
+        source_type = infer_uploaded_source_type(
+            stored_filename=metadata.get('stored_filename'),
+            original_filename=metadata.get('original_filename'),
+            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
+            source_type=metadata.get('source_type'),
+        )
+        if source_type == 'image':
+            self.ensure_upload_processing(upload_id, metadata=metadata, payload=payload)
+        with self._upload_lock:
+            entry = dict(self._upload_processing.get(upload_id) or self._default_processing_entry(metadata))
+        return {
+            'upload_id': upload_id,
+            'source_type': source_type,
+            'state': str(entry.get('state') or 'uploaded'),
+            'stage': str(entry.get('stage') or 'uploaded'),
+            'progress': float(entry.get('progress') or 0.0),
+            'message': str(entry.get('message') or ''),
+            'image_size': dict(entry['image_size']) if isinstance(entry.get('image_size'), dict) else None,
+            'route': dict(entry['route']) if isinstance(entry.get('route'), dict) else None,
+            'timings_ms': dict(entry.get('timings_ms') or {}),
+            'curve_fit_summary': dict(entry.get('curve_fit_summary') or {}),
+        }
+
+    def prepared_image_artifact(
+        self,
+        upload_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        payload: bytes | None = None,
+    ) -> PreparedImageArtifact:
+        if metadata is None:
+            metadata, payload = self.load_upload(upload_id)
+        self.ensure_upload_processing(upload_id, metadata=metadata, payload=payload)
+        with self._upload_lock:
+            entry = self._upload_processing.get(upload_id)
+            artifact = entry.get('artifact') if entry else None
+            state = entry.get('state') if entry else None
+            message = str(entry.get('message') or '') if entry else ''
+        if isinstance(artifact, PreparedImageArtifact):
+            return artifact
+        if state == 'error':
+            raise HTTPException(status_code=422, detail=message or 'image preprocessing failed')
+        raise HTTPException(status_code=409, detail='image preprocessing is still running')
+
+    def record_last_plan_debug(self, payload: dict[str, Any]) -> None:
+        with self._debug_lock:
+            self._last_plan_debug = dict(payload)
+
+    def record_last_execution_debug(self, payload: dict[str, Any]) -> None:
+        with self._debug_lock:
+            self._last_execution_debug = dict(payload)
+
+    def record_last_curve_fit_debug(self, payload: dict[str, Any]) -> None:
+        with self._debug_lock:
+            self._last_curve_fit_debug = dict(payload)
+
+    def last_plan_debug_snapshot(self) -> dict[str, Any] | None:
+        with self._debug_lock:
+            return dict(self._last_plan_debug) if self._last_plan_debug is not None else None
+
+    def last_execution_debug_snapshot(self) -> dict[str, Any] | None:
+        with self._debug_lock:
+            return dict(self._last_execution_debug) if self._last_execution_debug is not None else None
+
+    def last_curve_fit_debug_snapshot(self) -> dict[str, Any] | None:
+        with self._debug_lock:
+            return dict(self._last_curve_fit_debug) if self._last_curve_fit_debug is not None else None
 
 
 def _require_json_object(raw: Any, name: str) -> dict[str, Any]:
@@ -560,8 +877,10 @@ def _grouped_text_bounds(glyphs: tuple[TextGlyphOutline, ...]) -> dict[str, floa
 
 def _normalize_text_font_source(font_source: Any) -> str:
     normalized = str(font_source or 'relief_singleline').strip().lower()
-    if normalized not in {'relief_singleline', 'hershey_sans_1'}:
-        raise ValueError('font_source must be one of ["relief_singleline", "hershey_sans_1"]')
+    if normalized not in {'relief_singleline', 'hershey_sans_1', 'dejavu_sans'}:
+        raise ValueError(
+            'font_source must be one of ["relief_singleline", "hershey_sans_1", "dejavu_sans"]'
+        )
     return normalized
 
 
@@ -585,16 +904,142 @@ def _expand_preview_bounds(
     }
 
 
+def _preview_sampling_policy(shared_config) -> SamplingPolicy:
+    draw_defaults = shared_config.draw_execution
+    return SamplingPolicy(
+        curve_tolerance_m=max(0.006, float(draw_defaults.draw_resample_step_m) * 1.75),
+        draw_step_m=max(0.006, float(draw_defaults.draw_resample_step_m) * 1.75),
+        travel_step_m=max(0.006, float(draw_defaults.travel_resample_step_m) * 1.35),
+        max_heading_delta_rad=0.28,
+        label='preview',
+    )
+
+
+def _runtime_sampling_policy(shared_config) -> SamplingPolicy:
+    draw_defaults = shared_config.draw_execution
+    return SamplingPolicy(
+        curve_tolerance_m=max(1.0e-4, float(draw_defaults.draw_resample_step_m)),
+        draw_step_m=max(1.0e-4, float(draw_defaults.draw_resample_step_m)),
+        travel_step_m=max(1.0e-4, float(draw_defaults.travel_resample_step_m)),
+        max_heading_delta_rad=0.16,
+        label='runtime',
+    )
+
+
+def _draw_optimization_policy(
+    shared_config,
+    *,
+    label: str,
+    reorder_units: bool,
+    fit_arcs: bool = False,
+    enable_hatch_ordering: bool = False,
+    cluster_units: bool = False,
+) -> CanonicalOptimizationPolicy:
+    draw_defaults = shared_config.draw_execution
+    tiny = max(2.0e-4, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.0)
+    return CanonicalOptimizationPolicy(
+        label=label,
+        reorder_units=bool(reorder_units),
+        cluster_units=bool(cluster_units),
+        merge_travel_moves=True,
+        fit_arcs=bool(fit_arcs),
+        enable_hatch_ordering=bool(enable_hatch_ordering),
+        tiny_primitive_m=tiny,
+        arc_fit_tolerance_m=max(tiny, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.5),
+        merge_distance_tolerance_m=max(1.0e-5, tiny * 0.25),
+        dedupe_precision_m=max(1.0e-5, tiny * 0.5),
+        cluster_cell_size_m=0.26,
+    )
+
+
+def _sampling_validation_step_m(policy: SamplingPolicy) -> float:
+    candidates = [
+        float(policy.curve_tolerance_m),
+        float(policy.draw_step_m) if policy.draw_step_m is not None else None,
+        float(policy.travel_step_m) if policy.travel_step_m is not None else None,
+    ]
+    steps = [max(1.0e-4, value) for value in candidates if value is not None]
+    return min(steps) if steps else 0.01
+
+
+def _validated_runtime_sampled_paths(
+    canonical_plan: CanonicalPathPlan,
+    *,
+    writable_bounds: dict[str, float],
+    shared_config,
+    sampling_policy: SamplingPolicy,
+):
+    segments = canonical_plan_to_sampled_paths(
+        canonical_plan,
+        sampling_policy=sampling_policy,
+    )
+    if not segments:
+        raise HTTPException(status_code=422, detail='execution payload has no drawable segments')
+    for index, segment in enumerate(segments):
+        if len(segment.points) < 2:
+            raise HTTPException(status_code=422, detail=f'draw segment[{index}] is degenerate')
+        for point in segment.points:
+            if not (
+                writable_bounds['x_min'] <= point[0] <= writable_bounds['x_max']
+                and writable_bounds['y_min'] <= point[1] <= writable_bounds['y_max']
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f'draw segment[{index}] extends outside carriage-safe writable bounds',
+                )
+        if _interpolated_outside_safe_workspace_count(
+            (segment.points,),
+            shared_config,
+            step_m=_sampling_validation_step_m(sampling_policy),
+        ) != 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f'draw segment[{index}] exits the configured safe cable workspace',
+            )
+    return segments
+
+
 def _preview_payload_from_strokes(
     placed_strokes: tuple[tuple[tuple[float, float], ...], ...],
     placement_result,
     *,
     outside_safe_points: int,
     normalized_plan: dict[str, Any] | None = None,
+    canonical_plan: CanonicalPathPlan | None = None,
+    preview_sampling_policy: SamplingPolicy | None = None,
+    runtime_sampling_policy: SamplingPolicy | None = None,
 ) -> dict[str, Any]:
-    draw_plan = strokes_to_draw_plan(placed_strokes)
-    preview_strokes = [stroke['points'] for stroke in draw_plan['strokes']]
-    stats = stroke_stats(placed_strokes)
+    if canonical_plan is None:
+        preview_strokes = [
+            [[float(point[0]), float(point[1])] for point in stroke]
+            for stroke in placed_strokes
+        ]
+        diagnostics = None
+    else:
+        preview_policy = preview_sampling_policy or SamplingPolicy(label='preview')
+        runtime_policy = runtime_sampling_policy or preview_policy
+        preview_draw_strokes = canonical_plan_to_draw_strokes(
+            canonical_plan,
+            sampling_policy=preview_policy,
+        )
+        preview_strokes = [
+            [[float(point[0]), float(point[1])] for point in stroke]
+            for stroke in preview_draw_strokes
+        ]
+        diagnostics = canonical_plan_diagnostics(
+            canonical_plan,
+            preview_sampling_policy=preview_policy,
+            runtime_sampling_policy=runtime_policy,
+        )
+    stats = stroke_stats(
+        tuple(
+            tuple((float(point[0]), float(point[1])) for point in stroke)
+            for stroke in (
+                tuple(tuple(tuple(point) for point in stroke) for stroke in placed_strokes)
+                if canonical_plan is None else preview_draw_strokes
+            )
+        )
+    )
 
     # Add preview-only padding so letters touching the text bounds
     # do not appear visually clipped in the browser.
@@ -625,6 +1070,7 @@ def _preview_payload_from_strokes(
         'can_commit': can_commit,
         'validation_error': validation_error,
         'normalized_plan': normalized_plan,
+        'diagnostics': diagnostics,
     }
 
 
@@ -655,44 +1101,58 @@ def _interpolated_outside_safe_workspace_count(
     return outside
 
 
-def _build_draw_plan_message(
-    segments: tuple[DrawPathSegment, ...],
+def _build_primitive_path_plan_message(
+    canonical_plan: CanonicalPathPlan,
+) -> PrimitivePathPlan:
+    descriptor = canonical_plan_to_primitive_path_plan(canonical_plan)
+    plan = PrimitivePathPlan()
+    plan.frame = str(descriptor['frame'])
+    plan.theta_ref = float(descriptor['theta_ref'])
+    type_codes = {
+        'PEN_UP': PathPrimitive.PEN_UP,
+        'PEN_DOWN': PathPrimitive.PEN_DOWN,
+        'TRAVEL_MOVE': PathPrimitive.TRAVEL_MOVE,
+        'LINE_SEGMENT': PathPrimitive.LINE_SEGMENT,
+        'ARC_SEGMENT': PathPrimitive.ARC_SEGMENT,
+        'QUADRATIC_BEZIER': PathPrimitive.QUADRATIC_BEZIER,
+        'CUBIC_BEZIER': PathPrimitive.CUBIC_BEZIER,
+    }
+    for primitive_descriptor in descriptor['primitives']:
+        primitive = PathPrimitive()
+        primitive.type = int(type_codes[str(primitive_descriptor['type'])])
+        for field_name in ('start', 'end', 'control1', 'control2', 'center'):
+            point = primitive_descriptor[field_name]
+            setattr(
+                primitive,
+                field_name,
+                BoardPoint(
+                    x=float(point['x']),
+                    y=float(point['y']),
+                ),
+            )
+        primitive.radius = float(primitive_descriptor['radius'])
+        primitive.start_angle_rad = float(primitive_descriptor['start_angle_rad'])
+        primitive.sweep_angle_rad = float(primitive_descriptor['sweep_angle_rad'])
+        primitive.clockwise = bool(primitive_descriptor['clockwise'])
+        primitive.pen_down = bool(primitive_descriptor['pen_down'])
+        plan.primitives.append(primitive)
+    return plan
+
+
+def _build_execution_transport_message(
+    canonical_plan: CanonicalPathPlan,
     *,
-    theta_ref: float,
     writable_bounds: dict[str, float],
     shared_config,
-) -> DrawPlan:
-    if not segments:
-        raise HTTPException(status_code=422, detail='draw plan has no drawable segments')
-    for index, segment in enumerate(segments):
-        if len(segment.points) < 2:
-            raise HTTPException(status_code=422, detail=f'draw segment[{index}] is degenerate')
-        for point in segment.points:
-            if not (
-                writable_bounds['x_min'] <= point[0] <= writable_bounds['x_max']
-                and writable_bounds['y_min'] <= point[1] <= writable_bounds['y_max']
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f'draw segment[{index}] extends outside carriage-safe writable bounds',
-                )
-        if _interpolated_outside_safe_workspace_count((segment.points,), shared_config) != 0:
-            raise HTTPException(
-                status_code=422,
-                detail=f'draw segment[{index}] exits the configured safe cable workspace',
-            )
-    plan = DrawPlan()
-    plan.frame_id = 'board'
-    plan.theta_ref = float(theta_ref)
-    for segment in segments:
-        msg_segment = DrawPolyline()
-        msg_segment.draw = bool(segment.draw)
-        msg_segment.points = [
-            Point(x=float(point[0]), y=float(point[1]), z=0.0)
-            for point in segment.points
-        ]
-        plan.segments.append(msg_segment)
-    return plan
+    sampling_policy: SamplingPolicy,
+) -> PrimitivePathPlan:
+    _validated_runtime_sampled_paths(
+        canonical_plan,
+        writable_bounds=writable_bounds,
+        shared_config=shared_config,
+        sampling_policy=sampling_policy,
+    )
+    return _build_primitive_path_plan_message(canonical_plan)
 
 
 def _sanitize_points(raw_points: Any, stroke_index: int) -> list[tuple[float, float]]:
@@ -727,17 +1187,17 @@ def _sanitize_points(raw_points: Any, stroke_index: int) -> list[tuple[float, fl
     return sanitized
 
 
-def _normalize_draw_plan(raw: Any, writable_bounds: dict[str, float]) -> str:
+def _normalize_stroke_payload(raw: Any, writable_bounds: dict[str, float]) -> str:
     if not isinstance(raw, dict):
-        raise HTTPException(status_code=422, detail='draw plan body must be a JSON object')
-    _reject_extra_fields(raw, {'frame', 'strokes'}, 'draw plan')
+        raise HTTPException(status_code=422, detail='stroke payload body must be a JSON object')
+    _reject_extra_fields(raw, {'frame', 'strokes'}, 'stroke payload')
     if raw.get('frame') != 'board':
-        raise HTTPException(status_code=422, detail='draw plan.frame must be exactly "board"')
+        raise HTTPException(status_code=422, detail='stroke payload.frame must be exactly "board"')
     strokes = raw.get('strokes')
     if not isinstance(strokes, list) or not strokes:
-        raise HTTPException(status_code=422, detail='draw plan.strokes must be a non-empty list')
+        raise HTTPException(status_code=422, detail='stroke payload.strokes must be a non-empty list')
     if len(strokes) > _MAX_DRAW_STROKES:
-        raise HTTPException(status_code=413, detail='draw plan exceeds the maximum number of strokes')
+        raise HTTPException(status_code=413, detail='stroke payload exceeds the maximum number of strokes')
 
     normalized_strokes: list[dict[str, Any]] = []
     total_points = 0
@@ -756,7 +1216,7 @@ def _normalize_draw_plan(raw: Any, writable_bounds: dict[str, float]) -> str:
             raise HTTPException(status_code=422, detail=f'stroke[{stroke_index}] is degenerate after sanitization')
         total_points += len(points)
         if total_points > _MAX_TOTAL_POINTS:
-            raise HTTPException(status_code=413, detail='draw plan exceeds the maximum total point budget')
+            raise HTTPException(status_code=413, detail='stroke payload exceeds the maximum total point budget')
         for point in points:
             if not (
                 writable_bounds['x_min'] <= point[0] <= writable_bounds['x_max']
@@ -773,24 +1233,21 @@ def _normalize_draw_plan(raw: Any, writable_bounds: dict[str, float]) -> str:
     payload = {'frame': 'board', 'strokes': normalized_strokes}
     encoded = json.dumps(payload, separators=(',', ':'))
     if len(encoded.encode('utf-8')) > _MAX_DRAW_PLAN_BYTES:
-        raise HTTPException(status_code=413, detail='draw plan exceeds the maximum allowed payload size')
+        raise HTTPException(status_code=413, detail='stroke payload exceeds the maximum allowed payload size')
     return encoded
 
 
-def _validate_upload(upload: UploadFile, content: bytes) -> None:
-    if upload.content_type not in _ALLOWED_UPLOAD_TYPES:
-        raise HTTPException(status_code=415, detail='unsupported upload content type')
-    suffix = Path(upload.filename or '').suffix.lower()
-    if suffix and suffix not in _ALLOWED_UPLOAD_SUFFIXES:
-        raise HTTPException(status_code=415, detail='unsupported upload filename extension')
+def _validate_upload(upload: UploadFile, content: bytes) -> UploadedVectorFile:
     if not content:
-        raise HTTPException(status_code=422, detail='uploaded image is empty')
+        raise HTTPException(status_code=422, detail='uploaded file is empty')
     if len(content) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail='uploaded image exceeds the maximum allowed size')
-    array = numpy.frombuffer(content, dtype=numpy.uint8)
-    decoded = cv2.imdecode(array, cv2.IMREAD_COLOR)
-    if decoded is None:
-        raise HTTPException(status_code=422, detail='uploaded file is not a decodable image')
+        raise HTTPException(status_code=413, detail='uploaded file exceeds the maximum allowed size')
+    try:
+        return classify_uploaded_vector_file(upload.filename, upload.content_type, content)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 415 if 'unsupported upload content type' in detail else 422
+        raise HTTPException(status_code=status_code, detail=detail)
 
 
 def _resolve_web_asset_path(web_dir: Path, asset_path: str) -> Path:
@@ -811,6 +1268,22 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     shared = load_shared_config()
     text_layout_defaults = shared.text_layout
     draw_execution_defaults = shared.draw_execution
+    preview_sampling_policy = _preview_sampling_policy(shared)
+    runtime_sampling_policy = _runtime_sampling_policy(shared)
+    svg_optimization_policy = _draw_optimization_policy(
+        shared,
+        label='svg',
+        reorder_units=True,
+        fit_arcs=True,
+    )
+    image_optimization_policy = _draw_optimization_policy(
+        shared,
+        label='image',
+        reorder_units=True,
+        fit_arcs=True,
+        enable_hatch_ordering=True,
+        cluster_units=True,
+    )
 
     @app.get('/assets/{asset_path:path}')
     async def assets(asset_path: str) -> FileResponse:
@@ -843,6 +1316,23 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     async def runtime_state() -> JSONResponse:
         return JSONResponse(runtime.node.runtime_snapshot())
 
+    @app.get('/api/debug/last-plan')
+    async def last_plan_debug() -> JSONResponse:
+        payload = runtime.last_plan_debug_snapshot()
+        return JSONResponse(payload or {'available': False})
+
+    @app.get('/api/debug/last-execution')
+    async def last_execution_debug() -> JSONResponse:
+        payload = runtime.last_execution_debug_snapshot() or {'available': False}
+        payload = dict(payload)
+        payload['executor'] = runtime.node.executor_diagnostics_snapshot()
+        return JSONResponse(payload)
+
+    @app.get('/api/debug/last-curve-fit')
+    async def last_curve_fit_debug() -> JSONResponse:
+        payload = runtime.last_curve_fit_debug_snapshot()
+        return JSONResponse(payload or {'available': False})
+
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
         raw = await _load_json_request(
@@ -874,6 +1364,200 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         snapshot = runtime.node.set_manual_pen_mode(mode)
         return JSONResponse({'ok': True, 'manual_pen_mode': mode, 'runtime': snapshot})
 
+    def _elapsed_ms(start_time: float) -> float:
+        return max(0.0, (time.perf_counter() - start_time) * 1000.0)
+
+    def _record_last_plan_debug(
+        *,
+        source_type: str,
+        canonical_plan: CanonicalPathPlan,
+        preview_payload: dict[str, Any],
+        timings: dict[str, float],
+        optimizer_stats: dict[str, Any] | None = None,
+        route_metadata: dict[str, Any] | None = None,
+        transport: dict[str, Any] | None = None,
+        committed: bool,
+        command_metadata: tuple[dict[str, Any] | None, ...] | None = None,
+    ) -> None:
+        diagnostics = preview_payload.get('diagnostics') or {}
+        runtime.record_last_plan_debug(
+            {
+                'available': True,
+                'source_type': source_type,
+                'committed': bool(committed),
+                'transport': transport,
+                'plan': canonical_plan_debug_payload(
+                    canonical_plan,
+                    sampling_policy=runtime_sampling_policy,
+                    command_metadata=command_metadata,
+                ),
+                'optimizer_stats': optimizer_stats or {},
+                'route_metadata': route_metadata or {},
+                'preview_sampling': diagnostics.get('preview_sampling'),
+                'runtime_sampling': diagnostics.get('runtime_sampling'),
+                'parity': diagnostics.get('parity'),
+                'point_budget': diagnostics.get('point_budget'),
+                'timings_ms': {key: float(value) for key, value in timings.items()},
+            }
+        )
+
+    def _record_last_curve_fit_debug(payload: dict[str, Any] | None) -> None:
+        runtime.record_last_curve_fit_debug(payload or {'available': False})
+
+    def _record_last_execution_debug(
+        *,
+        source_type: str,
+        preview_payload: dict[str, Any],
+        transport: dict[str, Any],
+        timings: dict[str, float],
+    ) -> None:
+        diagnostics = preview_payload.get('diagnostics') or {}
+        runtime.record_last_execution_debug(
+            {
+                'available': True,
+                'source_type': source_type,
+                'chosen_transport': transport.get('preferred_transport'),
+                'published_transports': transport.get('published'),
+                'transport_topics': transport.get('topics'),
+                'preview_runtime_sampling': {
+                    'preview': diagnostics.get('preview_sampling'),
+                    'runtime': diagnostics.get('runtime_sampling'),
+                    'parity': diagnostics.get('parity'),
+                    'point_budget': diagnostics.get('point_budget'),
+                },
+                'timings_ms': {key: float(value) for key, value in timings.items()},
+            }
+        )
+
+    def _image_processing_defaults() -> dict[str, Any]:
+        return dict(_DEFAULT_IMAGE_PREP_OPTIONS)
+
+    def _default_uploaded_file_commit_request(
+        source_type: str,
+        *,
+        upload_id: str,
+        placement: VectorPlacement | None,
+    ) -> dict[str, Any] | None:
+        if placement is None:
+            return None
+        payload: dict[str, Any] = {
+            'upload_id': upload_id,
+            'placement': {
+                'x': float(placement.x),
+                'y': float(placement.y),
+                'scale': float(placement.scale),
+            },
+        }
+        if source_type == 'image':
+            payload.update(_image_processing_defaults())
+        return payload
+
+    def _shrink_bounds_local(bounds: dict[str, float], margin_m: float) -> dict[str, float]:
+        shrink = max(0.0, float(margin_m))
+        shrunk = {
+            'x_min': float(bounds['x_min']) + shrink,
+            'x_max': float(bounds['x_max']) - shrink,
+            'y_min': float(bounds['y_min']) + shrink,
+            'y_max': float(bounds['y_max']) - shrink,
+        }
+        if shrunk['x_max'] <= shrunk['x_min'] or shrunk['y_max'] <= shrunk['y_min']:
+            raise ValueError('Writable bounds are too small after applying draw fit margin.')
+        return shrunk
+
+    def _raster_overlay_payload(
+        *,
+        image_size: dict[str, Any] | None,
+        writable_bounds: dict[str, float] | None,
+        placement: VectorPlacement | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(image_size, dict) or writable_bounds is None or placement is None:
+            return None
+        width_px = int(image_size.get('width_px') or 0)
+        height_px = int(image_size.get('height_px') or 0)
+        if width_px <= 0 or height_px <= 0:
+            return None
+        fit_bounds = _shrink_bounds_local(
+            writable_bounds,
+            draw_execution_defaults.draw_scale_fit_margin_m,
+        )
+        fit_width = float(fit_bounds['x_max']) - float(fit_bounds['x_min'])
+        fit_height = float(fit_bounds['y_max']) - float(fit_bounds['y_min'])
+        fit_scale = min(fit_width / float(width_px), fit_height / float(height_px))
+        final_scale = fit_scale * float(placement.scale)
+        half_width = 0.5 * float(width_px) * final_scale
+        half_height = 0.5 * float(height_px) * final_scale
+        return {
+            'kind': 'raster',
+            'image_size': {
+                'width_px': width_px,
+                'height_px': height_px,
+            },
+            'bounds': {
+                'x_min': float(placement.x) - half_width,
+                'x_max': float(placement.x) + half_width,
+                'y_min': float(placement.y) - half_height,
+                'y_max': float(placement.y) + half_height,
+                'width': half_width * 2.0,
+                'height': half_height * 2.0,
+            },
+        }
+
+    def _upload_file_status_payload(
+        metadata: dict[str, Any],
+        *,
+        payload: bytes | None = None,
+    ) -> dict[str, Any]:
+        upload_id = _validate_upload_id(metadata.get('upload_id'))
+        source_type = _uploaded_source_type(metadata)
+        processing = runtime.upload_processing_snapshot(
+            upload_id,
+            metadata=metadata,
+            payload=payload,
+        )
+        try:
+            writable_bounds = runtime.node.carriage_safe_writable_bounds()
+            safe_bounds = runtime.node.carriage_safe_safe_bounds()
+            placement = default_image_placement(
+                writable_bounds,
+                safe_bounds=safe_bounds,
+            )
+        except HTTPException:
+            writable_bounds = None
+            placement = None
+        except ValueError:
+            writable_bounds = None
+            placement = None
+
+        commit_request = _default_uploaded_file_commit_request(
+            source_type,
+            upload_id=upload_id,
+            placement=placement,
+        )
+        response_payload = {
+            'ok': True,
+            'stored_only': True,
+            'source_type': source_type,
+            'upload': metadata,
+            'status': processing,
+            'commit_request': commit_request,
+        }
+        if source_type == 'image':
+            image_size = processing.get('image_size') if isinstance(processing, dict) else None
+            response_payload['image_info'] = {
+                'width_px': int(image_size.get('width_px') or 0) if isinstance(image_size, dict) else 0,
+                'height_px': int(image_size.get('height_px') or 0) if isinstance(image_size, dict) else 0,
+                'pipeline': {
+                    'route': processing.get('route', {}).get('route') if isinstance(processing.get('route'), dict) else None,
+                    'curve_fit_summary': processing.get('curve_fit_summary') or {},
+                },
+            }
+            response_payload['raster_overlay'] = _raster_overlay_payload(
+                image_size=image_size if isinstance(image_size, dict) else None,
+                writable_bounds=writable_bounds,
+                placement=placement,
+            )
+        return response_payload
+
     def _build_text_vector(
         raw: dict[str, Any],
         *,
@@ -881,12 +1565,14 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     ) -> tuple[
         tuple[TextGlyphOutline, ...],
         tuple[tuple[tuple[float, float], ...], ...],
+        CanonicalPathPlan,
         Any,
         dict[str, float],
         dict[str, Any],
-        DrawPlan,
+        PrimitivePathPlan,
         dict[str, Any],
         int,
+        dict[str, float],
     ]:
         allowed = {
             'text',
@@ -964,7 +1650,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 status_code=422,
                 detail=f'{request_name}.placement.scale is too large for the remaining carriage-safe width',
             )
+        build_timings: dict[str, float] = {}
         try:
+            ingest_start = time.perf_counter()
             grouped_source = vectorize_text_grouped(
                 normalized_text,
                 font_source=font_source,
@@ -973,6 +1661,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 simplify_epsilon=simplify_epsilon,
                 max_line_width_units=max_line_width_units,
             )
+            build_timings['ingest_ms'] = _elapsed_ms(ingest_start)
             source_bounds = _grouped_text_bounds(grouped_source)
             board_width = writable_bounds['x_max'] - writable_bounds['x_min']
             board_height = writable_bounds['y_max'] - writable_bounds['y_min']
@@ -987,6 +1676,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 y=text_start.y + (0.5 * source_bounds['height'] * glyph_scale_m),
                 scale=glyph_scale_m / fit_scale,
             )
+            place_start = time.perf_counter()
             placed_groups, placement_result = place_grouped_text_on_board(
                 grouped_source,
                 writable_bounds=writable_bounds,
@@ -994,52 +1684,59 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 fit_padding=fit_padding,
                 text_upward_bias_em=0.0,
             )
+            build_timings['place_ms'] = _elapsed_ms(place_start)
             placed_strokes = tuple(
                 stroke for glyph in placed_groups for stroke in glyph.strokes
             )
-            cleaned_strokes = cleanup_draw_strokes(
-                placed_strokes,
-                simplify_tolerance_m=draw_execution_defaults.draw_path_simplify_tolerance_m,
-                preserve_order=True,
-            )
-            segments = draw_segments_from_pen_strokes(
-                cleaned_strokes,
+            canonical_plan = text_glyph_outlines_to_canonical_plan(
+                placed_groups,
                 theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
-                pen_offset_x_m=0.0,
-                pen_offset_y_m=0.0,
             )
-            plan_msg = _build_draw_plan_message(
-                segments,
-                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+            build_timings['optimize_ms'] = 0.0
+            runtime_export_start = time.perf_counter()
+            primitive_plan_msg = _build_execution_transport_message(
+                canonical_plan,
                 writable_bounds=writable_bounds,
                 shared_config=shared,
+                sampling_policy=runtime_sampling_policy,
             )
+            build_timings['runtime_export_ms'] = _elapsed_ms(runtime_export_start)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f'{request_name} failed: {exc}')
-        outside_safe_points = _interpolated_outside_safe_workspace_count(cleaned_strokes, shared)
-        plan_preview = draw_plan_to_dict(
-            segments,
-            theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+        placed_strokes = canonical_plan_to_draw_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        outside_safe_points = _interpolated_outside_safe_workspace_count(
+            placed_strokes,
+            shared,
+            step_m=_sampling_validation_step_m(runtime_sampling_policy),
+        )
+        plan_preview = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=preview_sampling_policy,
         )
         commit_request = {
             'text': normalized_text,
             'placement': {'x': text_start.x, 'y': text_start.y, 'scale': text_start.scale},
             'font_source': font_source,
+            'glyph_height_m': glyph_scale_m,
             'line_height': line_height,
             'curve_tolerance': curve_tolerance,
             'simplify_epsilon': simplify_epsilon,
             'fit_padding': fit_padding,
-            'glyph_height_m': float(text_layout_defaults.glyph_height),
         }
         return (
             placed_groups,
-            cleaned_strokes,
+            placed_strokes,
+            canonical_plan,
             placement_result,
             writable_bounds,
             commit_request,
-            plan_msg,
+            primitive_plan_msg,
             plan_preview,
             outside_safe_points,
+            build_timings,
         )
 
     def _text_clusters_payload(
@@ -1066,16 +1763,61 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     def _normalize_text_plan(
         text_clusters: tuple[TextGlyphOutline, ...],
         writable_bounds: dict[str, float],
+        canonical_plan: CanonicalPathPlan,
+        *,
+        sampling_policy: SamplingPolicy,
     ) -> str:
-        draw_plan = strokes_to_draw_plan(
-            tuple(stroke for cluster in text_clusters for stroke in cluster.strokes)
+        draw_strokes_payload = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=sampling_policy,
         )
-        normalized = json.loads(_normalize_draw_plan(draw_plan, writable_bounds))
+        normalized = json.loads(_normalize_stroke_payload(draw_strokes_payload, writable_bounds))
         normalized['text_clusters'] = _text_clusters_payload(
             text_clusters,
             normalized['strokes'],
         )
         return json.dumps(normalized, separators=(',', ':'))
+
+    def _normalized_text_plan_or_summary(
+        text_clusters: tuple[TextGlyphOutline, ...],
+        writable_bounds: dict[str, float],
+        canonical_plan: CanonicalPathPlan,
+        *,
+        sampling_policy: SamplingPolicy,
+    ) -> dict[str, Any]:
+        omit_reason: str | None = None
+        try:
+            return json.loads(
+                _normalize_text_plan(
+                    text_clusters,
+                    writable_bounds,
+                    canonical_plan,
+                    sampling_policy=sampling_policy,
+                )
+            )
+        except HTTPException as exc:
+            if exc.status_code != 413:
+                raise
+            omit_reason = str(exc.detail)
+        glyph_stroke_count = sum(len(cluster.strokes) for cluster in text_clusters)
+        glyph_point_count = sum(
+            len(stroke)
+            for cluster in text_clusters
+            for stroke in cluster.strokes
+        )
+        return {
+            'frame': 'board',
+            'strokes': [],
+            'text_clusters': [],
+            'normalized_plan_omitted': True,
+            'omit_reason': omit_reason or 'legacy stroke normalized_plan exceeded limits',
+            'transport': 'primitive_path_plan',
+            'source_type': 'text',
+            'text_cluster_count': len(text_clusters),
+            'glyph_stroke_count': glyph_stroke_count,
+            'glyph_point_count': glyph_point_count,
+            'canonical_command_count': len(canonical_plan.commands),
+        }
 
     def _build_svg_vector(
         raw: dict[str, Any],
@@ -1083,13 +1825,14 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         request_name: str,
     ) -> tuple[
         tuple[tuple[tuple[float, float], ...], ...],
-        tuple[DrawPathSegment, ...],
+        CanonicalPathPlan,
         Any,
         dict[str, float],
         dict[str, Any],
-        DrawPlan,
+        PrimitivePathPlan,
         dict[str, Any],
         int,
+        dict[str, float],
     ]:
         allowed = {
             'svg',
@@ -1118,61 +1861,80 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             maximum=2.0,
         )
         writable_bounds = runtime.node.carriage_safe_writable_bounds()
+        build_timings: dict[str, float] = {}
         try:
             placement = normalize_placement(raw.get('placement'), writable_bounds)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
         try:
+            ingest_start = time.perf_counter()
             source_strokes = vectorize_svg(
                 svg_payload,
                 curve_tolerance=curve_tolerance,
                 simplify_epsilon=simplify_epsilon,
             )
-            placed_strokes, placement_result = place_draw_strokes_on_board(
+            source_plan = draw_strokes_to_canonical_plan(
                 source_strokes,
+                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+            )
+            build_timings['ingest_ms'] = _elapsed_ms(ingest_start)
+            place_start = time.perf_counter()
+            placed_plan, placement_result = place_canonical_plan_on_board(
+                source_plan,
                 writable_bounds=writable_bounds,
                 placement=placement,
                 fit_margin_m=draw_execution_defaults.draw_scale_fit_margin_m,
             )
-            cleaned_strokes = cleanup_draw_strokes(
-                placed_strokes,
+            build_timings['place_ms'] = _elapsed_ms(place_start)
+            optimize_start = time.perf_counter()
+            canonical_plan = cleanup_canonical_plan(
+                placed_plan,
                 simplify_tolerance_m=draw_execution_defaults.draw_path_simplify_tolerance_m,
             )
-            segments = draw_segments_from_pen_strokes(
-                cleaned_strokes,
-                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
-                pen_offset_x_m=0.0,
-                pen_offset_y_m=0.0,
-            )
-            plan_msg = _build_draw_plan_message(
-                segments,
-                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+            canonical_plan = optimize_canonical_plan(
+                canonical_plan,
+                policy=svg_optimization_policy,
+            ).plan
+            build_timings['optimize_ms'] = _elapsed_ms(optimize_start)
+            runtime_export_start = time.perf_counter()
+            primitive_plan_msg = _build_execution_transport_message(
+                canonical_plan,
                 writable_bounds=writable_bounds,
                 shared_config=shared,
+                sampling_policy=runtime_sampling_policy,
             )
+            build_timings['runtime_export_ms'] = _elapsed_ms(runtime_export_start)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f'{request_name} failed: {exc}')
-        outside_safe_points = _interpolated_outside_safe_workspace_count(placed_strokes, shared)
-        plan_preview = draw_plan_to_dict(
-            segments,
-            theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+        cleaned_strokes = canonical_plan_to_draw_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        outside_safe_points = _interpolated_outside_safe_workspace_count(
+            cleaned_strokes,
+            shared,
+            step_m=_sampling_validation_step_m(runtime_sampling_policy),
+        )
+        plan_preview = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=preview_sampling_policy,
         )
         commit_request = {
             'svg': svg_payload,
             'placement': {'x': placement.x, 'y': placement.y, 'scale': placement.scale},
             'curve_tolerance': curve_tolerance,
             'simplify_epsilon': simplify_epsilon,
-            'draw_scale_fit_margin_m': draw_execution_defaults.draw_scale_fit_margin_m,
         }
         return (
             cleaned_strokes,
-            segments,
+            canonical_plan,
             placement_result,
             writable_bounds,
             commit_request,
-            plan_msg,
+            primitive_plan_msg,
             plan_preview,
             outside_safe_points,
+            build_timings,
         )
 
     def _build_image_vector(
@@ -1180,16 +1942,20 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         raw: dict[str, Any],
         *,
         request_name: str,
+        prepared_artifact: PreparedImageArtifact | None = None,
     ) -> tuple[
         tuple[tuple[tuple[float, float], ...], ...],
-        tuple[DrawPathSegment, ...],
+        CanonicalPathPlan,
         Any,
         dict[str, float],
         dict[str, Any],
-        dict[str, int],
-        DrawPlan,
+        dict[str, Any],
+        tuple[dict[str, Any] | None, ...],
+        dict[str, Any],
+        PrimitivePathPlan,
         dict[str, Any],
         int,
+        dict[str, float],
     ]:
         allowed = {
             'placement',
@@ -1198,84 +1964,205 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             'max_strokes',
         }
         _reject_extra_fields(raw, allowed, request_name)
+        default_image_options = (
+            dict(prepared_artifact.defaults)
+            if isinstance(prepared_artifact, PreparedImageArtifact)
+            else _image_processing_defaults()
+        )
         min_perimeter_px = _coerce_float(
-            raw.get('min_perimeter_px', 24.0),
+            raw.get('min_perimeter_px', default_image_options['min_perimeter_px']),
             field_name=f'{request_name}.min_perimeter_px',
             minimum=1.0,
             maximum=1000.0,
         )
         contour_simplify_ratio = _coerce_float(
-            raw.get('contour_simplify_ratio', 0.005),
+            raw.get('contour_simplify_ratio', default_image_options['contour_simplify_ratio']),
             field_name=f'{request_name}.contour_simplify_ratio',
             minimum=0.0001,
             maximum=0.2,
         )
         max_strokes = _coerce_int(
-            raw.get('max_strokes', 512),
+            raw.get('max_strokes', default_image_options['max_strokes']),
             field_name=f'{request_name}.max_strokes',
             minimum=1,
-            maximum=2048,
+            maximum=16384,
         )
+        if isinstance(prepared_artifact, PreparedImageArtifact):
+            expected = prepared_artifact.defaults
+            if (
+                abs(float(min_perimeter_px) - float(expected['min_perimeter_px'])) > 1.0e-9
+                or abs(float(contour_simplify_ratio) - float(expected['contour_simplify_ratio'])) > 1.0e-12
+                or int(max_strokes) != int(expected['max_strokes'])
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail='cached image preprocessing options are fixed after upload; re-upload to change them',
+                )
         writable_bounds = runtime.node.carriage_safe_writable_bounds()
+        build_timings: dict[str, float] = (
+            dict(prepared_artifact.timings_ms)
+            if isinstance(prepared_artifact, PreparedImageArtifact)
+            else {}
+        )
+        if raw.get('placement') is None:
+            try:
+                placement = default_image_placement(
+                    writable_bounds,
+                    safe_bounds=runtime.node.carriage_safe_safe_bounds(),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
+        else:
+            try:
+                placement = normalize_placement(raw.get('placement'), writable_bounds)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
         try:
-            placement = normalize_placement(raw.get('placement'), writable_bounds)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
-        try:
-            source_strokes, image_size = trace_line_art_image(
-                content,
-                min_perimeter_px=min_perimeter_px,
-                contour_simplify_ratio=contour_simplify_ratio,
-                max_strokes=max_strokes,
-            )
-            placed_strokes, placement_result = place_draw_strokes_on_board(
-                source_strokes,
+            if isinstance(prepared_artifact, PreparedImageArtifact):
+                image_result = prepared_artifact.image_result
+            else:
+                ingest_start = time.perf_counter()
+                image_result = vectorize_image_to_canonical_plan(
+                    content,
+                    theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+                    min_perimeter_px=min_perimeter_px,
+                    contour_simplify_ratio=contour_simplify_ratio,
+                    max_strokes=max_strokes,
+                )
+                build_timings['ingest_ms'] = _elapsed_ms(ingest_start)
+            place_start = time.perf_counter()
+            placed_plan, placement_result = place_canonical_plan_on_board(
+                image_result.plan,
                 writable_bounds=writable_bounds,
                 placement=placement,
                 fit_margin_m=draw_execution_defaults.draw_scale_fit_margin_m,
             )
-            cleaned_strokes = cleanup_draw_strokes(
-                placed_strokes,
-                simplify_tolerance_m=draw_execution_defaults.draw_path_simplify_tolerance_m,
+            build_timings['place_ms'] = _elapsed_ms(place_start)
+            placed_command_metadata = tuple(
+                dict(item) if item is not None else None
+                for item in image_result.command_metadata
             )
-            segments = draw_segments_from_pen_strokes(
-                cleaned_strokes,
-                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
-                pen_offset_x_m=0.0,
-                pen_offset_y_m=0.0,
+            curve_fit_payload = curve_fit_debug_to_board(
+                source_plan=image_result.plan,
+                placed_plan=placed_plan,
+                command_metadata=placed_command_metadata,
+                raw_contours=image_result.raw_contours,
+                curve_fit_debug={
+                    **dict(image_result.curve_fit_debug or {}),
+                    'route': image_result.route_decision.to_dict(),
+                    'image_size': {
+                        'width_px': int(image_result.image_size[0]),
+                        'height_px': int(image_result.image_size[1]),
+                    },
+                },
+                placement=placement,
+                final_scale=placement_result.final_scale,
+                source_type='image',
             )
-            plan_msg = _build_draw_plan_message(
-                segments,
-                theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+            curve_fit_payload['route'] = image_result.route_decision.to_dict()
+            curve_fit_payload['image_size'] = {
+                'width_px': int(image_result.image_size[0]),
+                'height_px': int(image_result.image_size[1]),
+            }
+            optimize_start = time.perf_counter()
+            canonical_plan = placed_plan
+            optimization_result = optimize_canonical_plan(
+                canonical_plan,
+                policy=image_optimization_policy,
+            )
+            canonical_plan = optimization_result.plan
+            command_metadata = map_curve_fit_command_metadata(
+                placed_plan,
+                placed_command_metadata,
+                canonical_plan,
+            )
+            build_timings['optimize_ms'] = _elapsed_ms(optimize_start)
+            runtime_export_start = time.perf_counter()
+            primitive_plan_msg = _build_execution_transport_message(
+                canonical_plan,
                 writable_bounds=writable_bounds,
                 shared_config=shared,
+                sampling_policy=runtime_sampling_policy,
             )
+            build_timings['runtime_export_ms'] = _elapsed_ms(runtime_export_start)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f'{request_name} failed: {exc}')
-        outside_safe_points = _interpolated_outside_safe_workspace_count(placed_strokes, shared)
-        plan_preview = draw_plan_to_dict(
-            segments,
-            theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
+        cleaned_strokes = canonical_plan_to_draw_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        outside_safe_points = _interpolated_outside_safe_workspace_count(
+            cleaned_strokes,
+            shared,
+            step_m=_sampling_validation_step_m(runtime_sampling_policy),
+        )
+        plan_preview = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=preview_sampling_policy,
         )
         commit_tail = {
             'placement': {'x': placement.x, 'y': placement.y, 'scale': placement.scale},
             'min_perimeter_px': min_perimeter_px,
             'contour_simplify_ratio': contour_simplify_ratio,
             'max_strokes': max_strokes,
-            'draw_scale_fit_margin_m': draw_execution_defaults.draw_scale_fit_margin_m,
         }
-        image_info = {'width_px': int(image_size[0]), 'height_px': int(image_size[1])}
+        image_info = image_result.to_metadata()
+        image_info['optimization'] = optimization_result.stats.to_dict()
         return (
             cleaned_strokes,
-            segments,
+            canonical_plan,
             placement_result,
             writable_bounds,
             commit_tail,
             image_info,
-            plan_msg,
+            command_metadata,
+            curve_fit_payload,
+            primitive_plan_msg,
             plan_preview,
             outside_safe_points,
+            build_timings,
         )
+
+    def _uploaded_source_type(metadata: dict[str, Any]) -> str:
+        return infer_uploaded_source_type(
+            stored_filename=metadata.get('stored_filename'),
+            original_filename=metadata.get('original_filename'),
+            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
+            source_type=metadata.get('source_type'),
+        )
+
+    def _uploaded_svg_text(
+        metadata: dict[str, Any],
+        payload: bytes,
+        *,
+        request_name: str,
+    ) -> str:
+        try:
+            upload_details = classify_uploaded_vector_file(
+                metadata.get('original_filename'),
+                metadata.get('normalized_content_type') or metadata.get('content_type'),
+                payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f'{request_name} failed: {exc}')
+        if upload_details.source_type != 'svg' or upload_details.svg_text is None:
+            raise HTTPException(status_code=422, detail=f'{request_name} failed: stored upload is not svg')
+        return upload_details.svg_text
+
+    def _record_curve_fit_unavailable(source_type: str) -> None:
+        _record_last_curve_fit_debug({
+            'available': False,
+            'source_type': source_type,
+        })
+
+    def _uploaded_commit_request(upload_id: str, commit_request: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            key: value
+            for key, value in commit_request.items()
+            if key != 'svg'
+        }
+        payload['upload_id'] = upload_id
+        return payload
 
     @app.post('/api/text')
     async def submit_text(request: Request) -> JSONResponse:
@@ -1284,25 +2171,56 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='text request',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
-        placed_groups, placed_strokes, placement_result, writable_bounds, commit_request, plan_msg, plan_preview, outside_safe_points = _build_text_vector(
+        placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             raw,
             request_name='text request',
         )
-        normalized = _normalize_text_plan(placed_groups, writable_bounds)
-        runtime.node.publish_draw_plan(plan_msg, allowed_modes=(MODE_TEXT,))
+        normalized_plan = _normalized_text_plan_or_summary(
+            placed_groups,
+            writable_bounds,
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_TEXT,),
+        )
+        build_timings['publish_ms'] = _elapsed_ms(publish_start)
+        _record_last_plan_debug(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            transport=transport,
+            committed=True,
+        )
+        _record_last_execution_debug(
+            source_type='text',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=build_timings,
+        )
         return JSONResponse(
             {
                 'ok': True,
                 'published': True,
                 'active_mode': MODE_TEXT,
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'transport': transport,
+                'preview': preview_payload,
                 'commit_request': commit_request,
-                'normalized_plan': json.loads(normalized),
+                'normalized_plan': normalized_plan,
             }
         )
 
@@ -1310,7 +2228,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     async def submit_draw_plan(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=409,
-            detail='raw /api/draw/plan is disabled for draw mode v1; use /api/vector/svg/commit or /api/vector/image/commit',
+            detail='raw /api/draw/plan has been removed; use /api/vector/svg/commit or /api/vector/image/commit',
         )
 
     @app.post('/api/vector/text/preview')
@@ -1320,20 +2238,34 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='vector text request',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
-        _, placed_strokes, placement_result, _, commit_request, _, plan_preview, outside_safe_points = _build_text_vector(
+        _, placed_strokes, canonical_plan, placement_result, _, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             raw,
             request_name='vector text request',
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        _record_last_plan_debug(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            committed=False,
         )
         return JSONResponse(
             {
                 'ok': True,
                 'source_type': 'text',
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'preview': preview_payload,
                 'commit_request': commit_request,
             }
         )
@@ -1345,26 +2277,57 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='vector text commit',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
-        placed_groups, placed_strokes, placement_result, writable_bounds, commit_request, plan_msg, plan_preview, outside_safe_points = _build_text_vector(
+        placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             raw,
             request_name='vector text commit',
         )
-        normalized = _normalize_text_plan(placed_groups, writable_bounds)
-        runtime.node.publish_draw_plan(plan_msg, allowed_modes=(MODE_TEXT,))
+        normalized_plan = _normalized_text_plan_or_summary(
+            placed_groups,
+            writable_bounds,
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_TEXT,),
+        )
+        build_timings['publish_ms'] = _elapsed_ms(publish_start)
+        _record_last_plan_debug(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            transport=transport,
+            committed=True,
+        )
+        _record_last_execution_debug(
+            source_type='text',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=build_timings,
+        )
         return JSONResponse(
             {
                 'ok': True,
                 'published': True,
                 'active_mode': MODE_TEXT,
                 'source_type': 'text',
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'transport': transport,
+                'preview': preview_payload,
                 'commit_request': commit_request,
-                'normalized_plan': json.loads(normalized),
+                'normalized_plan': normalized_plan,
             }
         )
 
@@ -1375,20 +2338,35 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='vector svg request',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
-        placed_strokes, _, placement_result, _, commit_request, _, plan_preview, outside_safe_points = _build_svg_vector(
+        placed_strokes, canonical_plan, placement_result, _, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
             raw,
             request_name='vector svg request',
         )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        _record_last_plan_debug(
+            source_type='svg',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            committed=False,
+        )
+        _record_curve_fit_unavailable('svg')
         return JSONResponse(
             {
                 'ok': True,
                 'source_type': 'svg',
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'preview': preview_payload,
                 'commit_request': commit_request,
             }
         )
@@ -1400,25 +2378,318 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='vector svg commit',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
-        placed_strokes, _, placement_result, _, commit_request, plan_msg, plan_preview, outside_safe_points = _build_svg_vector(
+        placed_strokes, canonical_plan, placement_result, _, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
             raw,
             request_name='vector svg commit',
         )
-        runtime.node.publish_draw_plan(plan_msg, allowed_modes=(MODE_DRAW,))
+        runtime_plan = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        build_timings['publish_ms'] = _elapsed_ms(publish_start)
+        _record_last_plan_debug(
+            source_type='svg',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            committed=True,
+            transport=transport,
+        )
+        _record_last_execution_debug(
+            source_type='svg',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=build_timings,
+        )
+        _record_curve_fit_unavailable('svg')
         return JSONResponse(
             {
                 'ok': True,
                 'published': True,
                 'active_mode': MODE_DRAW,
                 'source_type': 'svg',
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'transport': transport,
+                'preview': preview_payload,
                 'commit_request': commit_request,
-                'normalized_plan': plan_preview,
+                'normalized_plan': runtime_plan,
+            }
+        )
+
+    @app.post('/api/vector/file/preview')
+    async def preview_uploaded_file_vector(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='vector file request',
+            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
+        )
+        _reject_extra_fields(
+            raw,
+            {
+                'upload_id',
+                'placement',
+                'curve_tolerance',
+                'simplify_epsilon',
+                'min_perimeter_px',
+                'contour_simplify_ratio',
+                'max_strokes',
+            },
+            'vector file request',
+        )
+        upload_id = _validate_upload_id(raw.get('upload_id'))
+        metadata, payload = runtime.load_upload(upload_id)
+        source_type = _uploaded_source_type(metadata)
+        file_raw = dict(raw)
+        file_raw.pop('upload_id', None)
+
+        if source_type == 'svg':
+            svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file request')
+            svg_raw = {'svg': svg_text, **file_raw}
+            placed_strokes, canonical_plan, placement_result, _, commit_tail, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
+                svg_raw,
+                request_name='vector file request',
+            )
+            preview_start = time.perf_counter()
+            preview_payload = _preview_payload_from_strokes(
+                placed_strokes,
+                placement_result,
+                outside_safe_points=outside_safe_points,
+                normalized_plan=plan_preview,
+                canonical_plan=canonical_plan,
+                preview_sampling_policy=preview_sampling_policy,
+                runtime_sampling_policy=runtime_sampling_policy,
+            )
+            build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+            build_timings['publish_ms'] = 0.0
+            _record_last_plan_debug(
+                source_type='svg',
+                canonical_plan=canonical_plan,
+                preview_payload=preview_payload,
+                timings=build_timings,
+                committed=False,
+            )
+            _record_curve_fit_unavailable('svg')
+            return JSONResponse(
+                {
+                    'ok': True,
+                    'source_type': 'svg',
+                    'upload': metadata,
+                    'preview': preview_payload,
+                    'commit_request': _uploaded_commit_request(upload_id, commit_tail),
+                }
+            )
+
+        prepared_artifact = runtime.prepared_image_artifact(
+            upload_id,
+            metadata=metadata,
+            payload=payload,
+        )
+        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, _, plan_preview, outside_safe_points, build_timings = _build_image_vector(
+            payload,
+            file_raw,
+            request_name='vector file request',
+            prepared_artifact=prepared_artifact,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        preview_payload.setdefault('diagnostics', {})
+        if isinstance(preview_payload['diagnostics'], dict):
+            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
+        _record_last_plan_debug(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            committed=False,
+            command_metadata=command_metadata,
+        )
+        _record_last_curve_fit_debug(curve_fit_payload)
+        return JSONResponse(
+            {
+                'ok': True,
+                'source_type': 'image',
+                'upload': metadata,
+                'image_info': image_info,
+                'preview': preview_payload,
+                'commit_request': {'upload_id': upload_id, **commit_tail},
+            }
+        )
+
+    @app.post('/api/vector/file/commit')
+    async def commit_uploaded_file_vector(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='vector file commit',
+            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
+        )
+        _reject_extra_fields(
+            raw,
+            {
+                'upload_id',
+                'placement',
+                'curve_tolerance',
+                'simplify_epsilon',
+                'min_perimeter_px',
+                'contour_simplify_ratio',
+                'max_strokes',
+            },
+            'vector file commit',
+        )
+        upload_id = _validate_upload_id(raw.get('upload_id'))
+        metadata, payload = runtime.load_upload(upload_id)
+        source_type = _uploaded_source_type(metadata)
+        file_raw = dict(raw)
+        file_raw.pop('upload_id', None)
+
+        if source_type == 'svg':
+            svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file commit')
+            svg_raw = {'svg': svg_text, **file_raw}
+            placed_strokes, canonical_plan, placement_result, _, commit_tail, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
+                svg_raw,
+                request_name='vector file commit',
+            )
+            runtime_plan = canonical_plan_to_legacy_strokes(
+                canonical_plan,
+                sampling_policy=runtime_sampling_policy,
+            )
+            preview_start = time.perf_counter()
+            preview_payload = _preview_payload_from_strokes(
+                placed_strokes,
+                placement_result,
+                outside_safe_points=outside_safe_points,
+                normalized_plan=plan_preview,
+                canonical_plan=canonical_plan,
+                preview_sampling_policy=preview_sampling_policy,
+                runtime_sampling_policy=runtime_sampling_policy,
+            )
+            build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+            publish_start = time.perf_counter()
+            transport = runtime.node.publish_execution_plan(
+                primitive_plan_msg,
+                allowed_modes=(MODE_DRAW,),
+            )
+            build_timings['publish_ms'] = _elapsed_ms(publish_start)
+            _record_last_plan_debug(
+                source_type='svg',
+                canonical_plan=canonical_plan,
+                preview_payload=preview_payload,
+                timings=build_timings,
+                committed=True,
+                transport=transport,
+            )
+            _record_last_execution_debug(
+                source_type='svg',
+                preview_payload=preview_payload,
+                transport=transport,
+                timings=build_timings,
+            )
+            _record_curve_fit_unavailable('svg')
+            return JSONResponse(
+                {
+                    'ok': True,
+                    'published': True,
+                    'active_mode': MODE_DRAW,
+                    'source_type': 'svg',
+                    'transport': transport,
+                    'upload': metadata,
+                    'preview': preview_payload,
+                    'commit_request': _uploaded_commit_request(upload_id, commit_tail),
+                    'normalized_plan': runtime_plan,
+                }
+            )
+
+        prepared_artifact = runtime.prepared_image_artifact(
+            upload_id,
+            metadata=metadata,
+            payload=payload,
+        )
+        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_image_vector(
+            payload,
+            file_raw,
+            request_name='vector file commit',
+            prepared_artifact=prepared_artifact,
+        )
+        runtime_plan = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        preview_payload.setdefault('diagnostics', {})
+        if isinstance(preview_payload['diagnostics'], dict):
+            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        build_timings['publish_ms'] = _elapsed_ms(publish_start)
+        _record_last_plan_debug(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            transport=transport,
+            committed=True,
+            command_metadata=command_metadata,
+        )
+        _record_last_execution_debug(
+            source_type='image',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=build_timings,
+        )
+        _record_last_curve_fit_debug(curve_fit_payload)
+        return JSONResponse(
+            {
+                'ok': True,
+                'published': True,
+                'active_mode': MODE_DRAW,
+                'source_type': 'image',
+                'transport': transport,
+                'upload': metadata,
+                'image_info': image_info,
+                'preview': preview_payload,
+                'commit_request': {'upload_id': upload_id, **commit_tail},
+                'normalized_plan': runtime_plan,
             }
         )
 
@@ -1444,24 +2715,51 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         metadata, payload = runtime.load_upload(upload_id)
         image_raw = dict(raw)
         image_raw.pop('upload_id', None)
-        placed_strokes, _, placement_result, _, commit_tail, image_info, _, plan_preview, outside_safe_points = _build_image_vector(
+        prepared_artifact = runtime.prepared_image_artifact(
+            upload_id,
+            metadata=metadata,
+            payload=payload,
+        )
+        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, _, plan_preview, outside_safe_points, build_timings = _build_image_vector(
             payload,
             image_raw,
             request_name='vector image request',
+            prepared_artifact=prepared_artifact,
         )
         commit_request = {'upload_id': upload_id, **commit_tail}
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        preview_payload.setdefault('diagnostics', {})
+        if isinstance(preview_payload['diagnostics'], dict):
+            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
+        _record_last_plan_debug(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            committed=False,
+            command_metadata=command_metadata,
+        )
+        _record_last_curve_fit_debug(curve_fit_payload)
         return JSONResponse(
             {
                 'ok': True,
                 'source_type': 'image',
                 'upload': metadata,
                 'image_info': image_info,
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'preview': preview_payload,
                 'commit_request': commit_request,
             }
         )
@@ -1488,69 +2786,97 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         metadata, payload = runtime.load_upload(upload_id)
         image_raw = dict(raw)
         image_raw.pop('upload_id', None)
-        placed_strokes, _, placement_result, _, commit_tail, image_info, plan_msg, plan_preview, outside_safe_points = _build_image_vector(
+        prepared_artifact = runtime.prepared_image_artifact(
+            upload_id,
+            metadata=metadata,
+            payload=payload,
+        )
+        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_image_vector(
             payload,
             image_raw,
             request_name='vector image commit',
+            prepared_artifact=prepared_artifact,
         )
-        runtime.node.publish_draw_plan(plan_msg, allowed_modes=(MODE_DRAW,))
+        runtime_plan = canonical_plan_to_legacy_strokes(
+            canonical_plan,
+            sampling_policy=runtime_sampling_policy,
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        preview_payload.setdefault('diagnostics', {})
+        if isinstance(preview_payload['diagnostics'], dict):
+            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        build_timings['publish_ms'] = _elapsed_ms(publish_start)
+        _record_last_plan_debug(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            transport=transport,
+            committed=True,
+            command_metadata=command_metadata,
+        )
+        _record_last_execution_debug(
+            source_type='image',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=build_timings,
+        )
+        _record_last_curve_fit_debug(curve_fit_payload)
         return JSONResponse(
             {
                 'ok': True,
                 'published': True,
                 'active_mode': MODE_DRAW,
                 'source_type': 'image',
+                'transport': transport,
                 'upload': metadata,
                 'image_info': image_info,
-                'preview': _preview_payload_from_strokes(
-                    placed_strokes,
-                    placement_result,
-                    outside_safe_points=outside_safe_points,
-                    normalized_plan=plan_preview,
-                ),
+                'preview': preview_payload,
                 'commit_request': {'upload_id': upload_id, **commit_tail},
-                'normalized_plan': plan_preview,
+                'normalized_plan': runtime_plan,
             }
         )
 
+    @app.get('/api/vector/file/status')
+    async def uploaded_file_status(upload_id: str) -> JSONResponse:
+        validated_upload_id = _validate_upload_id(upload_id)
+        metadata, payload = runtime.load_upload(validated_upload_id)
+        return JSONResponse(
+            _upload_file_status_payload(
+                metadata,
+                payload=payload,
+            )
+        )
+
+    @app.post('/api/draw/file')
     @app.post('/api/draw/image')
-    async def upload_draw_image(file: UploadFile) -> JSONResponse:
+    async def upload_draw_file(file: UploadFile = File(...)) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
-            _validate_upload(file, content)
-            metadata = runtime.store_upload(file, content)
-            try:
-                writable_bounds = runtime.node.carriage_safe_writable_bounds()
-            except HTTPException as exc:
-                return JSONResponse(
-                    {
-                        'ok': True,
-                        'stored_only': True,
-                        'upload': metadata,
-                        'preview_error': str(exc.detail),
-                    }
-                )
-            placement = default_placement(writable_bounds)
-            placed_strokes, _, placement_result, _, commit_tail, image_info, _, plan_preview, outside_safe_points = _build_image_vector(
-                content,
-                {'placement': {'x': placement.x, 'y': placement.y, 'scale': placement.scale}},
-                request_name='draw image upload',
-            )
+            upload_details = _validate_upload(file, content)
+            metadata = runtime.store_upload(file, content, upload_details=upload_details)
             return JSONResponse(
-                {
-                    'ok': True,
-                    'stored_only': False,
-                    'source_type': 'image',
-                    'upload': metadata,
-                    'image_info': image_info,
-                    'preview': _preview_payload_from_strokes(
-                        placed_strokes,
-                        placement_result,
-                        outside_safe_points=outside_safe_points,
-                        normalized_plan=plan_preview,
-                    ),
-                    'commit_request': {'upload_id': metadata['upload_id'], **commit_tail},
-                }
+                _upload_file_status_payload(
+                    metadata,
+                    payload=content,
+                )
             )
         finally:
             await file.close()
