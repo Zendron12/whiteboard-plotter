@@ -115,6 +115,8 @@ class CableDrawExecutor final : public rclcpp::Node {
     declare_parameter("body_safe_safe_x_max", 6.14);
     declare_parameter("body_safe_safe_y_min", 0.32);
     declare_parameter("body_safe_safe_y_max", 2.82);
+    declare_parameter("completion_park_x", 0.348);
+    declare_parameter("completion_park_y", 1.5);
     declare_parameter("corner_keepout_radius", 0.36);
     declare_parameter("pen_down_settle_sec", 0.05);
 
@@ -179,6 +181,7 @@ class CableDrawExecutor final : public rclcpp::Node {
     double body_safe_safe_x_max;
     double body_safe_safe_y_min;
     double body_safe_safe_y_max;
+    Point2D completion_park;
     double corner_keepout_radius;
     double pen_down_settle_sec;
     double text_end_retreat_m;
@@ -221,6 +224,10 @@ class CableDrawExecutor final : public rclcpp::Node {
       get_parameter("body_safe_safe_x_max").as_double(),
       get_parameter("body_safe_safe_y_min").as_double(),
       get_parameter("body_safe_safe_y_max").as_double(),
+      Point2D{
+        get_parameter("completion_park_x").as_double(),
+        get_parameter("completion_park_y").as_double(),
+      },
       std::max(0.0, get_parameter("corner_keepout_radius").as_double()),
       std::max(0.0, get_parameter("pen_down_settle_sec").as_double()),
       std::max(0.0, get_parameter("text_end_retreat_m").as_double()),
@@ -341,10 +348,7 @@ class CableDrawExecutor final : public rclcpp::Node {
       return;
     }
 
-    const Point2D park_point{
-      params.body_safe_safe_x_min,
-      params.body_safe_safe_y_max,
-    };
+    const Point2D park_point = params.completion_park;
     if (!point_valid_for_pen_motion(park_point, params) ||
         executor_approximately_equal(cursor, park_point)) {
       return;

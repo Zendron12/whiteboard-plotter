@@ -346,6 +346,11 @@ class SharedConfig:
         writable = self.writable_bounds()
         body_safe_writable = self.carriage_safe_writable_bounds()
         body_safe_safe = self.carriage_safe_workspace_bounds()
+        board_mid_y = self.board.height * 0.5
+        completion_park_y = min(
+            max(board_mid_y, body_safe_safe['y_min']),
+            body_safe_safe['y_max'],
+        )
         return {
             'anchor_left_x': self.anchors.left_x,
             'anchor_left_y': self.anchors.left_y,
@@ -384,6 +389,8 @@ class SharedConfig:
             'body_safe_safe_x_max': body_safe_safe['x_max'],
             'body_safe_safe_y_min': body_safe_safe['y_min'],
             'body_safe_safe_y_max': body_safe_safe['y_max'],
+            'completion_park_x': body_safe_safe['x_min'],
+            'completion_park_y': completion_park_y,
             'corner_keepout_radius': self.workspace.corner_keepout_radius,
             'pen_down_settle_sec': self.pen.settle_sec,
         }
