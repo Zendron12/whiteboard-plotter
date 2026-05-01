@@ -33,6 +33,7 @@ setup(
         *package_files('fonts', os.path.join('share', package_name, 'fonts')),
         (os.path.join('share', package_name, 'urdf'), glob('urdf/*.xacro')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*')),
+        (os.path.join('share', package_name, 'docs'), glob(os.path.join('..', '..', 'docs', '*.md'))),
 
         # Web UI assets
         *package_files('web', os.path.join('share', package_name, 'web')),

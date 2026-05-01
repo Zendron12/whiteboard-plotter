@@ -1,0 +1,43 @@
+board:
+  width: 6.3
+  height: 3.0
+  center_x: 0.0
+  center_z: 1.8
+  surface_y: 2.410
+  margin_left: 0.20
+  margin_right: 0.20
+  margin_top: 0.20
+  margin_bottom: 0.20
+  origin: top_left
+  x_direction: right
+  y_direction: down
+
+carriage:
+  width: 0.24
+  height: 0.18
+  depth: 0.055
+  mass: 0.8
+  plane_y: 2.335
+  initial_x: 0.55
+  initial_y: 0.55
+  speed: 0.45
+
+pen:
+  slide_velocity: 0.35
+  up_position: 0.000
+  down_position: 0.025
+  radius: 0.011
+  length: 0.105
+
+visuals:
+  rail_thickness: 0.055
+  rail_depth: 0.035
+  pulley_radius: 0.045
+  belt_width: 0.018
+  belt_depth: 0.012
+  belt_diagonal_length: 6.98
+  belt_angle_rad: 0.444
+  trail_half_width: 0.008
+  trail_min_spacing: 0.012
+  trail_max: 1200
+
