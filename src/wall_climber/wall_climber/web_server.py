@@ -877,6 +877,24 @@ def _coerce_int(
     return numeric
 
 
+def _coerce_bool(value: Any, *, field_name: str, default: bool | None = None) -> bool:
+    if value is None:
+        if default is None:
+            raise HTTPException(status_code=422, detail=f'{field_name} is required')
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'1', 'true', 'yes', 'on'}:
+            return True
+        if normalized in {'0', 'false', 'no', 'off'}:
+            return False
+    raise HTTPException(status_code=422, detail=f'{field_name} must be boolean')
+
+
 def _validate_upload_id(raw_upload_id: Any) -> str:
     if not isinstance(raw_upload_id, str):
         raise HTTPException(status_code=422, detail='upload_id must be a string')
@@ -1025,6 +1043,26 @@ def _draw_optimization_policy(
         enable_hatch_ordering=bool(enable_hatch_ordering),
         tiny_primitive_m=tiny,
         arc_fit_tolerance_m=max(tiny, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.5),
+        merge_distance_tolerance_m=max(1.0e-5, tiny * 0.25),
+        dedupe_precision_m=max(1.0e-5, tiny * 0.5),
+        cluster_cell_size_m=0.26,
+    )
+
+
+def _sketch_draw_optimization_policy(shared_config) -> CanonicalOptimizationPolicy:
+    draw_defaults = shared_config.draw_execution
+    tiny = max(2.0e-4, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.0)
+    return CanonicalOptimizationPolicy(
+        label='sketch_centerline_draw',
+        merge_collinear_lines=False,
+        reorder_units=True,
+        cluster_units=True,
+        merge_travel_moves=True,
+        remove_duplicate_units=True,
+        prune_tiny_primitives=False,
+        fit_arcs=False,
+        enable_hatch_ordering=False,
+        tiny_primitive_m=tiny,
         merge_distance_tolerance_m=max(1.0e-5, tiny * 0.25),
         dedupe_precision_m=max(1.0e-5, tiny * 0.5),
         cluster_cell_size_m=0.26,
@@ -1558,6 +1596,17 @@ def _enforce_sketch_draw_size_limits(summary: dict[str, int]) -> None:
         )
 
 
+def _bounds_payload(bounds: dict[str, float]) -> dict[str, float]:
+    return {
+        'x_min': float(bounds['x_min']),
+        'x_max': float(bounds['x_max']),
+        'y_min': float(bounds['y_min']),
+        'y_max': float(bounds['y_max']),
+        'width': float(bounds['x_max']) - float(bounds['x_min']),
+        'height': float(bounds['y_max']) - float(bounds['y_min']),
+    }
+
+
 def _slowest_timing_stage(timing: dict[str, Any]) -> dict[str, Any] | None:
     candidates = {
         key: float(value)
@@ -1662,7 +1711,35 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         enable_hatch_ordering=True,
         cluster_units=True,
     )
+    sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
     sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
+
+    def _carriage_safe_writable_bounds_for_sketch() -> dict[str, float]:
+        try:
+            writable_bounds = runtime.node.carriage_safe_writable_bounds()
+        except Exception:
+            writable_bounds = shared.carriage_safe_writable_bounds()
+        try:
+            safe_workspace_bounds = runtime.node.carriage_safe_safe_bounds()
+        except Exception:
+            safe_workspace_bounds = shared.carriage_safe_workspace_bounds()
+        bounds = {
+            'x_min': max(float(writable_bounds['x_min']), float(safe_workspace_bounds['x_min'])),
+            'x_max': min(float(writable_bounds['x_max']), float(safe_workspace_bounds['x_max'])),
+            'y_min': max(float(writable_bounds['y_min']), float(safe_workspace_bounds['y_min'])),
+            'y_max': min(float(writable_bounds['y_max']), float(safe_workspace_bounds['y_max'])),
+        }
+        return _bounds_payload(bounds)
+
+    def _board_bounds_for_sketch() -> dict[str, float]:
+        return {
+            'x_min': 0.0,
+            'x_max': float(shared.board.width),
+            'y_min': 0.0,
+            'y_max': float(shared.board.height),
+            'width': float(shared.board.width),
+            'height': float(shared.board.height),
+        }
 
     def _sketch_preview_expired(entry: SketchPreviewCacheEntry, *, now: float) -> bool:
         return (now - float(entry.created_at_unix)) > float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS)
@@ -1793,15 +1870,24 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         scale_percent: Optional[float] = Form(None),
         center_x_m: Optional[float] = Form(None),
         center_y_m: Optional[float] = Form(None),
+        fit_to_safe_area: Optional[bool] = Form(None),
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
             _validate_sketch_upload(file, content)
+            sketch_fit_to_safe_area = _coerce_bool(
+                True if fit_to_safe_area is None else fit_to_safe_area,
+                field_name='fit_to_safe_area',
+                default=True,
+            )
+            sketch_safe_bounds = _carriage_safe_writable_bounds_for_sketch()
+            sketch_board_bounds = _board_bounds_for_sketch()
+            sketch_fit_bounds = sketch_safe_bounds if sketch_fit_to_safe_area else sketch_board_bounds
             sketch_margin_m = _coerce_float(
                 0.05 if margin_m is None else margin_m,
                 field_name='margin_m',
                 minimum=0.0,
-                maximum=min(float(shared.board.width), float(shared.board.height)) * 0.45,
+                maximum=min(float(sketch_fit_bounds['width']), float(sketch_fit_bounds['height'])) * 0.45,
             )
             sketch_max_image_dim = _coerce_int(
                 1000 if max_image_dim is None else max_image_dim,
@@ -1907,6 +1993,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'scale_percent': sketch_scale_percent,
                 'center_x_m': sketch_center_x_m,
                 'center_y_m': sketch_center_y_m,
+                'fit_to_safe_area': sketch_fit_to_safe_area,
             }
             try:
                 preview_started = time.perf_counter()
@@ -1926,10 +2013,22 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     scale_percent=sketch_scale_percent,
                     center_x_m=sketch_center_x_m,
                     center_y_m=sketch_center_y_m,
+                    fit_bounds_m=sketch_fit_bounds,
+                    validation_bounds_m=sketch_safe_bounds,
                 )
                 curve_metadata: dict[str, Any] = {
                     'preview_geometry_mode': sketch_preview_geometry_mode,
                     'curve_tolerance_px': float(sketch_curve_tolerance_px),
+                    'fit_to_safe_area': bool(sketch_fit_to_safe_area),
+                    'safe_x_min': float(sketch_safe_bounds['x_min']),
+                    'safe_x_max': float(sketch_safe_bounds['x_max']),
+                    'safe_y_min': float(sketch_safe_bounds['y_min']),
+                    'safe_y_max': float(sketch_safe_bounds['y_max']),
+                    'safe_width': float(sketch_safe_bounds['width']),
+                    'safe_height': float(sketch_safe_bounds['height']),
+                    'safe_bounds_m': sketch_safe_bounds,
+                    'fit_bounds_m': sketch_fit_bounds,
+                    'validation_bounds_m': sketch_safe_bounds,
                 }
                 curve_fit_start = time.perf_counter()
                 if sketch_preview_geometry_mode == 'smooth_curves':
@@ -2001,15 +2100,33 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='sketch draw request',
             max_bytes=4096,
         )
-        _reject_extra_fields(raw, {'preview_id'}, 'sketch draw request')
+        _reject_extra_fields(raw, {'preview_id', 'optimize_stroke_order'}, 'sketch draw request')
         entry = _load_sketch_preview(raw.get('preview_id'))
-        size_summary = _canonical_transport_size_summary(entry.canonical_plan)
+        optimize_stroke_order = _coerce_bool(
+            raw.get('optimize_stroke_order'),
+            field_name='optimize_stroke_order',
+            default=True,
+        )
+        publish_plan = entry.canonical_plan
+        optimization_stats: dict[str, Any] = {}
+        optimization_ms = 0.0
+        if optimize_stroke_order:
+            optimization_start = time.perf_counter()
+            optimization_result = optimize_canonical_plan(
+                entry.canonical_plan,
+                policy=sketch_draw_optimization_policy,
+            )
+            optimization_ms = _elapsed_ms(optimization_start)
+            publish_plan = optimization_result.plan
+            optimization_stats = optimization_result.stats.to_dict()
+
+        size_summary = _canonical_transport_size_summary(publish_plan)
         _enforce_sketch_draw_size_limits(size_summary)
 
         build_start = time.perf_counter()
         primitive_plan_msg = _build_execution_transport_message(
-            entry.canonical_plan,
-            writable_bounds=runtime.node.writable_bounds(),
+            publish_plan,
+            writable_bounds=_carriage_safe_writable_bounds_for_sketch(),
             shared_config=shared,
             sampling_policy=runtime_sampling_policy,
         )
@@ -2021,6 +2138,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         )
         publish_ms = _elapsed_ms(publish_start)
         timings = {
+            'optimization_ms': optimization_ms,
             'transport_build_ms': transport_build_ms,
             'publish_ms': publish_ms,
         }
@@ -2029,22 +2147,25 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             'point_count': entry.point_count,
             'bounds': _drawing_plan_bounds(entry.drawing_plan),
             'diagnostics': canonical_plan_diagnostics(
-                entry.canonical_plan,
+                publish_plan,
                 preview_sampling_policy=preview_sampling_policy,
                 runtime_sampling_policy=runtime_sampling_policy,
             ),
         }
         _record_last_plan_debug(
             source_type='sketch_centerline',
-            canonical_plan=entry.canonical_plan,
+            canonical_plan=publish_plan,
             preview_payload=preview_payload,
             timings=timings,
+            optimizer_stats=optimization_stats,
             route_metadata={
                 'preview_id': entry.preview_id,
                 'preview_geometry_mode': entry.preview_geometry_mode,
                 'source_filename': entry.source_filename,
                 'parameters': entry.parameters,
                 'metadata': entry.metadata,
+                'used_full_cached_plan': True,
+                'optimized': bool(optimize_stroke_order),
             },
             transport=transport,
             committed=True,
@@ -2065,9 +2186,13 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'preview_geometry_mode': entry.preview_geometry_mode,
                 'stroke_count': entry.stroke_count,
                 'point_count': entry.point_count,
-                'canonical_command_count': entry.canonical_command_count,
+                'canonical_command_count': len(publish_plan.commands),
+                'cached_canonical_command_count': entry.canonical_command_count,
                 'primitive_count': size_summary['primitive_count'],
                 'primitive_descriptor_bytes': size_summary['primitive_descriptor_bytes'],
+                'used_full_cached_plan': True,
+                'optimized': bool(optimize_stroke_order),
+                'optimization': optimization_stats,
                 'transport': transport,
                 'warnings': list(entry.warnings),
                 'timings_ms': timings,

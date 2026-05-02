@@ -9,7 +9,10 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from wall_climber import web_server
+from wall_climber.canonical_optimizer import optimize_canonical_plan
+from wall_climber.canonical_path import CanonicalPathPlan, LineSegment, PenDown, PenUp, TravelMove
 from wall_climber.runtime_topics import MODE_DRAW, PEN_MODE_AUTO
+from wall_climber.shared_config import load_shared_config
 
 
 def _encode_png(image: numpy.ndarray) -> bytes:
@@ -93,6 +96,12 @@ class _FakeNode:
     def writable_bounds(self) -> dict[str, float]:
         return {'x_min': 0.0, 'x_max': 6.3, 'y_min': 0.0, 'y_max': 3.0}
 
+    def carriage_safe_writable_bounds(self) -> dict[str, float]:
+        return {'x_min': 0.348, 'x_max': 6.2, 'y_min': 0.12, 'y_max': 2.9}
+
+    def carriage_safe_safe_bounds(self) -> dict[str, float]:
+        return {'x_min': 0.348, 'x_max': 6.14, 'y_min': 0.22, 'y_max': 2.82}
+
     def publish_execution_plan(self, primitive_plan, *, allowed_modes):
         if not self.ready:
             raise HTTPException(status_code=503, detail='runtime is not ready')
@@ -143,18 +152,19 @@ def _preview(
     image: bytes | None = None,
     preview_geometry_mode: str = 'smooth_curves',
     curve_tolerance_px: str = '3.0',
+    extra_data: dict[str, str] | None = None,
 ) -> dict:
+    data = {
+        'preview_geometry_mode': preview_geometry_mode,
+        'curve_tolerance_px': curve_tolerance_px,
+        'optimization_preset': 'detail',
+    }
+    if extra_data:
+        data.update(extra_data)
     response = client.post(
         '/api/sketch-centerline/preview',
         files={'file': ('sketch.png', image or _curved_sketch_png(), 'image/png')},
-        data={
-            'preview_geometry_mode': preview_geometry_mode,
-            'curve_tolerance_px': curve_tolerance_px,
-            'optimization_preset': 'detail',
-            'scale_percent': '50',
-            'center_x_m': '3.15',
-            'center_y_m': '1.5',
-        },
+        data=data,
     )
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -162,10 +172,13 @@ def _preview(
     return payload
 
 
-def _draw(client: TestClient, preview_id: str):
+def _draw(client: TestClient, preview_id: str, *, optimize_stroke_order: bool | None = None):
+    payload = {'preview_id': preview_id}
+    if optimize_stroke_order is not None:
+        payload['optimize_stroke_order'] = optimize_stroke_order
     return client.post(
         '/api/sketch-centerline/draw',
-        json={'preview_id': preview_id},
+        json=payload,
     )
 
 
@@ -195,6 +208,7 @@ def test_draw_rejects_missing_unknown_expired_and_extra_preview_id(monkeypatch) 
             'preview_id': payload['preview_id'],
             'svg': '<svg/>',
             'strokes': [[[0, 0], [1, 1]]],
+            'optimize_stroke_order': True,
         },
     )
     assert extra.status_code == 422
@@ -217,6 +231,11 @@ def test_draw_uses_cached_smooth_canonical_plan() -> None:
     body = response.json()
     assert body['ok'] is True
     assert body['preview_geometry_mode'] == 'smooth_curves'
+    assert body['used_full_cached_plan'] is True
+    assert body['optimized'] is True
+    assert body['canonical_command_count'] >= 1
+    assert body['primitive_count'] >= 1
+    assert 'travel_reduction_m' in body['optimization']
     assert runtime.node.publish_count == 1
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
     assert _FakePathPrimitive.QUADRATIC_BEZIER in primitive_types or _FakePathPrimitive.CUBIC_BEZIER in primitive_types
@@ -232,6 +251,7 @@ def test_draw_uses_cached_polyline_canonical_plan() -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['preview_geometry_mode'] == 'polyline'
+    assert body['used_full_cached_plan'] is True
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
     assert _FakePathPrimitive.LINE_SEGMENT in primitive_types
     assert _FakePathPrimitive.QUADRATIC_BEZIER not in primitive_types
@@ -252,6 +272,79 @@ def test_oversized_cached_plan_returns_structured_413(monkeypatch) -> None:
     assert detail['counts']['primitive_count'] > 1
     assert detail['limits']['max_primitive_count'] == 1
     assert runtime.node.publish_count == 0
+
+
+def test_default_safe_fit_preview_draws_without_bounds_failure() -> None:
+    client, runtime = _client_and_runtime()
+    payload = _preview(client, preview_geometry_mode='polyline')
+    bounds = payload['bounds']
+    metadata = payload['metadata']
+    assert bounds['x_min'] >= metadata['safe_x_min']
+    assert bounds['x_max'] <= metadata['safe_x_max']
+    assert bounds['y_min'] >= metadata['safe_y_min']
+    assert bounds['y_max'] <= metadata['safe_y_max']
+
+    response = _draw(client, payload['preview_id'])
+
+    assert response.status_code == 200, response.text
+    assert runtime.node.publish_count == 1
+
+
+def test_draw_uses_full_cached_plan_when_canvas_preview_is_truncated(monkeypatch) -> None:
+    monkeypatch.setattr(web_server, '_SKETCH_PREVIEW_MAX_POINTS', 2)
+    client, runtime = _client_and_runtime()
+    payload = _preview(client, preview_geometry_mode='polyline')
+    assert payload['preview']['truncated'] is True
+    assert payload['preview']['returned_point_count'] <= 2
+
+    response = _draw(client, payload['preview_id'], optimize_stroke_order=False)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['used_full_cached_plan'] is True
+    assert body['cached_canonical_command_count'] == payload['canonical_command_count']
+    assert body['primitive_count'] > payload['preview']['returned_point_count']
+    assert runtime.node.publish_count == 1
+
+
+def test_sketch_draw_optimization_reduces_travel_without_changing_segments() -> None:
+    plan = CanonicalPathPlan(
+        frame='board',
+        theta_ref=0.0,
+        commands=(
+            PenDown(),
+            LineSegment(start=(0.4, 0.4), end=(0.6, 0.4)),
+            PenUp(),
+            TravelMove(start=(0.6, 0.4), end=(5.6, 2.4)),
+            PenDown(),
+            LineSegment(start=(5.6, 2.4), end=(5.8, 2.4)),
+            PenUp(),
+            TravelMove(start=(5.8, 2.4), end=(0.7, 0.5)),
+            PenDown(),
+            LineSegment(start=(0.7, 0.5), end=(0.9, 0.5)),
+            PenUp(),
+        ),
+    )
+
+    result = optimize_canonical_plan(
+        plan,
+        policy=web_server._sketch_draw_optimization_policy(load_shared_config()),
+    )
+    original_segments = sorted(
+        (command.start, command.end)
+        for command in plan.commands
+        if isinstance(command, LineSegment)
+    )
+    optimized_segments = sorted(
+        tuple(sorted((command.start, command.end)))
+        for command in result.plan.commands
+        if isinstance(command, LineSegment)
+    )
+    original_segments_unoriented = sorted(tuple(sorted(segment)) for segment in original_segments)
+
+    assert result.stats.optimized_travel_length_m < result.stats.original_travel_length_m
+    assert result.stats.reordered_units is True
+    assert optimized_segments == original_segments_unoriented
 
 
 def test_runtime_not_ready_does_not_discard_cached_preview() -> None:

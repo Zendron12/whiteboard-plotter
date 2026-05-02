@@ -30,6 +30,7 @@ _NEIGHBORS = (
 
 Pixel = tuple[int, int]
 PixelStroke = tuple[Pixel, ...]
+BoundsM = dict[str, float]
 
 _OPTIMIZATION_PRESETS = {
     'raw': {
@@ -587,6 +588,36 @@ def _remove_short_pixel_strokes(
     return tuple(kept), removed
 
 
+def _normalize_bounds_m(
+    bounds: BoundsM | None,
+    *,
+    default: BoundsM,
+    field_name: str,
+) -> BoundsM:
+    raw = default if bounds is None else bounds
+    required = ('x_min', 'x_max', 'y_min', 'y_max')
+    try:
+        normalized = {key: float(raw[key]) for key in required}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'{field_name} must contain x_min, x_max, y_min, and y_max.') from exc
+    if not all(math.isfinite(value) for value in normalized.values()):
+        raise ValueError(f'{field_name} coordinates must be finite.')
+    if normalized['x_max'] <= normalized['x_min'] or normalized['y_max'] <= normalized['y_min']:
+        raise ValueError(f'{field_name} must define a non-empty rectangle.')
+    return normalized
+
+
+def _bounds_metadata(bounds: BoundsM) -> dict[str, float]:
+    return {
+        'x_min': float(bounds['x_min']),
+        'x_max': float(bounds['x_max']),
+        'y_min': float(bounds['y_min']),
+        'y_max': float(bounds['y_max']),
+        'width': float(bounds['x_max'] - bounds['x_min']),
+        'height': float(bounds['y_max'] - bounds['y_min']),
+    }
+
+
 def _scale_strokes_to_board(
     pixel_strokes: tuple[PixelStroke, ...],
     *,
@@ -596,15 +627,29 @@ def _scale_strokes_to_board(
     scale_percent: float,
     center_x_m: float | None,
     center_y_m: float | None,
+    fit_bounds_m: BoundsM | None = None,
+    validation_bounds_m: BoundsM | None = None,
 ) -> tuple[tuple[Stroke, ...], dict[str, object]]:
     if board_width_m <= 0.0 or board_height_m <= 0.0:
         raise ValueError('board_width_m and board_height_m must be > 0.')
     if margin_m < 0.0:
         raise ValueError('margin_m must be >= 0.')
-    available_width = float(board_width_m) - (2.0 * float(margin_m))
-    available_height = float(board_height_m) - (2.0 * float(margin_m))
+    board_bounds = {
+        'x_min': 0.0,
+        'x_max': float(board_width_m),
+        'y_min': 0.0,
+        'y_max': float(board_height_m),
+    }
+    fit_bounds = _normalize_bounds_m(fit_bounds_m, default=board_bounds, field_name='fit_bounds_m')
+    validation_bounds = _normalize_bounds_m(
+        validation_bounds_m,
+        default=board_bounds,
+        field_name='validation_bounds_m',
+    )
+    available_width = (fit_bounds['x_max'] - fit_bounds['x_min']) - (2.0 * float(margin_m))
+    available_height = (fit_bounds['y_max'] - fit_bounds['y_min']) - (2.0 * float(margin_m))
     if available_width <= 0.0 or available_height <= 0.0:
-        raise ValueError('margin_m leaves no drawable board area.')
+        raise ValueError('margin_m leaves no drawable fit area.')
 
     points = [point for stroke in pixel_strokes for point in stroke]
     if not points:
@@ -629,8 +674,8 @@ def _scale_strokes_to_board(
     scale = base_scale * (float(scale_percent) / 100.0)
     fitted_width = source_width * scale
     fitted_height = source_height * scale
-    auto_center_x = float(margin_m) + (available_width * 0.5)
-    auto_center_y = float(margin_m) + (available_height * 0.5)
+    auto_center_x = fit_bounds['x_min'] + float(margin_m) + (available_width * 0.5)
+    auto_center_y = fit_bounds['y_min'] + float(margin_m) + (available_height * 0.5)
     target_center_x = auto_center_x if center_x_m is None else float(center_x_m)
     target_center_y = auto_center_y if center_y_m is None else float(center_y_m)
     source_center_x = (min_x + max_x) * 0.5
@@ -661,14 +706,14 @@ def _scale_strokes_to_board(
     min_board_y = min(point.y for point in board_points)
     max_board_y = max(point.y for point in board_points)
     if (
-        min_board_x < -1.0e-7
-        or min_board_y < -1.0e-7
-        or max_board_x > float(board_width_m) + 1.0e-7
-        or max_board_y > float(board_height_m) + 1.0e-7
+        min_board_x < validation_bounds['x_min'] - 1.0e-7
+        or min_board_y < validation_bounds['y_min'] - 1.0e-7
+        or max_board_x > validation_bounds['x_max'] + 1.0e-7
+        or max_board_y > validation_bounds['y_max'] + 1.0e-7
     ):
         raise ValueError(
-            'Sketch placement is outside the board bounds; reduce scale_percent '
-            'or choose a center_x_m/center_y_m closer to the board center.'
+            'Sketch placement is outside the robot-safe drawable bounds; reduce scale_percent '
+            'or choose a center_x_m/center_y_m inside the safe drawable area.'
         )
 
     return tuple(strokes), {
@@ -691,6 +736,8 @@ def _scale_strokes_to_board(
         'offset_y_m': float(offset_y),
         'offset_m': {'x': float(offset_x), 'y': float(offset_y)},
         'board_size_m': {'width': float(board_width_m), 'height': float(board_height_m)},
+        'fit_bounds_m': _bounds_metadata(fit_bounds),
+        'validation_bounds_m': _bounds_metadata(validation_bounds),
         'margin_m': float(margin_m),
     }
 
@@ -745,6 +792,8 @@ def vectorize_sketch_image_to_plan(
     scale_percent: float = 100.0,
     center_x_m: float | None = None,
     center_y_m: float | None = None,
+    fit_bounds_m: BoundsM | None = None,
+    validation_bounds_m: BoundsM | None = None,
 ) -> DrawingPathPlan:
     """Convert a high-contrast sketch image into a board-space DrawingPathPlan."""
 
@@ -852,6 +901,8 @@ def vectorize_sketch_image_to_plan(
         scale_percent=float(scale_percent),
         center_x_m=center_x_m,
         center_y_m=center_y_m,
+        fit_bounds_m=fit_bounds_m,
+        validation_bounds_m=validation_bounds_m,
     )
     mark(stage_started, 'scale_time_ms')
     processing_time_ms = (time.perf_counter() - started) * 1000.0

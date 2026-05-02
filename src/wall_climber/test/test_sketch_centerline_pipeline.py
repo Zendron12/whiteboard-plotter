@@ -414,7 +414,7 @@ def test_center_coordinates_change_placement() -> None:
 
 
 def test_invalid_placement_outside_board_raises_clear_error() -> None:
-    with pytest.raises(ValueError, match='outside the board bounds'):
+    with pytest.raises(ValueError, match='outside the robot-safe drawable bounds'):
         vectorize_sketch_image_to_plan(
             _rectangle_image(),
             board_width_m=4.0,
@@ -424,6 +424,28 @@ def test_invalid_placement_outside_board_raises_clear_error() -> None:
             center_x_m=0.0,
             center_y_m=1.5,
         )
+
+
+def test_fit_bounds_are_used_for_auto_fit_and_center() -> None:
+    fit_bounds = {'x_min': 1.0, 'x_max': 3.0, 'y_min': 0.5, 'y_max': 2.5}
+    plan = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=4.0,
+        board_height_m=3.0,
+        margin_m=0.1,
+        fit_bounds_m=fit_bounds,
+        validation_bounds_m=fit_bounds,
+    )
+    min_x, max_x, min_y, max_y = _bounds(plan)
+
+    assert min_x >= fit_bounds['x_min']
+    assert max_x <= fit_bounds['x_max']
+    assert min_y >= fit_bounds['y_min']
+    assert max_y <= fit_bounds['y_max']
+    assert ((min_x + max_x) * 0.5) == pytest.approx(2.0, abs=0.02)
+    assert ((min_y + max_y) * 0.5) == pytest.approx(1.5, abs=0.02)
+    assert plan.metadata['fit_bounds_m']['x_min'] == pytest.approx(1.0)
+    assert plan.metadata['validation_bounds_m']['x_max'] == pytest.approx(3.0)
 
 
 def test_sketch_plan_converts_to_canonical_path_plan() -> None:

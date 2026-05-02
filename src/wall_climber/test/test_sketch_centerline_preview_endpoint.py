@@ -35,6 +35,12 @@ class _FakeNode:
     def __init__(self) -> None:
         self.publish_count = 0
 
+    def carriage_safe_writable_bounds(self) -> dict[str, float]:
+        return {'x_min': 0.348, 'x_max': 6.2, 'y_min': 0.12, 'y_max': 2.9}
+
+    def carriage_safe_safe_bounds(self) -> dict[str, float]:
+        return {'x_min': 0.348, 'x_max': 6.14, 'y_min': 0.22, 'y_max': 2.82}
+
     def publish_execution_plan(self, *_args, **_kwargs):
         self.publish_count += 1
         raise AssertionError('preview endpoint must not publish robot commands')
@@ -93,6 +99,9 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['metadata']['center_x_m'] == 3.0
     assert payload['metadata']['center_y_m'] == 1.5
     assert payload['metadata']['preview_geometry_mode'] == 'smooth_curves'
+    assert payload['metadata']['fit_to_safe_area'] is True
+    assert payload['metadata']['safe_x_min'] == 0.348
+    assert payload['metadata']['safe_x_max'] == 6.14
     assert payload['metadata']['curve_tolerance_px'] == 1.25
     assert payload['metadata']['max_image_dim'] == 1000
     assert payload['metadata']['timing']['curve_fit_time_ms'] >= 0.0
@@ -214,7 +223,28 @@ def test_sketch_centerline_preview_endpoint_rejects_outside_placement() -> None:
     )
 
     assert response.status_code == 422
-    assert 'outside the board bounds' in response.json()['detail']
+    assert 'outside the robot-safe drawable bounds' in response.json()['detail']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_endpoint_default_fits_safe_bounds() -> None:
+    client, runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'polyline'},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    bounds = payload['bounds']
+    metadata = payload['metadata']
+    assert metadata['fit_to_safe_area'] is True
+    assert bounds['x_min'] >= metadata['safe_x_min']
+    assert bounds['x_max'] <= metadata['safe_x_max']
+    assert bounds['y_min'] >= metadata['safe_y_min']
+    assert bounds['y_max'] <= metadata['safe_y_max']
     assert runtime.node.publish_count == 0
 
 

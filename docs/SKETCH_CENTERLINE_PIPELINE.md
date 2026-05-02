@@ -70,6 +70,8 @@ Fields:
 - `scale_percent`: optional scale applied after fit-to-board.
 - `center_x_m`: optional board-space drawing center x coordinate.
 - `center_y_m`: optional board-space drawing center y coordinate.
+- `fit_to_safe_area`: optional boolean, default `true`; fits automatic sketch
+  placement to the robot-safe drawable bounds rather than the full visual board.
 
 Example:
 
@@ -113,7 +115,10 @@ Choose a PNG/JPG in the normal file input, optionally adjust `Sketch Margin (m)`
 `Optimization Preset`, `Preview Geometry`, `Sketch Max Image Dim`, Curve
 Tolerance, `Sketch Noise Area (px)`, Line Sensitivity, Min Stroke Length,
 Stroke Merge Gap, Simplify Epsilon, Sketch Scale, and Sketch Center X/Y, then
-click `Preview as Sketch Centerline`.
+click `Preview as Sketch Centerline`. `Fit to Robot-Safe Area` is enabled by
+default. This fits and centers the sketch in the drawable region where the pen
+path keeps the carriage body inside the board and inside the configured safe
+cable workspace.
 
 The UI calls `/api/sketch-centerline/preview`, displays the returned
 `preview_svg`, and draws the returned board-space preview strokes on the board
@@ -174,10 +179,18 @@ counts means the fitter preserved shape fidelity rather than forcing unsafe
 curves.
 
 Scale and Center controls are placement-only. The default fits the sketch inside
-the board margin and auto-centers it. `Sketch Scale (%)` scales that fitted
-drawing around its center. Empty Center X/Y keeps auto-center; supplied values
-place the drawing center at that board coordinate. Placements outside the board
-are rejected instead of clipped.
+the robot-safe drawable area and auto-centers it. `Sketch Scale (%)` scales
+that fitted drawing around its center. Empty Center X/Y keeps auto-center;
+supplied values place the drawing center at that board coordinate. Placements
+outside the robot-safe drawable bounds are rejected during preview instead of
+being clipped or failing later at draw time.
+
+The visual board is larger than the robot-safe drawable area. The latter is the
+intersection of carriage-safe writable bounds and the safe cable workspace. A
+previous scale `100` preview could fit the full board but fail during draw with
+`draw segment[0] extends outside carriage-safe writable bounds`; the preview
+endpoint now catches that class of placement error before a `preview_id` is
+cached.
 
 For detailed anime or line-art sketches, start with Line Sensitivity `0.25` to
 `0.45`, lower Noise Area to `1..4` to keep small components, keep Min Stroke
@@ -252,6 +265,17 @@ endpoint returns a clear `413` response with command/primitive counts instead of
 crashing. If the preview expired or the runtime is not ready, the endpoint
 returns a clear error and does not publish.
 
+Draw Sketch Preview publishes the full backend cached canonical plan. The board
+canvas may show only a sampled `preview.strokes` subset such as
+`2399/24544 pts`; that canvas subset is display-only and is never used as the
+draw source.
+
+`Optimize Stroke Order Before Draw` is enabled by default. It uses the existing
+canonical optimizer to reorder and reverse draw units to reduce pen-up travel
+before publishing. This is robot travel optimization, not image-stroke merging:
+it does not connect unrelated sketch strokes, simplify away details, or change
+the extracted drawing geometry.
+
 G-code is not used for runtime drawing. The project runtime remains
 `CanonicalPathPlan` / `PrimitivePathPlan` / ROS executor. G-code may be a future
 optional export format, but it is not the main execution path.
@@ -261,6 +285,7 @@ optional export format, but it is not the main execution path.
 - This first version is tuned for clean sketches, not photos or shaded images.
 - Complex junctions are traced with a simple graph traversal and may split
   dense drawings into more strokes than ideal.
-- It does not optimize stroke ordering beyond preserving traced order.
+- Stroke ordering can be optimized at draw time, but complex drawings may still
+  have substantial pen-up travel.
 - It does not implement SVG parsing, photo outlines, hatching, voice commands,
   or numbered-library runtime behavior.

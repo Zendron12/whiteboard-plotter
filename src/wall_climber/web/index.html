@@ -1246,6 +1246,14 @@
                     </select>
                   </div>
                   <div class="field">
+                    <label for="sketch-fit-safe">Fit to Robot-Safe Area</label>
+                    <input id="sketch-fit-safe" type="checkbox" checked>
+                  </div>
+                  <div class="field">
+                    <label for="sketch-optimize-draw">Optimize Stroke Order Before Draw</label>
+                    <input id="sketch-optimize-draw" type="checkbox" checked>
+                  </div>
+                  <div class="field">
                     <label for="sketch-max-image-dim">Sketch Max Image Dim</label>
                     <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
                   </div>
@@ -1298,7 +1306,7 @@
                   <button id="file-commit-btn" class="primary-btn" type="button">Commit File</button>
                 </div>
                 <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
-                <p class="helper-copy">Sketch Centerline draw uses the backend cached preview only. Normal Commit File remains separate.</p>
+                <p class="helper-copy">Sketch placement is fitted to robot-safe drawable bounds, not only the visual board. Draw uses the backend cached preview only.</p>
                 <p id="sketch-draw-status" class="helper-copy">Draw Sketch Preview is available after a successful Sketch Centerline preview.</p>
                 <div id="sketch-preview-box" class="sketch-preview-box">
                   <div class="sketch-preview-head">
@@ -1530,6 +1538,8 @@
         fileMeta: document.getElementById('file-meta'),
         sketchOptimizationPreset: document.getElementById('sketch-optimization-preset'),
         sketchPreviewGeometry: document.getElementById('sketch-preview-geometry'),
+        sketchFitSafe: document.getElementById('sketch-fit-safe'),
+        sketchOptimizeDraw: document.getElementById('sketch-optimize-draw'),
         sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
         sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
         sketchMargin: document.getElementById('sketch-margin'),
@@ -3475,6 +3485,17 @@
         return `x ${formatRange(xMin, xMax)} · y ${formatRange(yMin, yMax)}`;
       }
 
+      function formatSketchSafeBounds(metadata) {
+        const xMin = Number(metadata.safe_x_min);
+        const xMax = Number(metadata.safe_x_max);
+        const yMin = Number(metadata.safe_y_min);
+        const yMax = Number(metadata.safe_y_max);
+        if (![xMin, xMax, yMin, yMax].every(Number.isFinite)) {
+          return '--';
+        }
+        return `x ${formatRange(xMin, xMax)} · y ${formatRange(yMin, yMax)}`;
+      }
+
       function sketchPreviewPointRatio(preview) {
         const returned = Number(preview && preview.returned_point_count);
         const original = Number(preview && preview.original_point_count);
@@ -3562,12 +3583,13 @@
         const lines = [
           `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
           `geometry ${metadata.preview_geometry_mode || '--'} · curves ${curveCount} · Q ${Number(metadata.quadratic_primitive_count || 0)} · C ${Number(metadata.cubic_primitive_count || 0)} · lines ${lineCount}`,
+          `safe fit ${metadata.fit_to_safe_area === false ? 'off' : 'on'} · robot-safe ${formatSketchSafeBounds(metadata)}`,
           `curve tol ${Number.isFinite(curveTolerancePx) ? curveTolerancePx.toFixed(2) : '--'} px · ${Number.isFinite(curveToleranceM) ? curveToleranceM.toFixed(5) : '--'} m · max dim ${Number(metadata.max_image_dim || 0) || '--'}`,
           `preset ${metadata.optimization_preset || '--'} · simplify ${Number.isFinite(simplify) ? simplify.toFixed(2) : '--'} · min stroke ${Number.isFinite(minStroke) ? minStroke.toFixed(1) : '--'} px`,
           `merge ${metadata.merge_enabled ? 'on' : 'off'} · gap ${Number.isFinite(mergeGap) ? mergeGap.toFixed(1) : '--'} px · angle ${Number.isFinite(mergeAngle) ? mergeAngle.toFixed(0) : '--'}°`,
           `raw ${Number(metadata.raw_stroke_count || 0)} · final ${Number(metadata.final_stroke_count || payload.stroke_count || 0)} · merged ${Number(metadata.merge_count || 0)} · removed short ${Number(metadata.removed_short_stroke_count || 0)}`,
           `bounds ${formatSketchBounds(payload.bounds)}`,
-          `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}`,
+          `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''} · draw uses full cached backend plan`,
           `sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}`,
           `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
           `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
@@ -3653,7 +3675,10 @@
             ? 'Full Smooth Curves SVG output. Board canvas is a sampled Polyline Canvas Preview.'
             : 'Full Polyline Debug SVG output. Board canvas is a sampled Polyline Canvas Preview.';
         }
-        const warning = sketchTruncationWarning(payload);
+        const warning = [
+          sketchTruncationWarning(payload),
+          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
+        ].filter(Boolean).join(' ');
         if (dom.sketchPreviewWarning) {
           dom.sketchPreviewWarning.textContent = warning;
           dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
@@ -3705,7 +3730,7 @@
         const drawAvailability = state.sketchPreviewId
           ? 'Draw Sketch Preview is available and will use the backend cached canonical plan.'
           : 'Draw Sketch Preview is unavailable because the backend did not return a preview_id.';
-        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. ${drawAvailability}`;
+        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
         setSketchDrawStatus(drawAvailability);
         setNotice('warning', 'Sketch preview ready', 'Use Draw Sketch Preview to publish the backend cached plan. Normal Commit File remains separate.');
         pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
@@ -3818,6 +3843,7 @@
         form.append('file', file);
         form.append('optimization_preset', String(dom.sketchOptimizationPreset.value || 'detail'));
         form.append('preview_geometry_mode', String(dom.sketchPreviewGeometry.value || 'smooth_curves'));
+        form.append('fit_to_safe_area', dom.sketchFitSafe.checked ? 'true' : 'false');
         form.append('max_image_dim', String(Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000))))));
         form.append('curve_tolerance_px', String(Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0))));
         form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
@@ -3848,14 +3874,22 @@
         const payload = await apiRequest('/api/sketch-centerline/draw', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ preview_id: state.sketchPreviewId }),
+          body: JSON.stringify({
+            preview_id: state.sketchPreviewId,
+            optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
+          }),
         });
         const primitiveCount = Number(payload.primitive_count || 0);
         const commandCount = Number(payload.canonical_command_count || 0);
+        const optimization = payload.optimization || {};
+        const travelReduction = Number(optimization.travel_reduction_m);
         const geometryMode = payload.preview_geometry_mode === 'polyline'
           ? 'Polyline Debug'
           : 'Smooth Curves';
-        setSketchDrawStatus(`Sketch draw published from cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives.`);
+        const optimizedText = payload.optimized
+          ? `optimized · travel reduction ${Number.isFinite(travelReduction) ? travelReduction.toFixed(3) : '--'} m`
+          : 'not optimized';
+        setSketchDrawStatus(`Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`);
         setNotice('success', 'Sketch draw started', `Published cached ${geometryMode} plan through the existing draw executor.`);
         pushFeed(`Sketch Centerline draw published (${geometryMode}).`, 'success');
         refreshRuntime().catch(() => {});
