@@ -18,6 +18,9 @@ from wall_climber.image_pipeline.types import (
 
 
 _EPS = 1.0e-9
+_MERGE_MAX_TIME_MS = 750.0
+_MERGE_MAX_PASSES = 3
+_MERGE_MAX_ITERATIONS = 5000
 _NEIGHBORS = (
     (-1, -1), (0, -1), (1, -1),
     (-1, 0),            (1, 0),
@@ -527,24 +530,45 @@ def _merge_nearby_strokes(
     *,
     merge_gap_px: float,
     merge_max_angle_deg: float,
-) -> tuple[tuple[PixelStroke, ...], int]:
+) -> tuple[tuple[PixelStroke, ...], int, tuple[str, ...]]:
     remaining = list(strokes)
     merge_count = 0
     max_angle = max(0.0, min(180.0, float(merge_max_angle_deg)))
-    while True:
-        candidate = _find_best_merge(
-            tuple(remaining),
-            merge_gap_px=max(0.0, float(merge_gap_px)),
-            merge_max_angle_deg=max_angle,
-        )
-        if candidate is None:
+    started = time.perf_counter()
+    warnings: list[str] = []
+    gap = max(0.0, float(merge_gap_px))
+    for _pass_index in range(_MERGE_MAX_PASSES):
+        changed = False
+        while True:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if elapsed_ms >= _MERGE_MAX_TIME_MS:
+                warnings.append(
+                    f'Sketch stroke merge stopped after {elapsed_ms:.1f} ms; '
+                    'remaining strokes were left separate.'
+                )
+                return tuple(remaining), merge_count, tuple(warnings)
+            if merge_count >= _MERGE_MAX_ITERATIONS:
+                warnings.append(
+                    f'Sketch stroke merge stopped after {_MERGE_MAX_ITERATIONS} accepted merges; '
+                    'remaining strokes were left separate.'
+                )
+                return tuple(remaining), merge_count, tuple(warnings)
+            candidate = _find_best_merge(
+                tuple(remaining),
+                merge_gap_px=gap,
+                merge_max_angle_deg=max_angle,
+            )
+            if candidate is None:
+                break
+            first_index, second_index, merged = candidate
+            low, high = sorted((first_index, second_index))
+            remaining[low] = merged
+            del remaining[high]
+            merge_count += 1
+            changed = True
+        if not changed:
             break
-        first_index, second_index, merged = candidate
-        low, high = sorted((first_index, second_index))
-        remaining[low] = merged
-        del remaining[high]
-        merge_count += 1
-    return tuple(remaining), merge_count
+    return tuple(remaining), merge_count, tuple(warnings)
 
 
 def _remove_short_pixel_strokes(
@@ -683,6 +707,7 @@ def _metrics(
     *,
     points_before_simplification: int,
     processing_time_ms: float,
+    warnings: tuple[str, ...] = (),
 ) -> PipelineMetrics:
     total_drawing_length = sum(_drawing_length(stroke.points) for stroke in strokes)
     pen_up_travel = 0.0
@@ -699,6 +724,7 @@ def _metrics(
         pen_up_travel_length_m=pen_up_travel,
         pen_lift_count=len(strokes),
         processing_time_ms=processing_time_ms,
+        warnings=warnings,
     )
 
 
@@ -708,7 +734,7 @@ def vectorize_sketch_image_to_plan(
     board_width_m: float,
     board_height_m: float,
     margin_m: float = 0.05,
-    max_image_dim: int = 1200,
+    max_image_dim: int = 1000,
     min_component_area_px: int = 2,
     min_stroke_length_px: float = 1.0,
     simplify_epsilon_px: float = 0.25,
@@ -723,6 +749,12 @@ def vectorize_sketch_image_to_plan(
     """Convert a high-contrast sketch image into a board-space DrawingPathPlan."""
 
     started = time.perf_counter()
+    timing: dict[str, float] = {}
+    warnings: list[str] = []
+
+    def mark(stage_started: float, key: str) -> None:
+        timing[key] = (time.perf_counter() - stage_started) * 1000.0
+
     optimization_settings = _resolve_optimization_settings(
         optimization_preset=optimization_preset,
         min_stroke_length_px=float(min_stroke_length_px),
@@ -737,25 +769,47 @@ def vectorize_sketch_image_to_plan(
     merge_enabled = bool(optimization_settings['merge_enabled'])
     resolved_preset = str(optimization_settings['optimization_preset'])
 
+    stage_started = time.perf_counter()
     gray, original_size, source_path = _decode_grayscale(image_bytes_or_path)
+    mark(stage_started, 'decode_time_ms')
+
+    stage_started = time.perf_counter()
     processed_gray, resize_scale = _resize_for_processing(gray, max_image_dim=max_image_dim)
+    mark(stage_started, 'resize_time_ms')
+
+    stage_started = time.perf_counter()
     normalized_gray = _normalize_grayscale(processed_gray)
+    mark(stage_started, 'normalize_time_ms')
+
+    stage_started = time.perf_counter()
     binary, threshold_metadata = _threshold_foreground(
         normalized_gray,
         line_sensitivity=float(line_sensitivity),
     )
+    mark(stage_started, 'threshold_time_ms')
+
+    stage_started = time.perf_counter()
     cleaned_binary, component_metadata = _remove_small_components(
         binary,
         min_component_area_px=min_component_area_px,
     )
+    mark(stage_started, 'cleanup_time_ms')
+
+    stage_started = time.perf_counter()
     skeleton, skeleton_backend = _skeletonize_foreground(cleaned_binary)
+    mark(stage_started, 'skeleton_time_ms')
+
+    stage_started = time.perf_counter()
     raw_strokes = _trace_skeleton_pixels(
         skeleton,
         min_stroke_length_px=0.0,
     )
+    mark(stage_started, 'trace_time_ms')
     if not raw_strokes:
         raise ValueError('No drawable centerline strokes were extracted from the sketch image.')
     points_before_simplification = sum(len(stroke) for stroke in raw_strokes)
+
+    stage_started = time.perf_counter()
     simplified_strokes = tuple(
         stroke for stroke in (
             _simplify_pixels(stroke, epsilon_px=effective_simplify_epsilon_px)
@@ -763,23 +817,33 @@ def vectorize_sketch_image_to_plan(
         )
         if len(stroke) >= 2
     )
+    mark(stage_started, 'simplify_time_ms')
     if not simplified_strokes:
         raise ValueError('No drawable centerline strokes remained after simplification.')
+
+    stage_started = time.perf_counter()
+    merge_warnings: tuple[str, ...] = ()
     if merge_enabled:
-        merged_strokes, merge_count = _merge_nearby_strokes(
+        merged_strokes, merge_count, merge_warnings = _merge_nearby_strokes(
             simplified_strokes,
             merge_gap_px=effective_merge_gap_px,
             merge_max_angle_deg=effective_merge_max_angle_deg,
         )
+        warnings.extend(merge_warnings)
     else:
         merged_strokes, merge_count = simplified_strokes, 0
+    mark(stage_started, 'merge_time_ms')
+
+    stage_started = time.perf_counter()
     filtered_strokes, removed_short_stroke_count = _remove_short_pixel_strokes(
         merged_strokes,
         min_stroke_length_px=effective_min_stroke_length_px,
     )
+    mark(stage_started, 'filter_time_ms')
     if not filtered_strokes:
         raise ValueError('No drawable centerline strokes remained after stroke filtering.')
 
+    stage_started = time.perf_counter()
     board_strokes, placement_metadata = _scale_strokes_to_board(
         filtered_strokes,
         board_width_m=float(board_width_m),
@@ -789,7 +853,10 @@ def vectorize_sketch_image_to_plan(
         center_x_m=center_x_m,
         center_y_m=center_y_m,
     )
+    mark(stage_started, 'scale_time_ms')
     processing_time_ms = (time.perf_counter() - started) * 1000.0
+    timing['curve_fit_time_ms'] = 0.0
+    timing['preview_total_time_ms'] = processing_time_ms
     processed_height, processed_width = processed_gray.shape[:2]
     metadata = {
         'source_path': source_path,
@@ -816,8 +883,14 @@ def vectorize_sketch_image_to_plan(
         'post_merge_stroke_count': len(merged_strokes),
         'final_stroke_count': len(filtered_strokes),
         'merge_count': int(merge_count),
+        'merge_max_time_ms': float(_MERGE_MAX_TIME_MS),
+        'merge_max_passes': int(_MERGE_MAX_PASSES),
+        'merge_max_iterations': int(_MERGE_MAX_ITERATIONS),
+        'merge_warnings': tuple(merge_warnings),
         'removed_short_stroke_count': int(removed_short_stroke_count),
         'skeleton_backend': skeleton_backend,
+        'timing': {key: float(value) for key, value in timing.items()},
+        'warnings': tuple(warnings),
         **threshold_metadata,
         **component_metadata,
         **placement_metadata,
@@ -830,6 +903,7 @@ def vectorize_sketch_image_to_plan(
             board_strokes,
             points_before_simplification=points_before_simplification,
             processing_time_ms=processing_time_ms,
+            warnings=tuple(warnings),
         ),
         metadata=metadata,
     )

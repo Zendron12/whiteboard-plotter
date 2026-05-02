@@ -83,7 +83,16 @@ from wall_climber.canonical_optimizer import (
     CanonicalOptimizationPolicy,
     optimize_canonical_plan,
 )
-from wall_climber.canonical_path import CanonicalPathPlan
+from wall_climber.canonical_path import (
+    CanonicalCommand,
+    CanonicalPathPlan,
+    CubicBezier,
+    LineSegment,
+    PenDown,
+    PenUp,
+    QuadraticBezier,
+    TravelMove,
+)
 from wall_climber.canonical_ops import (
     cleanup_canonical_plan,
     default_image_placement,
@@ -109,6 +118,7 @@ from wall_climber.ingestion.upload_routing import (
     infer_uploaded_source_type,
 )
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline.curve_fit import drawing_path_plan_to_smooth_canonical
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
@@ -1400,23 +1410,157 @@ def _sketch_preview_svg(
     )
 
 
-def _sketch_preview_response(plan, *, canonical_command_count: int, board_width_m: float, board_height_m: float) -> dict[str, Any]:
+def _command_start(command: CanonicalCommand) -> tuple[float, float] | None:
+    if isinstance(command, LineSegment):
+        return command.start
+    if isinstance(command, QuadraticBezier):
+        return command.start
+    if isinstance(command, CubicBezier):
+        return command.start
+    return None
+
+
+def _smooth_sketch_preview_svg(
+    canonical_plan: CanonicalPathPlan,
+    *,
+    board_width_m: float,
+    board_height_m: float,
+) -> str:
+    stroke_width = max(float(board_width_m), float(board_height_m)) / 360.0
+    paths: list[str] = []
+    current: list[str] = []
+    pen_down = False
+
+    def flush_current() -> None:
+        if current:
+            paths.append(
+                '<path d="'
+                + ' '.join(current)
+                + f'" fill="none" stroke="#111827" stroke-width="{_svg_number(stroke_width)}" '
+                + 'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+            current.clear()
+
+    for command in canonical_plan.commands:
+        if isinstance(command, PenDown):
+            flush_current()
+            pen_down = True
+            continue
+        if isinstance(command, PenUp):
+            flush_current()
+            pen_down = False
+            continue
+        if isinstance(command, TravelMove):
+            continue
+        if not pen_down:
+            continue
+        start = _command_start(command)
+        if start is None:
+            continue
+        if not current:
+            current.append(f'M {_svg_number(start[0])} {_svg_number(start[1])}')
+        if isinstance(command, LineSegment):
+            current.append(f'L {_svg_number(command.end[0])} {_svg_number(command.end[1])}')
+        elif isinstance(command, QuadraticBezier):
+            current.append(
+                f'Q {_svg_number(command.control[0])} {_svg_number(command.control[1])} '
+                f'{_svg_number(command.end[0])} {_svg_number(command.end[1])}'
+            )
+        elif isinstance(command, CubicBezier):
+            current.append(
+                f'C {_svg_number(command.control1[0])} {_svg_number(command.control1[1])} '
+                f'{_svg_number(command.control2[0])} {_svg_number(command.control2[1])} '
+                f'{_svg_number(command.end[0])} {_svg_number(command.end[1])}'
+            )
+    flush_current()
+    body = ''.join(paths)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {_svg_number(board_width_m)} {_svg_number(board_height_m)}" '
+        f'width="{_svg_number(board_width_m)}" height="{_svg_number(board_height_m)}" '
+        'role="img" aria-label="Sketch centerline smooth curve preview">'
+        f'<rect x="0" y="0" width="{_svg_number(board_width_m)}" '
+        f'height="{_svg_number(board_height_m)}" fill="white"/>'
+        f'{body}</svg>'
+    )
+
+
+def _canonical_primitive_counts(plan: CanonicalPathPlan) -> dict[str, int]:
+    line_count = sum(isinstance(command, LineSegment) for command in plan.commands)
+    quadratic_count = sum(isinstance(command, QuadraticBezier) for command in plan.commands)
+    cubic_count = sum(isinstance(command, CubicBezier) for command in plan.commands)
+    return {
+        'line_primitive_count': int(line_count),
+        'quadratic_primitive_count': int(quadratic_count),
+        'cubic_primitive_count': int(cubic_count),
+        'curve_primitive_count': int(quadratic_count + cubic_count),
+    }
+
+
+def _slowest_timing_stage(timing: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = {
+        key: float(value)
+        for key, value in timing.items()
+        if key.endswith('_time_ms') and key != 'preview_total_time_ms'
+    }
+    if not candidates:
+        return None
+    key, value = max(candidates.items(), key=lambda item: item[1])
+    return {'stage': key.removesuffix('_time_ms'), 'time_ms': float(value)}
+
+
+def _sketch_preview_response(
+    plan,
+    *,
+    canonical_plan: CanonicalPathPlan,
+    board_width_m: float,
+    board_height_m: float,
+    preview_geometry_mode: str,
+    use_smooth_svg: bool,
+    curve_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     preview = _sketch_preview_strokes(plan)
+    metadata = dict(plan.metadata)
+    base_metadata_warnings = tuple(str(item) for item in metadata.get('warnings') or ())
+    curve_metadata = dict(curve_metadata or {})
+    metadata.update(curve_metadata)
+    metadata['preview_geometry_mode'] = preview_geometry_mode
+    timing = dict(metadata.get('timing') or {})
+    timing['slowest_stage'] = _slowest_timing_stage(timing)
+    metadata['timing'] = timing
+    if 'curve_fit_time_ms' in timing:
+        metadata['curve_fit_time_ms'] = float(timing['curve_fit_time_ms'])
+    primitive_counts = _canonical_primitive_counts(canonical_plan)
+    metadata.update(primitive_counts)
+    warnings = list(plan.metrics.warnings)
+    warnings.extend(base_metadata_warnings)
+    warnings.extend(str(item) for item in curve_metadata.get('warnings') or ())
+    deduped_warnings = list(dict.fromkeys(warnings))
+    metadata['warnings'] = tuple(deduped_warnings)
+    preview_svg = (
+        _smooth_sketch_preview_svg(
+            canonical_plan,
+            board_width_m=board_width_m,
+            board_height_m=board_height_m,
+        )
+        if use_smooth_svg
+        else _sketch_preview_svg(
+            preview['strokes'],
+            board_width_m=board_width_m,
+            board_height_m=board_height_m,
+        )
+    )
     return {
         'ok': True,
         'mode': plan.mode.value,
         'stroke_count': len(plan.strokes),
         'point_count': sum(len(stroke.points) for stroke in plan.strokes),
-        'canonical_command_count': int(canonical_command_count),
+        'canonical_command_count': len(canonical_plan.commands),
         'metrics': asdict(plan.metrics),
-        'metadata': dict(plan.metadata),
+        'metadata': metadata,
         'bounds': _drawing_plan_bounds(plan),
-        'warnings': list(plan.metrics.warnings),
-        'preview_svg': _sketch_preview_svg(
-            preview['strokes'],
-            board_width_m=board_width_m,
-            board_height_m=board_height_m,
-        ),
+        'warnings': deduped_warnings,
+        'preview_svg': preview_svg,
         'preview': preview,
     }
 
@@ -1516,6 +1660,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
         optimization_preset: Optional[str] = Form(None),
+        preview_geometry_mode: Optional[str] = Form(None),
+        curve_tolerance_px: Optional[float] = Form(None),
+        curve_tolerance_m: Optional[float] = Form(None),
         scale_percent: Optional[float] = Form(None),
         center_x_m: Optional[float] = Form(None),
         center_y_m: Optional[float] = Form(None),
@@ -1530,10 +1677,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=min(float(shared.board.width), float(shared.board.height)) * 0.45,
             )
             sketch_max_image_dim = _coerce_int(
-                1200 if max_image_dim is None else max_image_dim,
+                1000 if max_image_dim is None else max_image_dim,
                 field_name='max_image_dim',
-                minimum=16,
-                maximum=4096,
+                minimum=500,
+                maximum=1600,
             )
             sketch_min_component_area_px = _coerce_int(
                 2 if min_component_area_px is None else min_component_area_px,
@@ -1572,6 +1719,27 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=180.0,
             )
             sketch_optimization_preset = str(optimization_preset or 'detail').strip().lower()
+            sketch_preview_geometry_mode = str(preview_geometry_mode or 'smooth_curves').strip().lower()
+            if sketch_preview_geometry_mode not in {'smooth_curves', 'polyline'}:
+                raise HTTPException(
+                    status_code=422,
+                    detail="preview_geometry_mode must be one of: smooth_curves, polyline",
+                )
+            sketch_curve_tolerance_px = _coerce_float(
+                1.0 if curve_tolerance_px is None else curve_tolerance_px,
+                field_name='curve_tolerance_px',
+                minimum=0.05,
+                maximum=50.0,
+            )
+            sketch_curve_tolerance_m = (
+                None if curve_tolerance_m is None
+                else _coerce_float(
+                    curve_tolerance_m,
+                    field_name='curve_tolerance_m',
+                    minimum=1.0e-6,
+                    maximum=0.25,
+                )
+            )
             sketch_scale_percent = _coerce_float(
                 100.0 if scale_percent is None else scale_percent,
                 field_name='scale_percent',
@@ -1597,6 +1765,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 )
             )
             try:
+                preview_started = time.perf_counter()
                 plan = vectorize_sketch_image_to_plan(
                     content,
                     board_width_m=float(shared.board.width),
@@ -1614,7 +1783,43 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     center_x_m=sketch_center_x_m,
                     center_y_m=sketch_center_y_m,
                 )
-                canonical_plan = drawing_path_plan_to_canonical(plan)
+                curve_metadata: dict[str, Any] = {
+                    'preview_geometry_mode': sketch_preview_geometry_mode,
+                    'curve_tolerance_px': float(sketch_curve_tolerance_px),
+                }
+                curve_fit_start = time.perf_counter()
+                if sketch_preview_geometry_mode == 'smooth_curves':
+                    scale_m_per_px = float(dict(plan.metadata).get('scale_m_per_px') or 0.0)
+                    effective_curve_tolerance_m = (
+                        float(sketch_curve_tolerance_m)
+                        if sketch_curve_tolerance_m is not None
+                        else max(1.0e-6, float(sketch_curve_tolerance_px) * scale_m_per_px)
+                    )
+                    smooth_result = drawing_path_plan_to_smooth_canonical(
+                        plan,
+                        curve_tolerance_m=effective_curve_tolerance_m,
+                        max_curve_segment_points=32,
+                        max_fit_time_ms=3000.0,
+                    )
+                    canonical_plan = smooth_result.plan
+                    curve_metadata.update(dict(smooth_result.metadata))
+                    curve_metadata['curve_tolerance_m'] = float(effective_curve_tolerance_m)
+                else:
+                    canonical_plan = drawing_path_plan_to_canonical(plan)
+                    curve_metadata.update(
+                        {
+                            'curve_tolerance_m': None if sketch_curve_tolerance_m is None else float(sketch_curve_tolerance_m),
+                            'line_primitive_count': sum(isinstance(command, LineSegment) for command in canonical_plan.commands),
+                            'quadratic_primitive_count': 0,
+                            'cubic_primitive_count': 0,
+                            'curve_primitive_count': 0,
+                        }
+                    )
+                curve_fit_time_ms = (time.perf_counter() - curve_fit_start) * 1000.0
+                timing = dict(plan.metadata.get('timing') or {})
+                timing['curve_fit_time_ms'] = float(curve_fit_time_ms)
+                timing['preview_total_time_ms'] = (time.perf_counter() - preview_started) * 1000.0
+                plan.metadata['timing'] = timing
             except RuntimeError as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
             except ValueError as exc:
@@ -1623,9 +1828,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             return JSONResponse(
                 _sketch_preview_response(
                     plan,
-                    canonical_command_count=len(canonical_plan.commands),
+                    canonical_plan=canonical_plan,
                     board_width_m=float(shared.board.width),
                     board_height_m=float(shared.board.height),
+                    preview_geometry_mode=sketch_preview_geometry_mode,
+                    use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
+                    curve_metadata=curve_metadata,
                 )
             )
         finally:

@@ -21,6 +21,16 @@ def _simple_sketch_png() -> bytes:
     return _encode_png(image)
 
 
+def _curved_sketch_png() -> bytes:
+    image = numpy.full((140, 220, 3), 255, dtype=numpy.uint8)
+    points = numpy.array(
+        [[20, 105], [45, 60], [85, 35], [135, 35], [180, 70], [205, 110]],
+        dtype=numpy.int32,
+    )
+    cv2.polylines(image, [points], False, (0, 0, 0), 5, lineType=cv2.LINE_AA)
+    return _encode_png(image)
+
+
 class _FakeNode:
     def __init__(self) -> None:
         self.publish_count = 0
@@ -57,6 +67,9 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
             'scale_percent': '80',
             'center_x_m': '3.0',
             'center_y_m': '1.5',
+            'preview_geometry_mode': 'smooth_curves',
+            'curve_tolerance_px': '1.25',
+            'max_image_dim': '1000',
         },
     )
 
@@ -79,7 +92,13 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['metadata']['scale_percent'] == 80.0
     assert payload['metadata']['center_x_m'] == 3.0
     assert payload['metadata']['center_y_m'] == 1.5
+    assert payload['metadata']['preview_geometry_mode'] == 'smooth_curves'
+    assert payload['metadata']['curve_tolerance_px'] == 1.25
+    assert payload['metadata']['max_image_dim'] == 1000
+    assert payload['metadata']['timing']['curve_fit_time_ms'] >= 0.0
+    assert payload['metadata']['line_primitive_count'] >= 1
     assert 'effective_threshold_value' in payload['metadata']
+    assert 'timing' in payload['metadata']
     assert 'merge_count' in payload['metadata']
     assert 'removed_short_stroke_count' in payload['metadata']
     assert 'fitted_width_m' in payload['metadata']
@@ -95,6 +114,61 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['preview']['max_points'] > 0
     assert payload['preview']['returned_point_count'] <= payload['preview']['max_points']
     assert payload['preview']['original_point_count'] == payload['point_count']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_endpoint_returns_smooth_curve_svg() -> None:
+    client, runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
+        data={
+            'preview_geometry_mode': 'smooth_curves',
+            'curve_tolerance_px': '3.0',
+            'optimization_preset': 'detail',
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['metadata']['preview_geometry_mode'] == 'smooth_curves'
+    assert payload['metadata']['curve_primitive_count'] >= 1
+    assert ' Q ' in payload['preview_svg'] or ' C ' in payload['preview_svg']
+    assert '<polyline' not in payload['preview_svg']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_endpoint_keeps_polyline_debug() -> None:
+    client, runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'polyline'},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['metadata']['preview_geometry_mode'] == 'polyline'
+    assert payload['metadata']['curve_primitive_count'] == 0
+    assert '<polyline' in payload['preview_svg']
+    assert ' Q ' not in payload['preview_svg']
+    assert ' C ' not in payload['preview_svg']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_endpoint_rejects_unknown_geometry_mode() -> None:
+    client, runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'magic'},
+    )
+
+    assert response.status_code == 422
+    assert 'preview_geometry_mode' in response.json()['detail']
     assert runtime.node.publish_count == 0
 
 

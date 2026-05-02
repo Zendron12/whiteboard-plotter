@@ -29,7 +29,9 @@ before path tracing.
    preset enables it.
 11. Scale and center the result into board coordinates while preserving aspect
    ratio.
-12. Emit a `DrawingPathPlan` with metrics and processing metadata.
+12. Emit a point-stroke `DrawingPathPlan` with metrics and processing metadata.
+13. For preview only, optionally fit smooth canonical curve primitives from the
+   point strokes.
 
 If no skeletonization backend is available, the pipeline raises `RuntimeError`.
 It does not fall back to the unthinned binary mask.
@@ -61,6 +63,10 @@ Fields:
 - `merge_max_angle_deg`: optional maximum endpoint direction angle for merging.
 - `optimization_preset`: optional `raw`, `detail`, `balanced`, `fast`, or
   `custom`.
+- `preview_geometry_mode`: optional `smooth_curves` or `polyline`.
+- `curve_tolerance_px`: optional curve fitting tolerance in processed pixels.
+- `curve_tolerance_m`: optional curve fitting tolerance in board meters; when
+  supplied it takes precedence over `curve_tolerance_px`.
 - `scale_percent`: optional scale applied after fit-to-board.
 - `center_x_m`: optional board-space drawing center x coordinate.
 - `center_y_m`: optional board-space drawing center y coordinate.
@@ -93,21 +99,27 @@ Response fields:
 
 The SVG preview uses the board dimensions as its `viewBox` and preserves the
 board coordinate frame: origin at top-left, x right, y down.
+In `smooth_curves` mode, `preview_svg` is generated from real SVG path commands
+including `Q` and `C` for existing canonical `QuadraticBezier` and
+`CubicBezier` primitives where fitting succeeds. In `polyline` mode, the SVG
+uses polylines and is intended as a debug view of the raw point-stroke output.
 
 ## Existing UI Preview
 
 The existing File upload section exposes this mode as a preview-only option.
 Choose a PNG/JPG in the normal file input, optionally adjust `Sketch Margin (m)`,
-`Optimization Preset`, `Sketch Noise Area (px)`, Line Sensitivity, Min Stroke
-Length, Stroke Merge Gap, Simplify Epsilon, Sketch Scale, and Sketch Center X/Y,
-then click `Preview as Sketch Centerline`.
+`Optimization Preset`, `Preview Geometry`, `Sketch Max Image Dim`, Curve
+Tolerance, `Sketch Noise Area (px)`, Line Sensitivity, Min Stroke Length,
+Stroke Merge Gap, Simplify Epsilon, Sketch Scale, and Sketch Center X/Y, then
+click `Preview as Sketch Centerline`.
 
 The UI calls `/api/sketch-centerline/preview`, displays the returned
 `preview_svg`, and draws the returned board-space preview strokes on the board
 canvas. It also shows stroke and point counts, canonical command count, bounds,
 preview truncation status, raw/final stroke counts, merge counts, selected
-optimization preset, effective merge/simplification settings, skeleton backend,
-threshold information, placement metadata, and any warnings.
+optimization preset, preview geometry mode, curve/line primitive counts, timing
+stages, effective merge/simplification settings, skeleton backend, threshold
+information, placement metadata, and any warnings.
 
 ## Tuning Notes
 
@@ -137,6 +149,14 @@ it dashed. Sketch Centerline strokes are still preview-only, but the board
 canvas now draws them as solid preview strokes while keeping `Commit File`
 disabled.
 
+The polygonal straight-edge look came from representing every traced centerline
+as adjacent point-to-point `LineSegment` commands. The current smooth preview
+path keeps the raw `DrawingPathPlan` unchanged, then fits board-space point
+strokes into canonical `QuadraticBezier` and `CubicBezier` commands for the SVG
+preview. This is not just styling: use `Preview Geometry = Polyline Debug` to
+compare the raw point output against `Smooth Curves` and verify whether the SVG
+contains real curve primitives.
+
 Scale and Center controls are placement-only. The default fits the sketch inside
 the board margin and auto-centers it. `Sketch Scale (%)` scales that fitted
 drawing around its center. Empty Center X/Y keeps auto-center; supplied values
@@ -145,9 +165,11 @@ are rejected instead of clipped.
 
 For detailed anime or line-art sketches, start with Line Sensitivity `0.25` to
 `0.45`, lower Noise Area to `1..4` to keep small components, keep Min Stroke
-Length around `1..3`, keep Stroke Merge Gap at `0` in the `detail` preset, and
-use Simplify Epsilon `0..0.5`. Avoid high sensitivity or merge gap values
-because they can add noise or join unrelated hair, clothing, or body outlines.
+Length around `1..3`, keep Stroke Merge Gap at `0..1` in the `detail` preset,
+use Simplify Epsilon `0..0.25`, choose `Smooth Curves`, set Curve Tolerance
+around `0.75..1.5 px`, and use Sketch Max Image Dim `800..1200` depending on
+speed/detail needs. Avoid high sensitivity or merge gap values because they can
+add noise or join unrelated hair, clothing, or body outlines.
 
 ## Optimization Presets
 
@@ -167,6 +189,22 @@ Line Sensitivity is independent from these presets. It controls which pixels
 survive thresholding; the optimization preset controls how traced strokes are
 cleaned, merged, and simplified after skeletonization.
 
+## Performance Diagnostics
+
+The preview response includes `metadata.timing` for decode, resize, normalize,
+threshold, cleanup, skeletonization, tracing, simplification, merge, curve fit,
+scale, and total preview time. It also reports the slowest stage. This is CPU
+processing; large detailed sketches can be slow because skeletonization and
+graph tracing scale with foreground pixels, while endpoint merge and curve fit
+scale with stroke/point count.
+
+`Sketch Max Image Dim` is the first speed control: lower it to `800` or `600`
+for faster preview, or raise toward `1200` for more detail. Merge is disabled
+for the `raw` and default `detail` presets, and merge-enabled presets are capped
+by time, pass count, and accepted merge count so one preview does not run for
+many minutes. Curve fitting is also time-capped; if it exceeds its budget, the
+remaining spans stay as line segments and a warning is returned.
+
 This path does not set an upload id, does not create a commit request, and does
 not publish to the robot. `Commit File` is disabled while the Sketch Centerline
 preview is active. Drawing/commit integration remains a later task; the normal
@@ -180,6 +218,10 @@ The endpoint validates that the produced `DrawingPathPlan` can convert through
 `PrimitivePathPlan`, does not call Webots, and does not command the robot.
 Runtime drawing integration is intentionally deferred until preview behavior is
 stable and endpoint-level safety checks are added.
+
+Smooth curve preview is also preview-only. When Draw Sketch Preview is added
+later, the runtime integration must explicitly choose whether to publish the
+smooth canonical plan or the polyline canonical plan.
 
 ## Limitations
 

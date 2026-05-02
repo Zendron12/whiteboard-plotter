@@ -1198,6 +1198,21 @@
                     </select>
                   </div>
                   <div class="field">
+                    <label for="sketch-preview-geometry">Preview Geometry</label>
+                    <select id="sketch-preview-geometry">
+                      <option value="smooth_curves" selected>Smooth Curves</option>
+                      <option value="polyline">Polyline Debug</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="sketch-max-image-dim">Sketch Max Image Dim</label>
+                    <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-curve-tolerance">Curve Tolerance (px)</label>
+                    <input id="sketch-curve-tolerance" type="number" min="0.05" step="0.05" value="1.0">
+                  </div>
+                  <div class="field">
                     <label for="sketch-margin">Sketch Margin (m)</label>
                     <input id="sketch-margin" type="number" min="0" step="0.01" value="0.05">
                   </div>
@@ -1460,6 +1475,9 @@
         fileCommitBtn: document.getElementById('file-commit-btn'),
         fileMeta: document.getElementById('file-meta'),
         sketchOptimizationPreset: document.getElementById('sketch-optimization-preset'),
+        sketchPreviewGeometry: document.getElementById('sketch-preview-geometry'),
+        sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
+        sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
         sketchMargin: document.getElementById('sketch-margin'),
         sketchMinComponent: document.getElementById('sketch-min-component'),
         sketchLineSensitivity: document.getElementById('sketch-line-sensitivity'),
@@ -3366,6 +3384,45 @@
         return `x ${formatRange(xMin, xMax)} · y ${formatRange(yMin, yMax)}`;
       }
 
+      function formatSketchTiming(timing) {
+        if (!timing || typeof timing !== 'object') {
+          return 'timing unavailable';
+        }
+        const stagePairs = [
+          ['Decode', 'decode_time_ms'],
+          ['Resize', 'resize_time_ms'],
+          ['Normalize', 'normalize_time_ms'],
+          ['Threshold', 'threshold_time_ms'],
+          ['Cleanup', 'cleanup_time_ms'],
+          ['Skeletonize', 'skeleton_time_ms'],
+          ['Trace', 'trace_time_ms'],
+          ['Simplify', 'simplify_time_ms'],
+          ['Merge', 'merge_time_ms'],
+          ['Curve Fit', 'curve_fit_time_ms'],
+          ['Scale', 'scale_time_ms'],
+          ['Total', 'preview_total_time_ms'],
+        ];
+        const rendered = stagePairs.map(([label, key]) => {
+          const value = Number(timing[key]);
+          return `✓ ${label} ${Number.isFinite(value) ? value.toFixed(0) : '--'} ms`;
+        });
+        const slowest = timing.slowest_stage || {};
+        const slowStage = String(slowest.stage || '');
+        const slowMs = Number(slowest.time_ms);
+        let hint = '';
+        if (slowStage === 'skeleton') {
+          hint = ' · hint lower max dim';
+        } else if (slowStage === 'merge') {
+          hint = ' · hint use Raw/Detail or lower merge gap';
+        } else if (slowStage === 'curve_fit') {
+          hint = ' · hint increase tolerance or use Polyline Debug';
+        }
+        const slowText = slowStage
+          ? `slowest ${slowStage} ${Number.isFinite(slowMs) ? slowMs.toFixed(0) : '--'} ms${hint}`
+          : 'slowest --';
+        return `${slowText}\n${rendered.join(' · ')}`;
+      }
+
       function sketchDiagnosticsText(payload) {
         const metadata = payload.metadata || {};
         const preview = payload.preview || {};
@@ -3378,11 +3435,15 @@
         const mergeGap = Number(metadata.effective_merge_gap_px ?? metadata.merge_gap_px);
         const mergeAngle = Number(metadata.effective_merge_max_angle_deg ?? metadata.merge_max_angle_deg);
         const minStroke = Number(metadata.effective_min_stroke_length_px ?? metadata.min_stroke_length_px);
+        const curveTolerancePx = Number(metadata.curve_tolerance_px);
+        const curveToleranceM = Number(metadata.curve_tolerance_m);
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
         return [
           `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
+          `geometry ${metadata.preview_geometry_mode || '--'} · curves ${Number(metadata.curve_primitive_count || 0)} · Q ${Number(metadata.quadratic_primitive_count || 0)} · C ${Number(metadata.cubic_primitive_count || 0)} · lines ${Number(metadata.line_primitive_count || 0)}`,
+          `curve tol ${Number.isFinite(curveTolerancePx) ? curveTolerancePx.toFixed(2) : '--'} px · ${Number.isFinite(curveToleranceM) ? curveToleranceM.toFixed(5) : '--'} m · max dim ${Number(metadata.max_image_dim || 0) || '--'}`,
           `preset ${metadata.optimization_preset || '--'} · simplify ${Number.isFinite(simplify) ? simplify.toFixed(2) : '--'} · min stroke ${Number.isFinite(minStroke) ? minStroke.toFixed(1) : '--'} px`,
           `merge ${metadata.merge_enabled ? 'on' : 'off'} · gap ${Number.isFinite(mergeGap) ? mergeGap.toFixed(1) : '--'} px · angle ${Number.isFinite(mergeAngle) ? mergeAngle.toFixed(0) : '--'}°`,
           `raw ${Number(metadata.raw_stroke_count || 0)} · final ${Number(metadata.final_stroke_count || payload.stroke_count || 0)} · merged ${Number(metadata.merge_count || 0)} · removed short ${Number(metadata.removed_short_stroke_count || 0)}`,
@@ -3391,6 +3452,7 @@
           `sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}`,
           `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
           `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
+          formatSketchTiming(metadata.timing),
         ].join('\n');
       }
 
@@ -3576,6 +3638,9 @@
         const form = new FormData();
         form.append('file', file);
         form.append('optimization_preset', String(dom.sketchOptimizationPreset.value || 'detail'));
+        form.append('preview_geometry_mode', String(dom.sketchPreviewGeometry.value || 'smooth_curves'));
+        form.append('max_image_dim', String(Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000))))));
+        form.append('curve_tolerance_px', String(Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0))));
         form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
         form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2)))));
         form.append('line_sensitivity', String(Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0)))));

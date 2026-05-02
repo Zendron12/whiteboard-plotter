@@ -9,6 +9,7 @@ import numpy
 import pytest
 
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline import sketch_centerline
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.image_pipeline.types import DrawingPathPlan, PipelineMode
 
@@ -102,6 +103,51 @@ def test_black_line_image_produces_board_drawing_path_plan() -> None:
         'skimage.morphology.skeletonize',
         'cv2.ximgproc.thinning',
     }
+
+
+def test_timing_metadata_exists_and_is_non_negative() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+    )
+
+    timing = plan.metadata['timing']
+    expected = {
+        'decode_time_ms',
+        'resize_time_ms',
+        'normalize_time_ms',
+        'threshold_time_ms',
+        'cleanup_time_ms',
+        'skeleton_time_ms',
+        'trace_time_ms',
+        'simplify_time_ms',
+        'merge_time_ms',
+        'curve_fit_time_ms',
+        'scale_time_ms',
+        'preview_total_time_ms',
+    }
+    assert expected.issubset(timing.keys())
+    for key in expected:
+        assert timing[key] >= 0.0
+
+
+def test_max_image_dim_affects_processed_image_size() -> None:
+    high = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        max_image_dim=180,
+    )
+    low = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        max_image_dim=80,
+    )
+
+    assert high.metadata['processed_image_size']['width_px'] > low.metadata['processed_image_size']['width_px']
+    assert low.metadata['max_image_dim'] == 80
 
 
 def test_black_on_white_and_white_on_black_both_work() -> None:
@@ -237,6 +283,24 @@ def test_custom_preset_can_merge_broken_line_segments() -> None:
     assert plan.metadata['effective_min_stroke_length_px'] == pytest.approx(1.0)
     assert plan.metadata['effective_simplify_epsilon_px'] == pytest.approx(0.0)
     assert plan.metadata['merge_count'] == 1
+
+
+def test_merge_cap_returns_warning(monkeypatch) -> None:
+    monkeypatch.setattr(sketch_centerline, '_MERGE_MAX_ITERATIONS', 0)
+
+    plan = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='custom',
+        merge_gap_px=20.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert plan.metadata['merge_count'] == 0
+    assert plan.metadata['merge_warnings']
+    assert any('merge stopped' in warning for warning in plan.metadata['warnings'])
 
 
 def test_fast_preset_reduces_strokes_compared_to_detail() -> None:
