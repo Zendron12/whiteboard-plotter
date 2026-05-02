@@ -1312,7 +1312,7 @@
                   <div class="sketch-preview-head">
                     <div>
                       <div id="sketch-preview-title" class="sketch-preview-title">SVG Preview</div>
-                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board canvas is a sampled Polyline Canvas Preview.</div>
+                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.</div>
                     </div>
                     <div class="sketch-preview-actions">
                       <button id="sketch-open-svg-btn" class="quiet-btn" type="button" disabled>Open SVG Preview in New Tab</button>
@@ -1621,6 +1621,10 @@
         sketchPreviewId: null,
         sketchPreviewUrl: null,
         sketchPreviewSvgText: '',
+        sketchPreviewPayload: null,
+        sketchBoardOverlayImage: null,
+        sketchBoardOverlayLoaded: false,
+        sketchBoardOverlayToken: 0,
         sketchPreviewBusy: false,
         sketchDrawBusy: false,
       };
@@ -2004,7 +2008,58 @@
         };
       }
 
+      function clearSketchBoardOverlay() {
+        state.sketchBoardOverlayToken += 1;
+        if (state.sketchBoardOverlayImage) {
+          state.sketchBoardOverlayImage.onload = null;
+          state.sketchBoardOverlayImage.onerror = null;
+        }
+        state.sketchBoardOverlayImage = null;
+        state.sketchBoardOverlayLoaded = false;
+      }
+
+      function sketchBoardOverlayActive() {
+        return Boolean(
+          state.vectorPreview &&
+          state.vectorPreview.sourceType === 'sketch_centerline' &&
+          state.sketchPreviewUrl &&
+          state.sketchBoardOverlayImage &&
+          state.sketchBoardOverlayLoaded
+        );
+      }
+
+      function prepareSketchBoardOverlay() {
+        clearSketchBoardOverlay();
+        if (!state.sketchPreviewUrl) {
+          return;
+        }
+        const token = state.sketchBoardOverlayToken + 1;
+        state.sketchBoardOverlayToken = token;
+        const image = new Image();
+        state.sketchBoardOverlayImage = image;
+        state.sketchBoardOverlayLoaded = false;
+        image.onload = () => {
+          if (state.sketchBoardOverlayToken !== token || state.sketchBoardOverlayImage !== image) {
+            return;
+          }
+          state.sketchBoardOverlayLoaded = true;
+          updateSketchPreviewDiagnostics();
+          refreshUiState({ redrawBoard: true });
+        };
+        image.onerror = () => {
+          if (state.sketchBoardOverlayToken !== token || state.sketchBoardOverlayImage !== image) {
+            return;
+          }
+          state.sketchBoardOverlayLoaded = false;
+          updateSketchPreviewDiagnostics();
+          refreshUiState({ redrawBoard: true });
+        };
+        image.src = state.sketchPreviewUrl;
+      }
+
       function revokePreviewResources(previewState) {
+        clearSketchBoardOverlay();
+        state.sketchPreviewPayload = null;
         if (!previewState || !previewState.rasterOverlay) {
           if (state.sketchPreviewUrl) {
             URL.revokeObjectURL(state.sketchPreviewUrl);
@@ -3036,9 +3091,40 @@
         return 'rgba(201, 95, 56, 0.95)';
       }
 
+      function drawSketchSvgBoardOverlay(layout) {
+        if (!sketchBoardOverlayActive()) {
+          return false;
+        }
+        const boardWidth = Number(layout.board.width);
+        const boardHeight = Number(layout.board.height);
+        if (!Number.isFinite(boardWidth) || !Number.isFinite(boardHeight) || boardWidth <= 0 || boardHeight <= 0) {
+          return false;
+        }
+        const topLeft = boardToCanvas(layout, 0, 0);
+        const bottomRight = boardToCanvas(layout, boardWidth, boardHeight);
+        const x = Math.min(topLeft.x, bottomRight.x);
+        const y = Math.min(topLeft.y, bottomRight.y);
+        const width = Math.abs(bottomRight.x - topLeft.x);
+        const height = Math.abs(bottomRight.y - topLeft.y);
+        if (width <= 0 || height <= 0) {
+          return false;
+        }
+
+        ctx.save();
+        roundedRect(ctx, layout.originX, layout.originY, layout.boardPixelWidth, layout.boardPixelHeight, 22);
+        ctx.clip();
+        ctx.globalAlpha = 0.92;
+        ctx.drawImage(state.sketchBoardOverlayImage, x, y, width, height);
+        ctx.restore();
+        return true;
+      }
+
       function drawVectorPreview(layout) {
         const previewState = state.vectorPreview;
         if (!previewIsBoardVisible(previewState)) {
+          return;
+        }
+        if (previewState.sourceType === 'sketch_centerline' && drawSketchSvgBoardOverlay(layout)) {
           return;
         }
         const preview = previewState && previewState.preview ? previewState.preview : null;
@@ -3511,11 +3597,22 @@
 
       function sketchTruncationWarning(payload) {
         const preview = payload && payload.preview ? payload.preview : {};
-        if (!preview.truncated) {
-          return '';
-        }
+        const hasSvg = Boolean(payload && payload.preview_svg);
+        const overlayActive = sketchBoardOverlayActive();
         const ratio = sketchPreviewPointRatio(preview);
-        return `Board canvas preview is truncated. Full result is shown in the SVG preview. Canvas points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%).`;
+        const pointText = ratio.original > 0
+          ? `Sampled points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%)${preview.truncated ? ' · truncated' : ''}.`
+          : 'Sampled point counts unavailable.';
+        if (hasSvg && overlayActive) {
+          return `Board workspace is showing the full SVG preview. ${pointText} Sampled points are fallback/debug only.`;
+        }
+        if (hasSvg) {
+          return `Board workspace is showing a sampled preview only while the SVG overlay loads. Full result is available in the SVG preview. ${pointText}`;
+        }
+        if (preview.truncated) {
+          return `Board workspace is showing a sampled preview only. Full result is available in the SVG preview when one is returned. ${pointText}`;
+        }
+        return `Board workspace is showing a sampled preview only. ${pointText}`;
       }
 
       function formatSketchTiming(timing) {
@@ -3604,6 +3701,41 @@
         return lines.join('\n');
       }
 
+      function updateSketchPreviewDiagnostics(payload = state.sketchPreviewPayload) {
+        if (!payload) {
+          return;
+        }
+        const workspaceStatus = sketchTruncationWarning(payload);
+        const warning = [
+          workspaceStatus,
+          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
+        ].filter(Boolean).join(' ');
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = warning;
+          dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
+        }
+        if (dom.sketchPreviewDiag) {
+          dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
+        }
+      }
+
+      function clearSketchBoardWorkspacePreviewAfterDraw(message) {
+        if (state.vectorPreview && state.vectorPreview.sourceType === 'sketch_centerline') {
+          state.vectorPreview = null;
+          state.previewInteraction = null;
+        }
+        clearSketchBoardOverlay();
+        state.sketchPreviewId = null;
+        setSketchDrawStatus(message);
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = 'Sketch preview remains in the File tab for reference. Board workspace preview was cleared after publish; live robot drawing/trail is shown there.';
+          dom.sketchPreviewWarning.classList.add('active');
+        }
+        dom.previewChip.innerHTML = '<strong>Preview</strong> live drawing';
+        dom.summaryPreview.textContent = 'Sketch preview cleared; showing live robot drawing/trail.';
+        refreshUiState({ redrawBoard: true });
+      }
+
       function setSketchPreviewInlineStatus(kind, message) {
         if (!dom.sketchPreviewBox || !dom.sketchPreviewImg || !dom.sketchPreviewDiag) {
           return;
@@ -3618,6 +3750,8 @@
           state.sketchPreviewUrl = null;
         }
         state.sketchPreviewSvgText = '';
+        state.sketchPreviewPayload = null;
+        clearSketchBoardOverlay();
         dom.sketchPreviewImg.removeAttribute('src');
         dom.sketchPreviewImg.style.display = 'none';
         if (dom.sketchPreviewWarning) {
@@ -3628,7 +3762,7 @@
           dom.sketchPreviewTitle.textContent = 'SVG Preview';
         }
         if (dom.sketchPreviewNote) {
-          dom.sketchPreviewNote.textContent = 'Full SVG output. Board canvas is a sampled Polyline Canvas Preview.';
+          dom.sketchPreviewNote.textContent = 'Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = true;
@@ -3654,14 +3788,17 @@
         }
         const svgText = String(payload.preview_svg || '');
         state.sketchPreviewSvgText = svgText;
+        state.sketchPreviewPayload = payload;
         if (svgText) {
           const blob = new Blob([svgText], { type: 'image/svg+xml' });
           state.sketchPreviewUrl = URL.createObjectURL(blob);
           dom.sketchPreviewImg.src = state.sketchPreviewUrl;
           dom.sketchPreviewImg.style.display = '';
+          prepareSketchBoardOverlay();
         } else {
           dom.sketchPreviewImg.removeAttribute('src');
           dom.sketchPreviewImg.style.display = 'none';
+          clearSketchBoardOverlay();
         }
         const metadata = payload.metadata || {};
         const modeLabel = metadata.preview_geometry_mode === 'polyline'
@@ -3672,16 +3809,8 @@
         }
         if (dom.sketchPreviewNote) {
           dom.sketchPreviewNote.textContent = modeLabel === 'Smooth Curves'
-            ? 'Full Smooth Curves SVG output. Board canvas is a sampled Polyline Canvas Preview.'
-            : 'Full Polyline Debug SVG output. Board canvas is a sampled Polyline Canvas Preview.';
-        }
-        const warning = [
-          sketchTruncationWarning(payload),
-          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
-        ].filter(Boolean).join(' ');
-        if (dom.sketchPreviewWarning) {
-          dom.sketchPreviewWarning.textContent = warning;
-          dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
+            ? 'Full Smooth Curves SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.'
+            : 'Full Polyline Debug SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
@@ -3689,7 +3818,7 @@
         if (dom.sketchDownloadSvgBtn) {
           dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         }
-        dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
+        updateSketchPreviewDiagnostics(payload);
         dom.sketchPreviewBox.classList.add('active');
       }
 
@@ -3730,7 +3859,7 @@
         const drawAvailability = state.sketchPreviewId
           ? 'Draw Sketch Preview is available and will use the backend cached canonical plan.'
           : 'Draw Sketch Preview is unavailable because the backend did not return a preview_id.';
-        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
+        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Board Workspace uses the full SVG overlay when available; sampled points are fallback/debug. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
         setSketchDrawStatus(drawAvailability);
         setNotice('warning', 'Sketch preview ready', 'Use Draw Sketch Preview to publish the backend cached plan. Normal Commit File remains separate.');
         pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
@@ -3889,7 +4018,8 @@
         const optimizedText = payload.optimized
           ? `optimized · travel reduction ${Number.isFinite(travelReduction) ? travelReduction.toFixed(3) : '--'} m`
           : 'not optimized';
-        setSketchDrawStatus(`Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`);
+        const publishStatus = `Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`;
+        clearSketchBoardWorkspacePreviewAfterDraw(`${publishStatus} Sketch preview cleared; showing live robot drawing/trail.`);
         setNotice('success', 'Sketch draw started', `Published cached ${geometryMode} plan through the existing draw executor.`);
         pushFeed(`Sketch Centerline draw published (${geometryMode}).`, 'success');
         refreshRuntime().catch(() => {});

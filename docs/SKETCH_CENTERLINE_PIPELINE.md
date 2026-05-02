@@ -106,7 +106,7 @@ including `Q` and `C` for existing canonical `QuadraticBezier` and
 `CubicBezier` primitives where fitting succeeds. In `polyline` mode, the SVG
 uses polylines and is intended as a debug view of the raw point-stroke output.
 The SVG is the full preview output. `preview.strokes` is a capped point preview
-for the board canvas and may be truncated for performance.
+for canvas fallback/debug rendering and may be truncated for performance.
 
 ## Existing UI Preview
 
@@ -121,8 +121,8 @@ path keeps the carriage body inside the board and inside the configured safe
 cable workspace.
 
 The UI calls `/api/sketch-centerline/preview`, displays the returned
-`preview_svg`, and draws the returned board-space preview strokes on the board
-canvas. It also shows stroke and point counts, canonical command count, bounds,
+`preview_svg`, and uses that same full SVG as the Board Workspace preview
+overlay when available. It also shows stroke and point counts, canonical command count, bounds,
 preview truncation status, raw/final stroke counts, merge counts, selected
 optimization preset, preview geometry mode, curve/line primitive counts, timing
 stages, effective merge/simplification settings, skeleton backend, threshold
@@ -132,9 +132,11 @@ The File tab separates the two preview surfaces:
 
 - `SVG Preview`: full Smooth Curves or Polyline Debug SVG output. This can be
   opened in a new tab or downloaded for close inspection.
-- `Board Canvas`: sampled Polyline Canvas Preview from `preview.strokes`. If
-  the response is capped, the UI warns that the board canvas is truncated and
-  shows the full result in the SVG preview instead.
+- `Board Workspace`: full SVG overlay when `preview_svg` is available. It is
+  aligned to the same board coordinate frame as the generated plan.
+- `Sampled Canvas Preview`: fallback/debug rendering from `preview.strokes`.
+  If the response is capped, the UI reports returned/original point counts, but
+  the visible board preview should come from the full SVG overlay.
 
 ## Tuning Notes
 
@@ -265,10 +267,14 @@ endpoint returns a clear `413` response with command/primitive counts instead of
 crashing. If the preview expired or the runtime is not ready, the endpoint
 returns a clear error and does not publish.
 
-Draw Sketch Preview publishes the full backend cached canonical plan. The board
-canvas may show only a sampled `preview.strokes` subset such as
-`2399/24544 pts`; that canvas subset is display-only and is never used as the
-draw source.
+Draw Sketch Preview publishes the full backend cached canonical plan. The
+browser-side SVG overlay is display-only and is never used as the draw source.
+If the SVG overlay is unavailable, the board may fall back to a sampled
+`preview.strokes` subset such as `2399/24544 pts`; that canvas subset is also
+display-only and is never used as the draw source. After a successful Draw
+Sketch Preview publish, the Board Workspace preview overlay is cleared so the
+live robot and trail display take over. The File tab SVG preview remains visible
+for reference.
 
 `Optimize Stroke Order Before Draw` is enabled by default. It uses the existing
 canonical optimizer to reorder and reverse draw units to reduce pen-up travel
