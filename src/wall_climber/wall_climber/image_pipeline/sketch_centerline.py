@@ -80,7 +80,7 @@ def _border_pixels(gray: numpy.ndarray) -> numpy.ndarray:
     return numpy.concatenate((gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]))
 
 
-def _threshold_foreground(gray: numpy.ndarray) -> tuple[numpy.ndarray, dict[str, object]]:
+def _threshold_foreground(gray: numpy.ndarray, *, line_sensitivity: float) -> tuple[numpy.ndarray, dict[str, object]]:
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     threshold, _unused = cv2.threshold(
         blurred,
@@ -88,13 +88,22 @@ def _threshold_foreground(gray: numpy.ndarray) -> tuple[numpy.ndarray, dict[str,
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
+    sensitivity = max(0.0, min(0.95, float(line_sensitivity)))
     border_median = float(numpy.median(_border_pixels(blurred)))
     dark_foreground = border_median >= float(threshold)
+    if dark_foreground:
+        effective_threshold = float(threshold) + ((255.0 - float(threshold)) * sensitivity)
+    else:
+        effective_threshold = float(threshold) * (1.0 - sensitivity)
+    effective_threshold = max(0.0, min(255.0, effective_threshold))
     threshold_type = cv2.THRESH_BINARY_INV if dark_foreground else cv2.THRESH_BINARY
-    _threshold, binary = cv2.threshold(blurred, float(threshold), 255, threshold_type)
+    _threshold, binary = cv2.threshold(blurred, effective_threshold, 255, threshold_type)
     return binary.astype(numpy.uint8), {
         'threshold_method': 'otsu',
-        'threshold_value': float(threshold),
+        'threshold_value': float(effective_threshold),
+        'otsu_threshold_value': float(threshold),
+        'effective_threshold_value': float(effective_threshold),
+        'line_sensitivity': sensitivity,
         'foreground_polarity': 'dark_on_light' if dark_foreground else 'light_on_dark',
         'border_median': border_median,
     }
@@ -296,12 +305,188 @@ def _simplify_pixels(points: PixelStroke, *, epsilon_px: float) -> PixelStroke:
     return _dedupe_pixels(rdp(points))
 
 
+def _endpoint_direction(stroke: PixelStroke, *, at_start: bool) -> tuple[float, float]:
+    if len(stroke) < 2:
+        return (0.0, 0.0)
+    if at_start:
+        return (float(stroke[1][0] - stroke[0][0]), float(stroke[1][1] - stroke[0][1]))
+    return (float(stroke[-1][0] - stroke[-2][0]), float(stroke[-1][1] - stroke[-2][1]))
+
+
+def _angle_between_degrees(first: tuple[float, float], second: tuple[float, float]) -> float:
+    first_len = math.hypot(first[0], first[1])
+    second_len = math.hypot(second[0], second[1])
+    if first_len <= _EPS or second_len <= _EPS:
+        return 180.0
+    dot = ((first[0] * second[0]) + (first[1] * second[1])) / (first_len * second_len)
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
+
+
+def _orient_endpoint_as_end(stroke: PixelStroke, *, endpoint_is_start: bool) -> PixelStroke:
+    return tuple(reversed(stroke)) if endpoint_is_start else stroke
+
+
+def _orient_endpoint_as_start(stroke: PixelStroke, *, endpoint_is_start: bool) -> PixelStroke:
+    return stroke if endpoint_is_start else tuple(reversed(stroke))
+
+
+def _merge_joined_strokes(left: PixelStroke, right: PixelStroke) -> PixelStroke:
+    if not left:
+        return right
+    if not right:
+        return left
+    if left[-1] == right[0]:
+        return _dedupe_pixels((*left, *right[1:]))
+    return _dedupe_pixels((*left, *right))
+
+
+def _merge_candidate(
+    first: PixelStroke,
+    second: PixelStroke,
+    *,
+    first_endpoint_is_start: bool,
+    second_endpoint_is_start: bool,
+    max_angle_deg: float,
+) -> PixelStroke | None:
+    left = _orient_endpoint_as_end(first, endpoint_is_start=first_endpoint_is_start)
+    right = _orient_endpoint_as_start(second, endpoint_is_start=second_endpoint_is_start)
+    angle = _angle_between_degrees(
+        _endpoint_direction(left, at_start=False),
+        _endpoint_direction(right, at_start=True),
+    )
+    if angle > max_angle_deg:
+        return None
+    return _merge_joined_strokes(left, right)
+
+
+def _find_best_merge(
+    strokes: tuple[PixelStroke, ...],
+    *,
+    merge_gap_px: float,
+    merge_max_angle_deg: float,
+) -> tuple[int, int, PixelStroke] | None:
+    if len(strokes) < 2 or merge_gap_px <= 0.0:
+        return None
+
+    gap = float(merge_gap_px)
+    cell_size = max(gap, 1.0)
+    endpoints: list[tuple[int, bool, Pixel]] = []
+    grid: dict[tuple[int, int], list[int]] = {}
+    for stroke_index, stroke in enumerate(strokes):
+        if len(stroke) < 2:
+            continue
+        for endpoint_is_start, point in ((True, stroke[0]), (False, stroke[-1])):
+            endpoint_index = len(endpoints)
+            endpoints.append((stroke_index, endpoint_is_start, point))
+            cell = (int(math.floor(float(point[0]) / cell_size)), int(math.floor(float(point[1]) / cell_size)))
+            grid.setdefault(cell, []).append(endpoint_index)
+
+    best: tuple[float, float, int, int, PixelStroke] | None = None
+    for endpoint_index, (first_index, first_is_start, first_point) in enumerate(endpoints):
+        cell_x = int(math.floor(float(first_point[0]) / cell_size))
+        cell_y = int(math.floor(float(first_point[1]) / cell_size))
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                for other_endpoint_index in grid.get((cell_x + dx, cell_y + dy), ()):
+                    if other_endpoint_index <= endpoint_index:
+                        continue
+                    second_index, second_is_start, second_point = endpoints[other_endpoint_index]
+                    if first_index == second_index:
+                        continue
+                    distance = math.hypot(
+                        float(second_point[0] - first_point[0]),
+                        float(second_point[1] - first_point[1]),
+                    )
+                    if distance > gap:
+                        continue
+
+                    first_stroke = strokes[first_index]
+                    second_stroke = strokes[second_index]
+                    for left_index, left_is_start, right_index, right_is_start in (
+                        (first_index, first_is_start, second_index, second_is_start),
+                        (second_index, second_is_start, first_index, first_is_start),
+                    ):
+                        merged = _merge_candidate(
+                            strokes[left_index],
+                            strokes[right_index],
+                            first_endpoint_is_start=left_is_start,
+                            second_endpoint_is_start=right_is_start,
+                            max_angle_deg=merge_max_angle_deg,
+                        )
+                        if merged is None:
+                            continue
+                        left = _orient_endpoint_as_end(
+                            first_stroke if left_index == first_index else second_stroke,
+                            endpoint_is_start=left_is_start,
+                        )
+                        right = _orient_endpoint_as_start(
+                            second_stroke if right_index == second_index else first_stroke,
+                            endpoint_is_start=right_is_start,
+                        )
+                        angle = _angle_between_degrees(
+                            _endpoint_direction(left, at_start=False),
+                            _endpoint_direction(right, at_start=True),
+                        )
+                        score = (distance, angle, min(first_index, second_index), max(first_index, second_index), merged)
+                        if best is None or score[:4] < best[:4]:
+                            best = score
+
+    if best is None:
+        return None
+    _distance, _angle, first_index, second_index, merged = best
+    return first_index, second_index, merged
+
+
+def _merge_nearby_strokes(
+    strokes: tuple[PixelStroke, ...],
+    *,
+    merge_gap_px: float,
+    merge_max_angle_deg: float,
+) -> tuple[tuple[PixelStroke, ...], int]:
+    remaining = list(strokes)
+    merge_count = 0
+    max_angle = max(0.0, min(180.0, float(merge_max_angle_deg)))
+    while True:
+        candidate = _find_best_merge(
+            tuple(remaining),
+            merge_gap_px=max(0.0, float(merge_gap_px)),
+            merge_max_angle_deg=max_angle,
+        )
+        if candidate is None:
+            break
+        first_index, second_index, merged = candidate
+        low, high = sorted((first_index, second_index))
+        remaining[low] = merged
+        del remaining[high]
+        merge_count += 1
+    return tuple(remaining), merge_count
+
+
+def _remove_short_pixel_strokes(
+    strokes: tuple[PixelStroke, ...],
+    *,
+    min_stroke_length_px: float,
+) -> tuple[tuple[PixelStroke, ...], int]:
+    min_length = max(0.0, float(min_stroke_length_px))
+    kept: list[PixelStroke] = []
+    removed = 0
+    for stroke in strokes:
+        if len(stroke) < 2 or _stroke_length_px(stroke) < min_length:
+            removed += 1
+            continue
+        kept.append(stroke)
+    return tuple(kept), removed
+
+
 def _scale_strokes_to_board(
     pixel_strokes: tuple[PixelStroke, ...],
     *,
     board_width_m: float,
     board_height_m: float,
     margin_m: float,
+    scale_percent: float,
+    center_x_m: float | None,
+    center_y_m: float | None,
 ) -> tuple[tuple[Stroke, ...], dict[str, object]]:
     if board_width_m <= 0.0 or board_height_m <= 0.0:
         raise ValueError('board_width_m and board_height_m must be > 0.')
@@ -323,15 +508,26 @@ def _scale_strokes_to_board(
     source_height = max_y - min_y
     if source_width <= _EPS and source_height <= _EPS:
         raise ValueError('Traced sketch geometry is degenerate.')
+    if scale_percent <= 0.0:
+        raise ValueError('scale_percent must be > 0.')
 
     scale_candidates = []
     if source_width > _EPS:
         scale_candidates.append(available_width / source_width)
     if source_height > _EPS:
         scale_candidates.append(available_height / source_height)
-    scale = min(scale_candidates)
-    offset_x = float(margin_m) + ((available_width - (source_width * scale)) * 0.5) - (min_x * scale)
-    offset_y = float(margin_m) + ((available_height - (source_height * scale)) * 0.5) - (min_y * scale)
+    base_scale = min(scale_candidates)
+    scale = base_scale * (float(scale_percent) / 100.0)
+    fitted_width = source_width * scale
+    fitted_height = source_height * scale
+    auto_center_x = float(margin_m) + (available_width * 0.5)
+    auto_center_y = float(margin_m) + (available_height * 0.5)
+    target_center_x = auto_center_x if center_x_m is None else float(center_x_m)
+    target_center_y = auto_center_y if center_y_m is None else float(center_y_m)
+    source_center_x = (min_x + max_x) * 0.5
+    source_center_y = (min_y + max_y) * 0.5
+    offset_x = target_center_x - (source_center_x * scale)
+    offset_y = target_center_y - (source_center_y * scale)
 
     strokes: list[Stroke] = []
     for index, pixel_stroke in enumerate(pixel_strokes):
@@ -350,6 +546,22 @@ def _scale_strokes_to_board(
     if not strokes:
         raise ValueError('No non-degenerate sketch strokes remained after scaling.')
 
+    board_points = [point for stroke in strokes for point in stroke.points]
+    min_board_x = min(point.x for point in board_points)
+    max_board_x = max(point.x for point in board_points)
+    min_board_y = min(point.y for point in board_points)
+    max_board_y = max(point.y for point in board_points)
+    if (
+        min_board_x < -1.0e-7
+        or min_board_y < -1.0e-7
+        or max_board_x > float(board_width_m) + 1.0e-7
+        or max_board_y > float(board_height_m) + 1.0e-7
+    ):
+        raise ValueError(
+            'Sketch placement is outside the board bounds; reduce scale_percent '
+            'or choose a center_x_m/center_y_m closer to the board center.'
+        )
+
     return tuple(strokes), {
         'source_bounds_px': {
             'x_min': min_x,
@@ -357,7 +569,17 @@ def _scale_strokes_to_board(
             'y_min': min_y,
             'y_max': max_y,
         },
+        'base_scale_m_per_px': float(base_scale),
         'scale_m_per_px': float(scale),
+        'fitted_width_m': float(fitted_width),
+        'fitted_height_m': float(fitted_height),
+        'scale_percent': float(scale_percent),
+        'center_x_m': float(target_center_x),
+        'center_y_m': float(target_center_y),
+        'requested_center_x_m': None if center_x_m is None else float(center_x_m),
+        'requested_center_y_m': None if center_y_m is None else float(center_y_m),
+        'offset_x_m': float(offset_x),
+        'offset_y_m': float(offset_y),
         'offset_m': {'x': float(offset_x), 'y': float(offset_y)},
         'board_size_m': {'width': float(board_width_m), 'height': float(board_height_m)},
         'margin_m': float(margin_m),
@@ -405,6 +627,12 @@ def vectorize_sketch_image_to_plan(
     min_component_area_px: int = 8,
     min_stroke_length_px: float = 4.0,
     simplify_epsilon_px: float = 1.0,
+    line_sensitivity: float = 0.0,
+    merge_gap_px: float = 3.0,
+    merge_max_angle_deg: float = 60.0,
+    scale_percent: float = 100.0,
+    center_x_m: float | None = None,
+    center_y_m: float | None = None,
 ) -> DrawingPathPlan:
     """Convert a high-contrast sketch image into a board-space DrawingPathPlan."""
 
@@ -412,7 +640,10 @@ def vectorize_sketch_image_to_plan(
     gray, original_size, source_path = _decode_grayscale(image_bytes_or_path)
     processed_gray, resize_scale = _resize_for_processing(gray, max_image_dim=max_image_dim)
     normalized_gray = _normalize_grayscale(processed_gray)
-    binary, threshold_metadata = _threshold_foreground(normalized_gray)
+    binary, threshold_metadata = _threshold_foreground(
+        normalized_gray,
+        line_sensitivity=float(line_sensitivity),
+    )
     cleaned_binary, component_metadata = _remove_small_components(
         binary,
         min_component_area_px=min_component_area_px,
@@ -420,7 +651,7 @@ def vectorize_sketch_image_to_plan(
     skeleton, skeleton_backend = _skeletonize_foreground(cleaned_binary)
     raw_strokes = _trace_skeleton_pixels(
         skeleton,
-        min_stroke_length_px=max(0.0, float(min_stroke_length_px)),
+        min_stroke_length_px=0.0,
     )
     if not raw_strokes:
         raise ValueError('No drawable centerline strokes were extracted from the sketch image.')
@@ -430,16 +661,30 @@ def vectorize_sketch_image_to_plan(
             _simplify_pixels(stroke, epsilon_px=max(0.0, float(simplify_epsilon_px)))
             for stroke in raw_strokes
         )
-        if len(stroke) >= 2 and _stroke_length_px(stroke) >= max(0.0, float(min_stroke_length_px))
+        if len(stroke) >= 2
     )
     if not simplified_strokes:
         raise ValueError('No drawable centerline strokes remained after simplification.')
+    merged_strokes, merge_count = _merge_nearby_strokes(
+        simplified_strokes,
+        merge_gap_px=max(0.0, float(merge_gap_px)),
+        merge_max_angle_deg=max(0.0, min(180.0, float(merge_max_angle_deg))),
+    )
+    filtered_strokes, removed_short_stroke_count = _remove_short_pixel_strokes(
+        merged_strokes,
+        min_stroke_length_px=float(min_stroke_length_px),
+    )
+    if not filtered_strokes:
+        raise ValueError('No drawable centerline strokes remained after stroke filtering.')
 
     board_strokes, placement_metadata = _scale_strokes_to_board(
-        simplified_strokes,
+        filtered_strokes,
         board_width_m=float(board_width_m),
         board_height_m=float(board_height_m),
         margin_m=float(margin_m),
+        scale_percent=float(scale_percent),
+        center_x_m=center_x_m,
+        center_y_m=center_y_m,
     )
     processing_time_ms = (time.perf_counter() - started) * 1000.0
     processed_height, processed_width = processed_gray.shape[:2]
@@ -452,11 +697,17 @@ def vectorize_sketch_image_to_plan(
         'min_component_area_px': int(min_component_area_px),
         'min_stroke_length_px': float(min_stroke_length_px),
         'simplify_epsilon_px': float(simplify_epsilon_px),
+        'merge_gap_px': float(merge_gap_px),
+        'merge_max_angle_deg': float(merge_max_angle_deg),
         'foreground_pixel_count': int(numpy.count_nonzero(binary)),
         'cleaned_foreground_pixel_count': int(numpy.count_nonzero(cleaned_binary)),
         'skeleton_pixel_count': int(numpy.count_nonzero(skeleton)),
         'raw_stroke_count': len(raw_strokes),
         'simplified_stroke_count': len(simplified_strokes),
+        'post_merge_stroke_count': len(merged_strokes),
+        'final_stroke_count': len(filtered_strokes),
+        'merge_count': int(merge_count),
+        'removed_short_stroke_count': int(removed_short_stroke_count),
         'skeleton_backend': skeleton_backend,
         **threshold_metadata,
         **component_metadata,
@@ -473,4 +724,3 @@ def vectorize_sketch_image_to_plan(
         ),
         metadata=metadata,
     )
-

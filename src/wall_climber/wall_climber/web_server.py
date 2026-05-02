@@ -1512,6 +1512,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         min_component_area_px: Optional[int] = Form(None),
         min_stroke_length_px: Optional[float] = Form(None),
         simplify_epsilon_px: Optional[float] = Form(None),
+        line_sensitivity: Optional[float] = Form(None),
+        merge_gap_px: Optional[float] = Form(None),
+        merge_max_angle_deg: Optional[float] = Form(None),
+        scale_percent: Optional[float] = Form(None),
+        center_x_m: Optional[float] = Form(None),
+        center_y_m: Optional[float] = Form(None),
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
@@ -1546,6 +1552,48 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 minimum=0.0,
                 maximum=10000.0,
             )
+            sketch_line_sensitivity = _coerce_float(
+                0.0 if line_sensitivity is None else line_sensitivity,
+                field_name='line_sensitivity',
+                minimum=0.0,
+                maximum=0.95,
+            )
+            sketch_merge_gap_px = _coerce_float(
+                3.0 if merge_gap_px is None else merge_gap_px,
+                field_name='merge_gap_px',
+                minimum=0.0,
+                maximum=1000.0,
+            )
+            sketch_merge_max_angle_deg = _coerce_float(
+                60.0 if merge_max_angle_deg is None else merge_max_angle_deg,
+                field_name='merge_max_angle_deg',
+                minimum=0.0,
+                maximum=180.0,
+            )
+            sketch_scale_percent = _coerce_float(
+                100.0 if scale_percent is None else scale_percent,
+                field_name='scale_percent',
+                minimum=1.0,
+                maximum=500.0,
+            )
+            sketch_center_x_m = (
+                None if center_x_m is None
+                else _coerce_float(
+                    center_x_m,
+                    field_name='center_x_m',
+                    minimum=0.0,
+                    maximum=float(shared.board.width),
+                )
+            )
+            sketch_center_y_m = (
+                None if center_y_m is None
+                else _coerce_float(
+                    center_y_m,
+                    field_name='center_y_m',
+                    minimum=0.0,
+                    maximum=float(shared.board.height),
+                )
+            )
             try:
                 plan = vectorize_sketch_image_to_plan(
                     content,
@@ -1556,6 +1604,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     min_component_area_px=sketch_min_component_area_px,
                     min_stroke_length_px=sketch_min_stroke_length_px,
                     simplify_epsilon_px=sketch_simplify_epsilon_px,
+                    line_sensitivity=sketch_line_sensitivity,
+                    merge_gap_px=sketch_merge_gap_px,
+                    merge_max_angle_deg=sketch_merge_max_angle_deg,
+                    scale_percent=sketch_scale_percent,
+                    center_x_m=sketch_center_x_m,
+                    center_y_m=sketch_center_y_m,
                 )
                 canonical_plan = drawing_path_plan_to_canonical(plan)
             except RuntimeError as exc:

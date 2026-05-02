@@ -36,6 +36,27 @@ def _rectangle_image() -> bytes:
     return _encode_png(image)
 
 
+def _faint_line_image() -> bytes:
+    image = numpy.full((120, 220, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 35), (200, 35), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (20, 85), (200, 85), (180, 180, 180), 3, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
+def _broken_line_image() -> bytes:
+    image = numpy.full((100, 200, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 50), (85, 50), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (94, 50), (160, 50), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
+def _separate_lines_image() -> bytes:
+    image = numpy.full((100, 200, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 25), (160, 25), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (20, 75), (160, 75), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
 def _all_points(plan: DrawingPathPlan):
     return [point for stroke in plan.strokes for point in stroke.points]
 
@@ -127,6 +148,72 @@ def test_tiny_noise_is_removed() -> None:
     assert int(plan.metadata['removed_component_count']) >= 1
 
 
+def test_line_sensitivity_preserves_faint_gray_lines() -> None:
+    low_sensitivity = vectorize_sketch_image_to_plan(
+        _faint_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        margin_m=0.1,
+        line_sensitivity=0.0,
+        merge_gap_px=0.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+    high_sensitivity = vectorize_sketch_image_to_plan(
+        _faint_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        margin_m=0.1,
+        line_sensitivity=0.6,
+        merge_gap_px=0.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert low_sensitivity.metadata['foreground_pixel_count'] < high_sensitivity.metadata['foreground_pixel_count']
+    assert len(low_sensitivity.strokes) == 1
+    assert len(high_sensitivity.strokes) >= 2
+    assert high_sensitivity.metadata['line_sensitivity'] == pytest.approx(0.6)
+    assert high_sensitivity.metadata['effective_threshold_value'] > high_sensitivity.metadata['otsu_threshold_value']
+
+
+def test_broken_line_segments_can_be_merged() -> None:
+    unmerged = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        merge_gap_px=0.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+    merged = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        merge_gap_px=20.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert len(unmerged.strokes) == 2
+    assert len(merged.strokes) == 1
+    assert merged.metadata['merge_count'] == 1
+
+
+def test_merge_does_not_connect_far_unrelated_strokes() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _separate_lines_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        merge_gap_px=20.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert len(plan.strokes) == 2
+    assert plan.metadata['merge_count'] == 0
+
+
 def test_duplicate_adjacent_points_are_not_emitted() -> None:
     plan = vectorize_sketch_image_to_plan(
         _rectangle_image(),
@@ -138,6 +225,60 @@ def test_duplicate_adjacent_points_are_not_emitted() -> None:
     for stroke in plan.strokes:
         for first, second in zip(stroke.points[:-1], stroke.points[1:]):
             assert first != second
+
+
+def test_scale_percent_changes_output_bounds_size() -> None:
+    full_size = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=4.0,
+        board_height_m=3.0,
+        margin_m=0.2,
+        scale_percent=100.0,
+    )
+    half_size = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=4.0,
+        board_height_m=3.0,
+        margin_m=0.2,
+        scale_percent=50.0,
+    )
+
+    full_min_x, full_max_x, _full_min_y, _full_max_y = _bounds(full_size)
+    half_min_x, half_max_x, _half_min_y, _half_max_y = _bounds(half_size)
+
+    assert (half_max_x - half_min_x) == pytest.approx((full_max_x - full_min_x) * 0.5, rel=0.05)
+    assert half_size.metadata['scale_percent'] == pytest.approx(50.0)
+
+
+def test_center_coordinates_change_placement() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=4.0,
+        board_height_m=3.0,
+        margin_m=0.2,
+        scale_percent=50.0,
+        center_x_m=1.0,
+        center_y_m=1.0,
+    )
+    min_x, max_x, min_y, max_y = _bounds(plan)
+
+    assert ((min_x + max_x) * 0.5) == pytest.approx(1.0, abs=0.02)
+    assert ((min_y + max_y) * 0.5) == pytest.approx(1.0, abs=0.02)
+    assert plan.metadata['center_x_m'] == pytest.approx(1.0)
+    assert plan.metadata['center_y_m'] == pytest.approx(1.0)
+
+
+def test_invalid_placement_outside_board_raises_clear_error() -> None:
+    with pytest.raises(ValueError, match='outside the board bounds'):
+        vectorize_sketch_image_to_plan(
+            _rectangle_image(),
+            board_width_m=4.0,
+            board_height_m=3.0,
+            margin_m=0.2,
+            scale_percent=100.0,
+            center_x_m=0.0,
+            center_y_m=1.5,
+        )
 
 
 def test_sketch_plan_converts_to_canonical_path_plan() -> None:
@@ -185,4 +326,3 @@ def test_missing_skeletonization_backend_raises_runtime_error(monkeypatch) -> No
             board_width_m=2.0,
             board_height_m=1.0,
         )
-

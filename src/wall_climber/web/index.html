@@ -1195,6 +1195,30 @@
                     <label for="sketch-min-component">Sketch Noise Area (px)</label>
                     <input id="sketch-min-component" type="number" min="1" step="1" value="8">
                   </div>
+                  <div class="field">
+                    <label for="sketch-line-sensitivity">Line Sensitivity</label>
+                    <input id="sketch-line-sensitivity" type="number" min="0" max="0.95" step="0.05" value="0">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-min-stroke">Min Stroke Length (px)</label>
+                    <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="4">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
+                    <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="3">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-scale-percent">Sketch Scale (%)</label>
+                    <input id="sketch-scale-percent" type="number" min="1" max="500" step="5" value="100">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-center-x">Sketch Center X (m)</label>
+                    <input id="sketch-center-x" type="number" min="0" step="0.01" placeholder="auto">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-center-y">Sketch Center Y (m)</label>
+                    <input id="sketch-center-y" type="number" min="0" step="0.01" placeholder="auto">
+                  </div>
                 </div>
                 <div class="action-row">
                   <button id="file-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
@@ -1423,6 +1447,12 @@
         fileMeta: document.getElementById('file-meta'),
         sketchMargin: document.getElementById('sketch-margin'),
         sketchMinComponent: document.getElementById('sketch-min-component'),
+        sketchLineSensitivity: document.getElementById('sketch-line-sensitivity'),
+        sketchMinStroke: document.getElementById('sketch-min-stroke'),
+        sketchMergeGap: document.getElementById('sketch-merge-gap'),
+        sketchScalePercent: document.getElementById('sketch-scale-percent'),
+        sketchCenterX: document.getElementById('sketch-center-x'),
+        sketchCenterY: document.getElementById('sketch-center-y'),
         sketchPreviewBtn: document.getElementById('sketch-preview-btn'),
         sketchPreviewBox: document.getElementById('sketch-preview-box'),
         sketchPreviewImg: document.getElementById('sketch-preview-img'),
@@ -2900,7 +2930,7 @@
           ctx.restore();
           return;
         }
-        const invalid = preview.can_commit === false;
+        const invalid = preview.can_commit === false && previewState.sourceType !== 'sketch_centerline';
         transformedPreviewStrokes(previewState).forEach((stroke) => {
           drawStrokePath(layout, stroke, {
             strokeStyle: previewStrokeColor(),
@@ -3322,15 +3352,22 @@
       function sketchDiagnosticsText(payload) {
         const metadata = payload.metadata || {};
         const preview = payload.preview || {};
-        const threshold = Number(metadata.threshold_value);
+        const threshold = Number(metadata.effective_threshold_value ?? metadata.threshold_value);
+        const lineSensitivity = Number(metadata.line_sensitivity);
+        const scalePercent = Number(metadata.scale_percent);
+        const centerX = Number(metadata.center_x_m);
+        const centerY = Number(metadata.center_y_m);
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
         return [
           `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
+          `raw ${Number(metadata.raw_stroke_count || 0)} · final ${Number(metadata.final_stroke_count || payload.stroke_count || 0)} · merged ${Number(metadata.merge_count || 0)} · removed short ${Number(metadata.removed_short_stroke_count || 0)}`,
           `bounds ${formatSketchBounds(payload.bounds)}`,
           `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}`,
-          `skeleton ${metadata.skeleton_backend || '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}${warnings}`,
+          `sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}`,
+          `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
+          `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
         ].join('\n');
       }
 
@@ -3494,6 +3531,16 @@
         form.append('file', file);
         form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
         form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 8)))));
+        form.append('line_sensitivity', String(Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0)))));
+        form.append('min_stroke_length_px', String(Math.max(0, Number(dom.sketchMinStroke.value || 4))));
+        form.append('merge_gap_px', String(Math.max(0, Number(dom.sketchMergeGap.value || 3))));
+        form.append('scale_percent', String(Math.max(1, Number(dom.sketchScalePercent.value || 100))));
+        if (dom.sketchCenterX.value.trim() !== '') {
+          form.append('center_x_m', String(Number(dom.sketchCenterX.value)));
+        }
+        if (dom.sketchCenterY.value.trim() !== '') {
+          form.append('center_y_m', String(Number(dom.sketchCenterY.value)));
+        }
         const payload = await apiRequest('/api/sketch-centerline/preview', {
           method: 'POST',
           body: form,

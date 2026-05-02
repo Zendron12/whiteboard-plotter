@@ -47,7 +47,16 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     response = client.post(
         '/api/sketch-centerline/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
-        data={'margin_m': '0.1'},
+        data={
+            'margin_m': '0.1',
+            'line_sensitivity': '0.35',
+            'min_stroke_length_px': '1.5',
+            'merge_gap_px': '5.0',
+            'merge_max_angle_deg': '75',
+            'scale_percent': '80',
+            'center_x_m': '3.0',
+            'center_y_m': '1.5',
+        },
     )
 
     assert response.status_code == 200
@@ -58,6 +67,17 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['point_count'] >= 2
     assert payload['canonical_command_count'] >= 3
     assert payload['metrics']['stroke_count'] == payload['stroke_count']
+    assert payload['metadata']['line_sensitivity'] == 0.35
+    assert payload['metadata']['min_stroke_length_px'] == 1.5
+    assert payload['metadata']['merge_gap_px'] == 5.0
+    assert payload['metadata']['merge_max_angle_deg'] == 75.0
+    assert payload['metadata']['scale_percent'] == 80.0
+    assert payload['metadata']['center_x_m'] == 3.0
+    assert payload['metadata']['center_y_m'] == 1.5
+    assert 'effective_threshold_value' in payload['metadata']
+    assert 'merge_count' in payload['metadata']
+    assert 'removed_short_stroke_count' in payload['metadata']
+    assert 'fitted_width_m' in payload['metadata']
     assert payload['metadata']['skeleton_backend'] in {
         'skimage.morphology.skeletonize',
         'cv2.ximgproc.thinning',
@@ -70,6 +90,20 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['preview']['max_points'] > 0
     assert payload['preview']['returned_point_count'] <= payload['preview']['max_points']
     assert payload['preview']['original_point_count'] == payload['point_count']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_endpoint_rejects_outside_placement() -> None:
+    client, runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
+        data={'scale_percent': '100', 'center_x_m': '0', 'center_y_m': '1.5'},
+    )
+
+    assert response.status_code == 422
+    assert 'outside the board bounds' in response.json()['detail']
     assert runtime.node.publish_count == 0
 
 
@@ -113,4 +147,3 @@ def test_sketch_centerline_preview_endpoint_rejects_invalid_image_bytes() -> Non
     assert response.status_code == 422
     assert 'decode' in response.json()['detail']
     assert runtime.node.publish_count == 0
-
