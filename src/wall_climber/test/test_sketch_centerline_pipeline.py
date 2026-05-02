@@ -50,6 +50,21 @@ def _broken_line_image() -> bytes:
     return _encode_png(image)
 
 
+def _short_detail_image() -> bytes:
+    image = numpy.full((110, 200, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 45), (170, 45), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (45, 75), (48, 75), (0, 0, 0), 1, lineType=cv2.LINE_8)
+    cv2.line(image, (95, 78), (98, 78), (0, 0, 0), 1, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
+def _perpendicular_nearby_image() -> bytes:
+    image = numpy.full((110, 160, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 55), (78, 55), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (84, 61), (84, 100), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
 def _separate_lines_image() -> bytes:
     image = numpy.full((100, 200, 3), 255, dtype=numpy.uint8)
     cv2.line(image, (20, 25), (160, 25), (0, 0, 0), 3, lineType=cv2.LINE_8)
@@ -177,27 +192,93 @@ def test_line_sensitivity_preserves_faint_gray_lines() -> None:
     assert high_sensitivity.metadata['effective_threshold_value'] > high_sensitivity.metadata['otsu_threshold_value']
 
 
-def test_broken_line_segments_can_be_merged() -> None:
+def test_raw_preset_does_not_merge_nearby_broken_strokes() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='raw',
+    )
+
+    assert len(plan.strokes) == 2
+    assert plan.metadata['optimization_preset'] == 'raw'
+    assert plan.metadata['merge_enabled'] is False
+    assert plan.metadata['merge_count'] == 0
+
+
+def test_detail_preset_does_not_merge_nearby_broken_strokes() -> None:
     unmerged = vectorize_sketch_image_to_plan(
         _broken_line_image(),
         board_width_m=2.0,
         board_height_m=1.0,
-        merge_gap_px=0.0,
-        min_stroke_length_px=1.0,
-        simplify_epsilon_px=0.0,
+        optimization_preset='detail',
     )
-    merged = vectorize_sketch_image_to_plan(
+
+    assert len(unmerged.strokes) == 2
+    assert unmerged.metadata['optimization_preset'] == 'detail'
+    assert unmerged.metadata['merge_enabled'] is False
+    assert unmerged.metadata['effective_simplify_epsilon_px'] < 0.5
+
+
+def test_custom_preset_can_merge_broken_line_segments() -> None:
+    plan = vectorize_sketch_image_to_plan(
         _broken_line_image(),
         board_width_m=2.0,
         board_height_m=1.0,
+        optimization_preset='custom',
         merge_gap_px=20.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
     )
 
-    assert len(unmerged.strokes) == 2
-    assert len(merged.strokes) == 1
-    assert merged.metadata['merge_count'] == 1
+    assert len(plan.strokes) == 1
+    assert plan.metadata['optimization_preset'] == 'custom'
+    assert plan.metadata['effective_merge_gap_px'] == pytest.approx(20.0)
+    assert plan.metadata['effective_min_stroke_length_px'] == pytest.approx(1.0)
+    assert plan.metadata['effective_simplify_epsilon_px'] == pytest.approx(0.0)
+    assert plan.metadata['merge_count'] == 1
+
+
+def test_fast_preset_reduces_strokes_compared_to_detail() -> None:
+    detail = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='detail',
+    )
+    balanced = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='balanced',
+    )
+    fast = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='fast',
+    )
+
+    assert len(detail.strokes) >= len(balanced.strokes)
+    assert len(detail.strokes) > len(fast.strokes)
+    assert detail.metadata['effective_simplify_epsilon_px'] < balanced.metadata['effective_simplify_epsilon_px']
+    assert detail.metadata['effective_simplify_epsilon_px'] < fast.metadata['effective_simplify_epsilon_px']
+
+
+def test_merge_does_not_connect_perpendicular_nearby_lines() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _perpendicular_nearby_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='custom',
+        merge_gap_px=20.0,
+        merge_max_angle_deg=60.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert len(plan.strokes) == 2
+    assert plan.metadata['merge_count'] == 0
 
 
 def test_merge_does_not_connect_far_unrelated_strokes() -> None:

@@ -23,11 +23,13 @@ before path tracing.
 6. Skeletonize the cleaned foreground mask with `skimage.morphology.skeletonize`,
    falling back to `cv2.ximgproc.thinning` when available.
 7. Trace the skeleton graph into ordered strokes.
-8. Simplify strokes lightly while preserving endpoints.
-9. Merge nearby compatible stroke endpoints to reduce fragmentation.
-10. Scale and center the result into board coordinates while preserving aspect
+8. Apply the selected optimization preset.
+9. Simplify strokes lightly while preserving endpoints.
+10. Optionally merge nearby compatible stroke endpoints when the selected
+   preset enables it.
+11. Scale and center the result into board coordinates while preserving aspect
    ratio.
-11. Emit a `DrawingPathPlan` with metrics and processing metadata.
+12. Emit a `DrawingPathPlan` with metrics and processing metadata.
 
 If no skeletonization backend is available, the pipeline raises `RuntimeError`.
 It does not fall back to the unthinned binary mask.
@@ -57,6 +59,8 @@ Fields:
 - `line_sensitivity`: optional `0.0..0.95` faint-line sensitivity.
 - `merge_gap_px`: optional endpoint merge gap in processed pixels.
 - `merge_max_angle_deg`: optional maximum endpoint direction angle for merging.
+- `optimization_preset`: optional `raw`, `detail`, `balanced`, `fast`, or
+  `custom`.
 - `scale_percent`: optional scale applied after fit-to-board.
 - `center_x_m`: optional board-space drawing center x coordinate.
 - `center_y_m`: optional board-space drawing center y coordinate.
@@ -94,14 +98,16 @@ board coordinate frame: origin at top-left, x right, y down.
 
 The existing File upload section exposes this mode as a preview-only option.
 Choose a PNG/JPG in the normal file input, optionally adjust `Sketch Margin (m)`,
-`Sketch Noise Area (px)`, Line Sensitivity, Min Stroke Length, Stroke Merge Gap,
-Sketch Scale, and Sketch Center X/Y, then click `Preview as Sketch Centerline`.
+`Optimization Preset`, `Sketch Noise Area (px)`, Line Sensitivity, Min Stroke
+Length, Stroke Merge Gap, Simplify Epsilon, Sketch Scale, and Sketch Center X/Y,
+then click `Preview as Sketch Centerline`.
 
 The UI calls `/api/sketch-centerline/preview`, displays the returned
 `preview_svg`, and draws the returned board-space preview strokes on the board
 canvas. It also shows stroke and point counts, canonical command count, bounds,
-preview truncation status, raw/final stroke counts, merge counts, skeleton
-backend, threshold information, placement metadata, and any warnings.
+preview truncation status, raw/final stroke counts, merge counts, selected
+optimization preset, effective merge/simplification settings, skeleton backend,
+threshold information, placement metadata, and any warnings.
 
 ## Tuning Notes
 
@@ -113,9 +119,17 @@ include lighter gray strokes for dark-on-light images and dimmer light strokes
 for light-on-dark images.
 
 Fragmented strokes happen because skeleton tracing intentionally splits the
-graph at endpoints and junctions. Stroke Merge Gap reconnects nearby compatible
-endpoints after tracing. It can reduce dashed or segmented output, but very high
-values can connect unrelated nearby details.
+graph at endpoints and junctions. Aggressive endpoint merging can make the robot
+lift the pen less often, but it can also damage detailed line-art by bridging
+nearby unrelated hair, clothing, face, or body outlines. Shape extraction and
+robot travel optimization are separate concerns: the default `detail` preset
+prioritizes visual fidelity even when that leaves a high stroke count.
+
+Stroke Merge Gap reconnects nearby compatible endpoints only when the selected
+optimization preset enables merging. It can reduce segmented output, but high
+values can connect unrelated nearby details. The merge pass also rejects nearly
+perpendicular endpoint pairs and avoids ambiguous dense regions where one
+endpoint has multiple plausible merge candidates.
 
 Earlier preview fragmentation could be amplified visually by the frontend
 treating preview-only sketch output like an invalid commit preview and drawing
@@ -130,10 +144,28 @@ place the drawing center at that board coordinate. Placements outside the board
 are rejected instead of clipped.
 
 For detailed anime or line-art sketches, start with Line Sensitivity `0.25` to
-`0.45`, lower Noise Area to keep small components, lower Min Stroke Length to
-keep short details, and raise Stroke Merge Gap slightly, usually `2..5 px`.
-Avoid very high sensitivity or merge gap values because they can add noise or
-join unrelated hair, clothing, or body outlines.
+`0.45`, lower Noise Area to `1..4` to keep small components, keep Min Stroke
+Length around `1..3`, keep Stroke Merge Gap at `0` in the `detail` preset, and
+use Simplify Epsilon `0..0.5`. Avoid high sensitivity or merge gap values
+because they can add noise or join unrelated hair, clothing, or body outlines.
+
+## Optimization Presets
+
+- `raw`: minimal post-processing after skeleton tracing. This is useful for
+  debugging and maximum fidelity, but it can produce many short strokes.
+- `detail`: the default for anime and line-art. It disables endpoint merging,
+  keeps short strokes, and uses very light simplification. This favors visual
+  fidelity over drawing speed.
+- `balanced`: enables conservative endpoint merging and moderate simplification
+  for general sketches.
+- `fast`: uses stronger cleanup, merging, and simplification. It reduces stroke
+  count but can lose small details or smooth sharp features.
+- `custom`: uses the submitted Min Stroke Length, Stroke Merge Gap, Merge Angle,
+  and Simplify Epsilon values exactly.
+
+Line Sensitivity is independent from these presets. It controls which pixels
+survive thresholding; the optimization preset controls how traced strokes are
+cleaned, merged, and simplified after skeletonization.
 
 This path does not set an upload id, does not create a commit request, and does
 not publish to the robot. `Commit File` is disabled while the Sketch Centerline

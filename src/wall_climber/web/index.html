@@ -1188,12 +1188,22 @@
                 <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg">
                 <div class="field-grid">
                   <div class="field">
+                    <label for="sketch-optimization-preset">Optimization Preset</label>
+                    <select id="sketch-optimization-preset">
+                      <option value="raw">Raw</option>
+                      <option value="detail" selected>Detail</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="fast">Fast / Smooth</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                  <div class="field">
                     <label for="sketch-margin">Sketch Margin (m)</label>
                     <input id="sketch-margin" type="number" min="0" step="0.01" value="0.05">
                   </div>
                   <div class="field">
                     <label for="sketch-min-component">Sketch Noise Area (px)</label>
-                    <input id="sketch-min-component" type="number" min="1" step="1" value="8">
+                    <input id="sketch-min-component" type="number" min="1" step="1" value="2">
                   </div>
                   <div class="field">
                     <label for="sketch-line-sensitivity">Line Sensitivity</label>
@@ -1201,11 +1211,15 @@
                   </div>
                   <div class="field">
                     <label for="sketch-min-stroke">Min Stroke Length (px)</label>
-                    <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="4">
+                    <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="1">
                   </div>
                   <div class="field">
                     <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
-                    <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="3">
+                    <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="0">
+                  </div>
+                  <div class="field">
+                    <label for="sketch-simplify-epsilon">Simplify Epsilon (px)</label>
+                    <input id="sketch-simplify-epsilon" type="number" min="0" step="0.05" value="0.25">
                   </div>
                   <div class="field">
                     <label for="sketch-scale-percent">Sketch Scale (%)</label>
@@ -1445,11 +1459,13 @@
         filePreviewBtn: document.getElementById('file-preview-btn'),
         fileCommitBtn: document.getElementById('file-commit-btn'),
         fileMeta: document.getElementById('file-meta'),
+        sketchOptimizationPreset: document.getElementById('sketch-optimization-preset'),
         sketchMargin: document.getElementById('sketch-margin'),
         sketchMinComponent: document.getElementById('sketch-min-component'),
         sketchLineSensitivity: document.getElementById('sketch-line-sensitivity'),
         sketchMinStroke: document.getElementById('sketch-min-stroke'),
         sketchMergeGap: document.getElementById('sketch-merge-gap'),
+        sketchSimplifyEpsilon: document.getElementById('sketch-simplify-epsilon'),
         sketchScalePercent: document.getElementById('sketch-scale-percent'),
         sketchCenterX: document.getElementById('sketch-center-x'),
         sketchCenterY: document.getElementById('sketch-center-y'),
@@ -1514,6 +1530,7 @@
         uploadStatusTimer: null,
         previewInteraction: null,
         sketchPreviewUrl: null,
+        sketchPreviewBusy: false,
       };
 
       function escapeHtml(text) {
@@ -2334,7 +2351,7 @@
         dom.svgSubmitBtn.disabled = !runtimeReady;
         dom.fileUploadBtn.disabled = !backendHealthy;
         dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
-        dom.sketchPreviewBtn.disabled = !backendHealthy;
+        dom.sketchPreviewBtn.disabled = !backendHealthy || state.sketchPreviewBusy;
         dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
       }
 
@@ -3357,11 +3374,17 @@
         const scalePercent = Number(metadata.scale_percent);
         const centerX = Number(metadata.center_x_m);
         const centerY = Number(metadata.center_y_m);
+        const simplify = Number(metadata.effective_simplify_epsilon_px ?? metadata.simplify_epsilon_px);
+        const mergeGap = Number(metadata.effective_merge_gap_px ?? metadata.merge_gap_px);
+        const mergeAngle = Number(metadata.effective_merge_max_angle_deg ?? metadata.merge_max_angle_deg);
+        const minStroke = Number(metadata.effective_min_stroke_length_px ?? metadata.min_stroke_length_px);
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
         return [
           `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
+          `preset ${metadata.optimization_preset || '--'} · simplify ${Number.isFinite(simplify) ? simplify.toFixed(2) : '--'} · min stroke ${Number.isFinite(minStroke) ? minStroke.toFixed(1) : '--'} px`,
+          `merge ${metadata.merge_enabled ? 'on' : 'off'} · gap ${Number.isFinite(mergeGap) ? mergeGap.toFixed(1) : '--'} px · angle ${Number.isFinite(mergeAngle) ? mergeAngle.toFixed(0) : '--'}°`,
           `raw ${Number(metadata.raw_stroke_count || 0)} · final ${Number(metadata.final_stroke_count || payload.stroke_count || 0)} · merged ${Number(metadata.merge_count || 0)} · removed short ${Number(metadata.removed_short_stroke_count || 0)}`,
           `bounds ${formatSketchBounds(payload.bounds)}`,
           `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}`,
@@ -3369,6 +3392,24 @@
           `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
           `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
         ].join('\n');
+      }
+
+      function setSketchPreviewInlineStatus(kind, message) {
+        if (!dom.sketchPreviewBox || !dom.sketchPreviewImg || !dom.sketchPreviewDiag) {
+          return;
+        }
+        if (state.sketchPreviewUrl) {
+          URL.revokeObjectURL(state.sketchPreviewUrl);
+          state.sketchPreviewUrl = null;
+        }
+        dom.sketchPreviewImg.removeAttribute('src');
+        dom.sketchPreviewImg.style.display = 'none';
+        dom.sketchPreviewDiag.textContent = message;
+        dom.sketchPreviewBox.classList.add('active');
+        if (kind === 'loading') {
+          dom.previewChip.innerHTML = '<strong>Preview</strong> sketch · loading';
+          dom.summaryPreview.textContent = message;
+        }
       }
 
       function renderSketchPreviewSvg(payload) {
@@ -3384,8 +3425,10 @@
           const blob = new Blob([svgText], { type: 'image/svg+xml' });
           state.sketchPreviewUrl = URL.createObjectURL(blob);
           dom.sketchPreviewImg.src = state.sketchPreviewUrl;
+          dom.sketchPreviewImg.style.display = '';
         } else {
           dom.sketchPreviewImg.removeAttribute('src');
+          dom.sketchPreviewImg.style.display = 'none';
         }
         dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
         dom.sketchPreviewBox.classList.add('active');
@@ -3518,22 +3561,27 @@
 
       async function previewSketchCenterlineFile(file) {
         if (!file) {
+          setSketchPreviewInlineStatus('error', 'Choose a PNG or JPG sketch first.');
           throw new Error('Choose a PNG or JPG sketch first.');
         }
         const name = String(file.name || '').toLowerCase();
         const type = String(file.type || '').toLowerCase();
         const isSketchImage = type === 'image/png' || type === 'image/jpeg' || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg');
         if (!isSketchImage) {
+          setSketchPreviewInlineStatus('error', 'Sketch Centerline preview accepts PNG or JPG files.');
           throw new Error('Sketch Centerline preview accepts PNG or JPG files.');
         }
         stopUploadStatusPolling();
+        setSketchPreviewInlineStatus('loading', 'Vectorizing sketch...');
         const form = new FormData();
         form.append('file', file);
+        form.append('optimization_preset', String(dom.sketchOptimizationPreset.value || 'detail'));
         form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
-        form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 8)))));
+        form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2)))));
         form.append('line_sensitivity', String(Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0)))));
-        form.append('min_stroke_length_px', String(Math.max(0, Number(dom.sketchMinStroke.value || 4))));
-        form.append('merge_gap_px', String(Math.max(0, Number(dom.sketchMergeGap.value || 3))));
+        form.append('min_stroke_length_px', String(Math.max(0, Number(dom.sketchMinStroke.value || 1))));
+        form.append('merge_gap_px', String(Math.max(0, Number(dom.sketchMergeGap.value || 0))));
+        form.append('simplify_epsilon_px', String(Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25))));
         form.append('scale_percent', String(Math.max(1, Number(dom.sketchScalePercent.value || 100))));
         if (dom.sketchCenterX.value.trim() !== '') {
           form.append('center_x_m', String(Number(dom.sketchCenterX.value)));
@@ -3761,10 +3809,19 @@
 
       dom.sketchPreviewBtn.addEventListener('click', async () => {
         const file = dom.fileInput.files && dom.fileInput.files[0];
+        state.sketchPreviewBusy = true;
+        dom.sketchPreviewBtn.textContent = 'Previewing...';
+        refreshUiState();
         try {
           await previewSketchCenterlineFile(file);
         } catch (error) {
+          const message = error && error.message ? error.message : 'Unknown sketch preview error';
+          setSketchPreviewInlineStatus('error', message);
           handleError('Sketch Centerline preview failed', error);
+        } finally {
+          state.sketchPreviewBusy = false;
+          dom.sketchPreviewBtn.textContent = 'Preview as Sketch Centerline';
+          refreshUiState();
         }
       });
 

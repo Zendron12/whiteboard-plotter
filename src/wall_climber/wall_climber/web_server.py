@@ -1515,6 +1515,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         line_sensitivity: Optional[float] = Form(None),
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
+        optimization_preset: Optional[str] = Form(None),
         scale_percent: Optional[float] = Form(None),
         center_x_m: Optional[float] = Form(None),
         center_y_m: Optional[float] = Form(None),
@@ -1535,19 +1536,19 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=4096,
             )
             sketch_min_component_area_px = _coerce_int(
-                8 if min_component_area_px is None else min_component_area_px,
+                2 if min_component_area_px is None else min_component_area_px,
                 field_name='min_component_area_px',
                 minimum=1,
                 maximum=100000,
             )
             sketch_min_stroke_length_px = _coerce_float(
-                4.0 if min_stroke_length_px is None else min_stroke_length_px,
+                1.0 if min_stroke_length_px is None else min_stroke_length_px,
                 field_name='min_stroke_length_px',
                 minimum=0.0,
                 maximum=100000.0,
             )
             sketch_simplify_epsilon_px = _coerce_float(
-                1.0 if simplify_epsilon_px is None else simplify_epsilon_px,
+                0.25 if simplify_epsilon_px is None else simplify_epsilon_px,
                 field_name='simplify_epsilon_px',
                 minimum=0.0,
                 maximum=10000.0,
@@ -1559,17 +1560,18 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=0.95,
             )
             sketch_merge_gap_px = _coerce_float(
-                3.0 if merge_gap_px is None else merge_gap_px,
+                0.0 if merge_gap_px is None else merge_gap_px,
                 field_name='merge_gap_px',
                 minimum=0.0,
                 maximum=1000.0,
             )
             sketch_merge_max_angle_deg = _coerce_float(
-                60.0 if merge_max_angle_deg is None else merge_max_angle_deg,
+                20.0 if merge_max_angle_deg is None else merge_max_angle_deg,
                 field_name='merge_max_angle_deg',
                 minimum=0.0,
                 maximum=180.0,
             )
+            sketch_optimization_preset = str(optimization_preset or 'detail').strip().lower()
             sketch_scale_percent = _coerce_float(
                 100.0 if scale_percent is None else scale_percent,
                 field_name='scale_percent',
@@ -1607,6 +1609,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     line_sensitivity=sketch_line_sensitivity,
                     merge_gap_px=sketch_merge_gap_px,
                     merge_max_angle_deg=sketch_merge_max_angle_deg,
+                    optimization_preset=sketch_optimization_preset,
                     scale_percent=sketch_scale_percent,
                     center_x_m=sketch_center_x_m,
                     center_y_m=sketch_center_y_m,
