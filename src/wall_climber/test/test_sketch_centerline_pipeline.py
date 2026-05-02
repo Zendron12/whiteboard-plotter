@@ -9,6 +9,7 @@ import numpy
 import pytest
 
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline import sketch_centerline
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.image_pipeline.types import DrawingPathPlan, PipelineMode
 
@@ -50,6 +51,21 @@ def _broken_line_image() -> bytes:
     return _encode_png(image)
 
 
+def _short_detail_image() -> bytes:
+    image = numpy.full((110, 200, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 45), (170, 45), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (45, 75), (48, 75), (0, 0, 0), 1, lineType=cv2.LINE_8)
+    cv2.line(image, (95, 78), (98, 78), (0, 0, 0), 1, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
+def _perpendicular_nearby_image() -> bytes:
+    image = numpy.full((110, 160, 3), 255, dtype=numpy.uint8)
+    cv2.line(image, (20, 55), (78, 55), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    cv2.line(image, (84, 61), (84, 100), (0, 0, 0), 3, lineType=cv2.LINE_8)
+    return _encode_png(image)
+
+
 def _separate_lines_image() -> bytes:
     image = numpy.full((100, 200, 3), 255, dtype=numpy.uint8)
     cv2.line(image, (20, 25), (160, 25), (0, 0, 0), 3, lineType=cv2.LINE_8)
@@ -87,6 +103,51 @@ def test_black_line_image_produces_board_drawing_path_plan() -> None:
         'skimage.morphology.skeletonize',
         'cv2.ximgproc.thinning',
     }
+
+
+def test_timing_metadata_exists_and_is_non_negative() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+    )
+
+    timing = plan.metadata['timing']
+    expected = {
+        'decode_time_ms',
+        'resize_time_ms',
+        'normalize_time_ms',
+        'threshold_time_ms',
+        'cleanup_time_ms',
+        'skeleton_time_ms',
+        'trace_time_ms',
+        'simplify_time_ms',
+        'merge_time_ms',
+        'curve_fit_time_ms',
+        'scale_time_ms',
+        'preview_total_time_ms',
+    }
+    assert expected.issubset(timing.keys())
+    for key in expected:
+        assert timing[key] >= 0.0
+
+
+def test_max_image_dim_affects_processed_image_size() -> None:
+    high = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        max_image_dim=180,
+    )
+    low = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        max_image_dim=80,
+    )
+
+    assert high.metadata['processed_image_size']['width_px'] > low.metadata['processed_image_size']['width_px']
+    assert low.metadata['max_image_dim'] == 80
 
 
 def test_black_on_white_and_white_on_black_both_work() -> None:
@@ -177,27 +238,111 @@ def test_line_sensitivity_preserves_faint_gray_lines() -> None:
     assert high_sensitivity.metadata['effective_threshold_value'] > high_sensitivity.metadata['otsu_threshold_value']
 
 
-def test_broken_line_segments_can_be_merged() -> None:
+def test_raw_preset_does_not_merge_nearby_broken_strokes() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='raw',
+    )
+
+    assert len(plan.strokes) == 2
+    assert plan.metadata['optimization_preset'] == 'raw'
+    assert plan.metadata['merge_enabled'] is False
+    assert plan.metadata['merge_count'] == 0
+
+
+def test_detail_preset_does_not_merge_nearby_broken_strokes() -> None:
     unmerged = vectorize_sketch_image_to_plan(
         _broken_line_image(),
         board_width_m=2.0,
         board_height_m=1.0,
-        merge_gap_px=0.0,
-        min_stroke_length_px=1.0,
-        simplify_epsilon_px=0.0,
+        optimization_preset='detail',
     )
-    merged = vectorize_sketch_image_to_plan(
+
+    assert len(unmerged.strokes) == 2
+    assert unmerged.metadata['optimization_preset'] == 'detail'
+    assert unmerged.metadata['merge_enabled'] is False
+    assert unmerged.metadata['effective_simplify_epsilon_px'] < 0.5
+
+
+def test_custom_preset_can_merge_broken_line_segments() -> None:
+    plan = vectorize_sketch_image_to_plan(
         _broken_line_image(),
         board_width_m=2.0,
         board_height_m=1.0,
+        optimization_preset='custom',
         merge_gap_px=20.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
     )
 
-    assert len(unmerged.strokes) == 2
-    assert len(merged.strokes) == 1
-    assert merged.metadata['merge_count'] == 1
+    assert len(plan.strokes) == 1
+    assert plan.metadata['optimization_preset'] == 'custom'
+    assert plan.metadata['effective_merge_gap_px'] == pytest.approx(20.0)
+    assert plan.metadata['effective_min_stroke_length_px'] == pytest.approx(1.0)
+    assert plan.metadata['effective_simplify_epsilon_px'] == pytest.approx(0.0)
+    assert plan.metadata['merge_count'] == 1
+
+
+def test_merge_cap_returns_warning(monkeypatch) -> None:
+    monkeypatch.setattr(sketch_centerline, '_MERGE_MAX_ITERATIONS', 0)
+
+    plan = vectorize_sketch_image_to_plan(
+        _broken_line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='custom',
+        merge_gap_px=20.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert plan.metadata['merge_count'] == 0
+    assert plan.metadata['merge_warnings']
+    assert any('merge stopped' in warning for warning in plan.metadata['warnings'])
+
+
+def test_fast_preset_reduces_strokes_compared_to_detail() -> None:
+    detail = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='detail',
+    )
+    balanced = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='balanced',
+    )
+    fast = vectorize_sketch_image_to_plan(
+        _short_detail_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='fast',
+    )
+
+    assert len(detail.strokes) >= len(balanced.strokes)
+    assert len(detail.strokes) > len(fast.strokes)
+    assert detail.metadata['effective_simplify_epsilon_px'] < balanced.metadata['effective_simplify_epsilon_px']
+    assert detail.metadata['effective_simplify_epsilon_px'] < fast.metadata['effective_simplify_epsilon_px']
+
+
+def test_merge_does_not_connect_perpendicular_nearby_lines() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _perpendicular_nearby_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='custom',
+        merge_gap_px=20.0,
+        merge_max_angle_deg=60.0,
+        min_stroke_length_px=1.0,
+        simplify_epsilon_px=0.0,
+    )
+
+    assert len(plan.strokes) == 2
+    assert plan.metadata['merge_count'] == 0
 
 
 def test_merge_does_not_connect_far_unrelated_strokes() -> None:
@@ -269,7 +414,7 @@ def test_center_coordinates_change_placement() -> None:
 
 
 def test_invalid_placement_outside_board_raises_clear_error() -> None:
-    with pytest.raises(ValueError, match='outside the board bounds'):
+    with pytest.raises(ValueError, match='outside the robot-safe drawable bounds'):
         vectorize_sketch_image_to_plan(
             _rectangle_image(),
             board_width_m=4.0,
@@ -279,6 +424,28 @@ def test_invalid_placement_outside_board_raises_clear_error() -> None:
             center_x_m=0.0,
             center_y_m=1.5,
         )
+
+
+def test_fit_bounds_are_used_for_auto_fit_and_center() -> None:
+    fit_bounds = {'x_min': 1.0, 'x_max': 3.0, 'y_min': 0.5, 'y_max': 2.5}
+    plan = vectorize_sketch_image_to_plan(
+        _rectangle_image(),
+        board_width_m=4.0,
+        board_height_m=3.0,
+        margin_m=0.1,
+        fit_bounds_m=fit_bounds,
+        validation_bounds_m=fit_bounds,
+    )
+    min_x, max_x, min_y, max_y = _bounds(plan)
+
+    assert min_x >= fit_bounds['x_min']
+    assert max_x <= fit_bounds['x_max']
+    assert min_y >= fit_bounds['y_min']
+    assert max_y <= fit_bounds['y_max']
+    assert ((min_x + max_x) * 0.5) == pytest.approx(2.0, abs=0.02)
+    assert ((min_y + max_y) * 0.5) == pytest.approx(1.5, abs=0.02)
+    assert plan.metadata['fit_bounds_m']['x_min'] == pytest.approx(1.0)
+    assert plan.metadata['validation_bounds_m']['x_max'] == pytest.approx(3.0)
 
 
 def test_sketch_plan_converts_to_canonical_path_plan() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import json
@@ -83,7 +84,16 @@ from wall_climber.canonical_optimizer import (
     CanonicalOptimizationPolicy,
     optimize_canonical_plan,
 )
-from wall_climber.canonical_path import CanonicalPathPlan
+from wall_climber.canonical_path import (
+    CanonicalCommand,
+    CanonicalPathPlan,
+    CubicBezier,
+    LineSegment,
+    PenDown,
+    PenUp,
+    QuadraticBezier,
+    TravelMove,
+)
 from wall_climber.canonical_ops import (
     cleanup_canonical_plan,
     default_image_placement,
@@ -109,7 +119,9 @@ from wall_climber.ingestion.upload_routing import (
     infer_uploaded_source_type,
 )
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline.curve_fit import drawing_path_plan_to_smooth_canonical
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
+from wall_climber.image_pipeline.types import DrawingPathPlan
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
@@ -152,6 +164,11 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _MAX_SVG_BYTES = 256 * 1024
 _MAX_VECTOR_REQUEST_BYTES = 512 * 1024
 _SKETCH_PREVIEW_MAX_POINTS = 2400
+_SKETCH_PREVIEW_CACHE_TTL_SECONDS = 10 * 60
+_SKETCH_PREVIEW_CACHE_MAX_ENTRIES = 16
+_SKETCH_DRAW_MAX_CANONICAL_COMMANDS = 200_000
+_SKETCH_DRAW_MAX_PRIMITIVES = 200_000
+_SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES = 16 * 1024 * 1024
 _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
@@ -168,6 +185,22 @@ class PreparedImageArtifact:
     image_result: Any
     defaults: dict[str, Any]
     timings_ms: dict[str, float]
+
+
+@dataclass(frozen=True)
+class SketchPreviewCacheEntry:
+    preview_id: str
+    drawing_plan: DrawingPathPlan
+    canonical_plan: CanonicalPathPlan
+    preview_geometry_mode: str
+    metadata: dict[str, Any]
+    warnings: tuple[str, ...]
+    created_at_unix: float
+    source_filename: str
+    parameters: dict[str, Any]
+    stroke_count: int
+    point_count: int
+    canonical_command_count: int
 
 
 class WebBackendNode(Node):
@@ -844,6 +877,24 @@ def _coerce_int(
     return numeric
 
 
+def _coerce_bool(value: Any, *, field_name: str, default: bool | None = None) -> bool:
+    if value is None:
+        if default is None:
+            raise HTTPException(status_code=422, detail=f'{field_name} is required')
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'1', 'true', 'yes', 'on'}:
+            return True
+        if normalized in {'0', 'false', 'no', 'off'}:
+            return False
+    raise HTTPException(status_code=422, detail=f'{field_name} must be boolean')
+
+
 def _validate_upload_id(raw_upload_id: Any) -> str:
     if not isinstance(raw_upload_id, str):
         raise HTTPException(status_code=422, detail='upload_id must be a string')
@@ -992,6 +1043,26 @@ def _draw_optimization_policy(
         enable_hatch_ordering=bool(enable_hatch_ordering),
         tiny_primitive_m=tiny,
         arc_fit_tolerance_m=max(tiny, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.5),
+        merge_distance_tolerance_m=max(1.0e-5, tiny * 0.25),
+        dedupe_precision_m=max(1.0e-5, tiny * 0.5),
+        cluster_cell_size_m=0.26,
+    )
+
+
+def _sketch_draw_optimization_policy(shared_config) -> CanonicalOptimizationPolicy:
+    draw_defaults = shared_config.draw_execution
+    tiny = max(2.0e-4, float(draw_defaults.draw_path_simplify_tolerance_m) * 2.0)
+    return CanonicalOptimizationPolicy(
+        label='sketch_centerline_draw',
+        merge_collinear_lines=False,
+        reorder_units=True,
+        cluster_units=True,
+        merge_travel_moves=True,
+        remove_duplicate_units=True,
+        prune_tiny_primitives=False,
+        fit_arcs=False,
+        enable_hatch_ordering=False,
+        tiny_primitive_m=tiny,
         merge_distance_tolerance_m=max(1.0e-5, tiny * 0.25),
         dedupe_precision_m=max(1.0e-5, tiny * 0.5),
         cluster_cell_size_m=0.26,
@@ -1400,23 +1471,208 @@ def _sketch_preview_svg(
     )
 
 
-def _sketch_preview_response(plan, *, canonical_command_count: int, board_width_m: float, board_height_m: float) -> dict[str, Any]:
-    preview = _sketch_preview_strokes(plan)
+def _command_start(command: CanonicalCommand) -> tuple[float, float] | None:
+    if isinstance(command, LineSegment):
+        return command.start
+    if isinstance(command, QuadraticBezier):
+        return command.start
+    if isinstance(command, CubicBezier):
+        return command.start
+    return None
+
+
+def _smooth_sketch_preview_svg(
+    canonical_plan: CanonicalPathPlan,
+    *,
+    board_width_m: float,
+    board_height_m: float,
+) -> str:
+    stroke_width = max(float(board_width_m), float(board_height_m)) / 360.0
+    paths: list[str] = []
+    current: list[str] = []
+    pen_down = False
+
+    def flush_current() -> None:
+        if current:
+            paths.append(
+                '<path d="'
+                + ' '.join(current)
+                + f'" fill="none" stroke="#111827" stroke-width="{_svg_number(stroke_width)}" '
+                + 'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+            current.clear()
+
+    for command in canonical_plan.commands:
+        if isinstance(command, PenDown):
+            flush_current()
+            pen_down = True
+            continue
+        if isinstance(command, PenUp):
+            flush_current()
+            pen_down = False
+            continue
+        if isinstance(command, TravelMove):
+            continue
+        if not pen_down:
+            continue
+        start = _command_start(command)
+        if start is None:
+            continue
+        if not current:
+            current.append(f'M {_svg_number(start[0])} {_svg_number(start[1])}')
+        if isinstance(command, LineSegment):
+            current.append(f'L {_svg_number(command.end[0])} {_svg_number(command.end[1])}')
+        elif isinstance(command, QuadraticBezier):
+            current.append(
+                f'Q {_svg_number(command.control[0])} {_svg_number(command.control[1])} '
+                f'{_svg_number(command.end[0])} {_svg_number(command.end[1])}'
+            )
+        elif isinstance(command, CubicBezier):
+            current.append(
+                f'C {_svg_number(command.control1[0])} {_svg_number(command.control1[1])} '
+                f'{_svg_number(command.control2[0])} {_svg_number(command.control2[1])} '
+                f'{_svg_number(command.end[0])} {_svg_number(command.end[1])}'
+            )
+    flush_current()
+    body = ''.join(paths)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {_svg_number(board_width_m)} {_svg_number(board_height_m)}" '
+        f'width="{_svg_number(board_width_m)}" height="{_svg_number(board_height_m)}" '
+        'role="img" aria-label="Sketch centerline smooth curve preview">'
+        f'<rect x="0" y="0" width="{_svg_number(board_width_m)}" '
+        f'height="{_svg_number(board_height_m)}" fill="white"/>'
+        f'{body}</svg>'
+    )
+
+
+def _canonical_primitive_counts(plan: CanonicalPathPlan) -> dict[str, int]:
+    line_count = sum(isinstance(command, LineSegment) for command in plan.commands)
+    quadratic_count = sum(isinstance(command, QuadraticBezier) for command in plan.commands)
+    cubic_count = sum(isinstance(command, CubicBezier) for command in plan.commands)
     return {
-        'ok': True,
-        'mode': plan.mode.value,
-        'stroke_count': len(plan.strokes),
-        'point_count': sum(len(stroke.points) for stroke in plan.strokes),
-        'canonical_command_count': int(canonical_command_count),
-        'metrics': asdict(plan.metrics),
-        'metadata': dict(plan.metadata),
-        'bounds': _drawing_plan_bounds(plan),
-        'warnings': list(plan.metrics.warnings),
-        'preview_svg': _sketch_preview_svg(
+        'line_primitive_count': int(line_count),
+        'quadratic_primitive_count': int(quadratic_count),
+        'cubic_primitive_count': int(cubic_count),
+        'curve_primitive_count': int(quadratic_count + cubic_count),
+    }
+
+
+def _canonical_transport_size_summary(plan: CanonicalPathPlan) -> dict[str, int]:
+    descriptor = canonical_plan_to_primitive_path_plan(plan)
+    primitive_count = len(descriptor['primitives'])
+    descriptor_bytes = len(
+        json.dumps(descriptor, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    )
+    return {
+        'canonical_command_count': int(len(plan.commands)),
+        'primitive_count': int(primitive_count),
+        'primitive_descriptor_bytes': int(descriptor_bytes),
+    }
+
+
+def _enforce_sketch_draw_size_limits(summary: dict[str, int]) -> None:
+    limits = {
+        'max_canonical_command_count': int(_SKETCH_DRAW_MAX_CANONICAL_COMMANDS),
+        'max_primitive_count': int(_SKETCH_DRAW_MAX_PRIMITIVES),
+        'max_primitive_descriptor_bytes': int(_SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES),
+    }
+    violations: list[str] = []
+    if int(summary['canonical_command_count']) > limits['max_canonical_command_count']:
+        violations.append('canonical_command_count')
+    if int(summary['primitive_count']) > limits['max_primitive_count']:
+        violations.append('primitive_count')
+    if int(summary['primitive_descriptor_bytes']) > limits['max_primitive_descriptor_bytes']:
+        violations.append('primitive_descriptor_bytes')
+    if violations:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                'error': 'sketch preview plan is too large for the existing execution transport',
+                'violations': violations,
+                'counts': summary,
+                'limits': limits,
+            },
+        )
+
+
+def _bounds_payload(bounds: dict[str, float]) -> dict[str, float]:
+    return {
+        'x_min': float(bounds['x_min']),
+        'x_max': float(bounds['x_max']),
+        'y_min': float(bounds['y_min']),
+        'y_max': float(bounds['y_max']),
+        'width': float(bounds['x_max']) - float(bounds['x_min']),
+        'height': float(bounds['y_max']) - float(bounds['y_min']),
+    }
+
+
+def _slowest_timing_stage(timing: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = {
+        key: float(value)
+        for key, value in timing.items()
+        if key.endswith('_time_ms') and key != 'preview_total_time_ms'
+    }
+    if not candidates:
+        return None
+    key, value = max(candidates.items(), key=lambda item: item[1])
+    return {'stage': key.removesuffix('_time_ms'), 'time_ms': float(value)}
+
+
+def _sketch_preview_response(
+    plan,
+    *,
+    preview_id: str | None = None,
+    canonical_plan: CanonicalPathPlan,
+    board_width_m: float,
+    board_height_m: float,
+    preview_geometry_mode: str,
+    use_smooth_svg: bool,
+    curve_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preview = _sketch_preview_strokes(plan)
+    metadata = dict(plan.metadata)
+    base_metadata_warnings = tuple(str(item) for item in metadata.get('warnings') or ())
+    curve_metadata = dict(curve_metadata or {})
+    metadata.update(curve_metadata)
+    metadata['preview_geometry_mode'] = preview_geometry_mode
+    timing = dict(metadata.get('timing') or {})
+    timing['slowest_stage'] = _slowest_timing_stage(timing)
+    metadata['timing'] = timing
+    if 'curve_fit_time_ms' in timing:
+        metadata['curve_fit_time_ms'] = float(timing['curve_fit_time_ms'])
+    primitive_counts = _canonical_primitive_counts(canonical_plan)
+    metadata.update(primitive_counts)
+    warnings = list(plan.metrics.warnings)
+    warnings.extend(base_metadata_warnings)
+    warnings.extend(str(item) for item in curve_metadata.get('warnings') or ())
+    deduped_warnings = list(dict.fromkeys(warnings))
+    metadata['warnings'] = tuple(deduped_warnings)
+    preview_svg = (
+        _smooth_sketch_preview_svg(
+            canonical_plan,
+            board_width_m=board_width_m,
+            board_height_m=board_height_m,
+        )
+        if use_smooth_svg
+        else _sketch_preview_svg(
             preview['strokes'],
             board_width_m=board_width_m,
             board_height_m=board_height_m,
-        ),
+        )
+    )
+    return {
+        'ok': True,
+        'preview_id': preview_id,
+        'mode': plan.mode.value,
+        'stroke_count': len(plan.strokes),
+        'point_count': sum(len(stroke.points) for stroke in plan.strokes),
+        'canonical_command_count': len(canonical_plan.commands),
+        'metrics': asdict(plan.metrics),
+        'metadata': metadata,
+        'bounds': _drawing_plan_bounds(plan),
+        'warnings': deduped_warnings,
+        'preview_svg': preview_svg,
         'preview': preview,
     }
 
@@ -1455,6 +1711,98 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         enable_hatch_ordering=True,
         cluster_units=True,
     )
+    sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
+    sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
+
+    def _carriage_safe_writable_bounds_for_sketch() -> dict[str, float]:
+        try:
+            writable_bounds = runtime.node.carriage_safe_writable_bounds()
+        except Exception:
+            writable_bounds = shared.carriage_safe_writable_bounds()
+        try:
+            safe_workspace_bounds = runtime.node.carriage_safe_safe_bounds()
+        except Exception:
+            safe_workspace_bounds = shared.carriage_safe_workspace_bounds()
+        bounds = {
+            'x_min': max(float(writable_bounds['x_min']), float(safe_workspace_bounds['x_min'])),
+            'x_max': min(float(writable_bounds['x_max']), float(safe_workspace_bounds['x_max'])),
+            'y_min': max(float(writable_bounds['y_min']), float(safe_workspace_bounds['y_min'])),
+            'y_max': min(float(writable_bounds['y_max']), float(safe_workspace_bounds['y_max'])),
+        }
+        return _bounds_payload(bounds)
+
+    def _board_bounds_for_sketch() -> dict[str, float]:
+        return {
+            'x_min': 0.0,
+            'x_max': float(shared.board.width),
+            'y_min': 0.0,
+            'y_max': float(shared.board.height),
+            'width': float(shared.board.width),
+            'height': float(shared.board.height),
+        }
+
+    def _sketch_preview_expired(entry: SketchPreviewCacheEntry, *, now: float) -> bool:
+        return (now - float(entry.created_at_unix)) > float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS)
+
+    def _cleanup_sketch_preview_cache(*, now: float | None = None) -> None:
+        current = time.time() if now is None else float(now)
+        expired_ids = [
+            preview_id
+            for preview_id, entry in sketch_preview_cache.items()
+            if _sketch_preview_expired(entry, now=current)
+        ]
+        for preview_id in expired_ids:
+            sketch_preview_cache.pop(preview_id, None)
+        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
+            sketch_preview_cache.popitem(last=False)
+
+    def _store_sketch_preview(
+        *,
+        preview_id: str | None = None,
+        drawing_plan: DrawingPathPlan,
+        canonical_plan: CanonicalPathPlan,
+        preview_geometry_mode: str,
+        metadata: dict[str, Any],
+        warnings: tuple[str, ...],
+        source_filename: str,
+        parameters: dict[str, Any],
+    ) -> str:
+        _cleanup_sketch_preview_cache()
+        preview_id = uuid.uuid4().hex if preview_id is None else str(preview_id)
+        created_at = time.time()
+        sketch_preview_cache[preview_id] = SketchPreviewCacheEntry(
+            preview_id=preview_id,
+            drawing_plan=drawing_plan,
+            canonical_plan=canonical_plan,
+            preview_geometry_mode=preview_geometry_mode,
+            metadata=dict(metadata),
+            warnings=tuple(str(item) for item in warnings),
+            created_at_unix=created_at,
+            source_filename=str(source_filename or ''),
+            parameters=dict(parameters),
+            stroke_count=len(drawing_plan.strokes),
+            point_count=sum(len(stroke.points) for stroke in drawing_plan.strokes),
+            canonical_command_count=len(canonical_plan.commands),
+        )
+        sketch_preview_cache.move_to_end(preview_id)
+        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
+            sketch_preview_cache.popitem(last=False)
+        return preview_id
+
+    def _load_sketch_preview(preview_id: Any) -> SketchPreviewCacheEntry:
+        if not isinstance(preview_id, str) or not preview_id.strip():
+            raise HTTPException(status_code=422, detail='preview_id is required')
+        normalized_id = preview_id.strip()
+        entry = sketch_preview_cache.get(normalized_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail='sketch preview_id is unknown')
+        now = time.time()
+        if _sketch_preview_expired(entry, now=now):
+            sketch_preview_cache.pop(normalized_id, None)
+            raise HTTPException(status_code=410, detail='sketch preview_id has expired')
+        _cleanup_sketch_preview_cache(now=now)
+        sketch_preview_cache.move_to_end(normalized_id)
+        return entry
 
     @app.get('/assets/{asset_path:path}')
     async def assets(asset_path: str) -> FileResponse:
@@ -1515,39 +1863,52 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         line_sensitivity: Optional[float] = Form(None),
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
+        optimization_preset: Optional[str] = Form(None),
+        preview_geometry_mode: Optional[str] = Form(None),
+        curve_tolerance_px: Optional[float] = Form(None),
+        curve_tolerance_m: Optional[float] = Form(None),
         scale_percent: Optional[float] = Form(None),
         center_x_m: Optional[float] = Form(None),
         center_y_m: Optional[float] = Form(None),
+        fit_to_safe_area: Optional[bool] = Form(None),
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
             _validate_sketch_upload(file, content)
+            sketch_fit_to_safe_area = _coerce_bool(
+                True if fit_to_safe_area is None else fit_to_safe_area,
+                field_name='fit_to_safe_area',
+                default=True,
+            )
+            sketch_safe_bounds = _carriage_safe_writable_bounds_for_sketch()
+            sketch_board_bounds = _board_bounds_for_sketch()
+            sketch_fit_bounds = sketch_safe_bounds if sketch_fit_to_safe_area else sketch_board_bounds
             sketch_margin_m = _coerce_float(
                 0.05 if margin_m is None else margin_m,
                 field_name='margin_m',
                 minimum=0.0,
-                maximum=min(float(shared.board.width), float(shared.board.height)) * 0.45,
+                maximum=min(float(sketch_fit_bounds['width']), float(sketch_fit_bounds['height'])) * 0.45,
             )
             sketch_max_image_dim = _coerce_int(
-                1200 if max_image_dim is None else max_image_dim,
+                1000 if max_image_dim is None else max_image_dim,
                 field_name='max_image_dim',
-                minimum=16,
-                maximum=4096,
+                minimum=500,
+                maximum=1600,
             )
             sketch_min_component_area_px = _coerce_int(
-                8 if min_component_area_px is None else min_component_area_px,
+                2 if min_component_area_px is None else min_component_area_px,
                 field_name='min_component_area_px',
                 minimum=1,
                 maximum=100000,
             )
             sketch_min_stroke_length_px = _coerce_float(
-                4.0 if min_stroke_length_px is None else min_stroke_length_px,
+                1.0 if min_stroke_length_px is None else min_stroke_length_px,
                 field_name='min_stroke_length_px',
                 minimum=0.0,
                 maximum=100000.0,
             )
             sketch_simplify_epsilon_px = _coerce_float(
-                1.0 if simplify_epsilon_px is None else simplify_epsilon_px,
+                0.25 if simplify_epsilon_px is None else simplify_epsilon_px,
                 field_name='simplify_epsilon_px',
                 minimum=0.0,
                 maximum=10000.0,
@@ -1559,16 +1920,38 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=0.95,
             )
             sketch_merge_gap_px = _coerce_float(
-                3.0 if merge_gap_px is None else merge_gap_px,
+                0.0 if merge_gap_px is None else merge_gap_px,
                 field_name='merge_gap_px',
                 minimum=0.0,
                 maximum=1000.0,
             )
             sketch_merge_max_angle_deg = _coerce_float(
-                60.0 if merge_max_angle_deg is None else merge_max_angle_deg,
+                20.0 if merge_max_angle_deg is None else merge_max_angle_deg,
                 field_name='merge_max_angle_deg',
                 minimum=0.0,
                 maximum=180.0,
+            )
+            sketch_optimization_preset = str(optimization_preset or 'detail').strip().lower()
+            sketch_preview_geometry_mode = str(preview_geometry_mode or 'smooth_curves').strip().lower()
+            if sketch_preview_geometry_mode not in {'smooth_curves', 'polyline'}:
+                raise HTTPException(
+                    status_code=422,
+                    detail="preview_geometry_mode must be one of: smooth_curves, polyline",
+                )
+            sketch_curve_tolerance_px = _coerce_float(
+                1.0 if curve_tolerance_px is None else curve_tolerance_px,
+                field_name='curve_tolerance_px',
+                minimum=0.05,
+                maximum=50.0,
+            )
+            sketch_curve_tolerance_m = (
+                None if curve_tolerance_m is None
+                else _coerce_float(
+                    curve_tolerance_m,
+                    field_name='curve_tolerance_m',
+                    minimum=1.0e-6,
+                    maximum=0.25,
+                )
             )
             sketch_scale_percent = _coerce_float(
                 100.0 if scale_percent is None else scale_percent,
@@ -1594,7 +1977,26 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     maximum=float(shared.board.height),
                 )
             )
+            sketch_parameters = {
+                'margin_m': sketch_margin_m,
+                'max_image_dim': sketch_max_image_dim,
+                'min_component_area_px': sketch_min_component_area_px,
+                'min_stroke_length_px': sketch_min_stroke_length_px,
+                'simplify_epsilon_px': sketch_simplify_epsilon_px,
+                'line_sensitivity': sketch_line_sensitivity,
+                'merge_gap_px': sketch_merge_gap_px,
+                'merge_max_angle_deg': sketch_merge_max_angle_deg,
+                'optimization_preset': sketch_optimization_preset,
+                'preview_geometry_mode': sketch_preview_geometry_mode,
+                'curve_tolerance_px': sketch_curve_tolerance_px,
+                'curve_tolerance_m': sketch_curve_tolerance_m,
+                'scale_percent': sketch_scale_percent,
+                'center_x_m': sketch_center_x_m,
+                'center_y_m': sketch_center_y_m,
+                'fit_to_safe_area': sketch_fit_to_safe_area,
+            }
             try:
+                preview_started = time.perf_counter()
                 plan = vectorize_sketch_image_to_plan(
                     content,
                     board_width_m=float(shared.board.width),
@@ -1607,26 +2009,195 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     line_sensitivity=sketch_line_sensitivity,
                     merge_gap_px=sketch_merge_gap_px,
                     merge_max_angle_deg=sketch_merge_max_angle_deg,
+                    optimization_preset=sketch_optimization_preset,
                     scale_percent=sketch_scale_percent,
                     center_x_m=sketch_center_x_m,
                     center_y_m=sketch_center_y_m,
+                    fit_bounds_m=sketch_fit_bounds,
+                    validation_bounds_m=sketch_safe_bounds,
                 )
-                canonical_plan = drawing_path_plan_to_canonical(plan)
+                curve_metadata: dict[str, Any] = {
+                    'preview_geometry_mode': sketch_preview_geometry_mode,
+                    'curve_tolerance_px': float(sketch_curve_tolerance_px),
+                    'fit_to_safe_area': bool(sketch_fit_to_safe_area),
+                    'safe_x_min': float(sketch_safe_bounds['x_min']),
+                    'safe_x_max': float(sketch_safe_bounds['x_max']),
+                    'safe_y_min': float(sketch_safe_bounds['y_min']),
+                    'safe_y_max': float(sketch_safe_bounds['y_max']),
+                    'safe_width': float(sketch_safe_bounds['width']),
+                    'safe_height': float(sketch_safe_bounds['height']),
+                    'safe_bounds_m': sketch_safe_bounds,
+                    'fit_bounds_m': sketch_fit_bounds,
+                    'validation_bounds_m': sketch_safe_bounds,
+                }
+                curve_fit_start = time.perf_counter()
+                if sketch_preview_geometry_mode == 'smooth_curves':
+                    scale_m_per_px = float(dict(plan.metadata).get('scale_m_per_px') or 0.0)
+                    effective_curve_tolerance_m = (
+                        float(sketch_curve_tolerance_m)
+                        if sketch_curve_tolerance_m is not None
+                        else max(1.0e-6, float(sketch_curve_tolerance_px) * scale_m_per_px)
+                    )
+                    smooth_result = drawing_path_plan_to_smooth_canonical(
+                        plan,
+                        curve_tolerance_m=effective_curve_tolerance_m,
+                        max_curve_segment_points=32,
+                        max_fit_time_ms=3000.0,
+                    )
+                    canonical_plan = smooth_result.plan
+                    curve_metadata.update(dict(smooth_result.metadata))
+                    curve_metadata['curve_tolerance_m'] = float(effective_curve_tolerance_m)
+                else:
+                    canonical_plan = drawing_path_plan_to_canonical(plan)
+                    curve_metadata.update(
+                        {
+                            'curve_tolerance_m': None if sketch_curve_tolerance_m is None else float(sketch_curve_tolerance_m),
+                            'line_primitive_count': sum(isinstance(command, LineSegment) for command in canonical_plan.commands),
+                            'quadratic_primitive_count': 0,
+                            'cubic_primitive_count': 0,
+                            'curve_primitive_count': 0,
+                        }
+                    )
+                curve_fit_time_ms = (time.perf_counter() - curve_fit_start) * 1000.0
+                timing = dict(plan.metadata.get('timing') or {})
+                timing['curve_fit_time_ms'] = float(curve_fit_time_ms)
+                timing['preview_total_time_ms'] = (time.perf_counter() - preview_started) * 1000.0
+                plan.metadata['timing'] = timing
             except RuntimeError as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
 
-            return JSONResponse(
-                _sketch_preview_response(
-                    plan,
-                    canonical_command_count=len(canonical_plan.commands),
-                    board_width_m=float(shared.board.width),
-                    board_height_m=float(shared.board.height),
-                )
+            preview_id = uuid.uuid4().hex
+            response_payload = _sketch_preview_response(
+                plan,
+                preview_id=preview_id,
+                canonical_plan=canonical_plan,
+                board_width_m=float(shared.board.width),
+                board_height_m=float(shared.board.height),
+                preview_geometry_mode=sketch_preview_geometry_mode,
+                use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
+                curve_metadata=curve_metadata,
             )
+            _store_sketch_preview(
+                preview_id=preview_id,
+                drawing_plan=plan,
+                canonical_plan=canonical_plan,
+                preview_geometry_mode=sketch_preview_geometry_mode,
+                metadata=dict(response_payload.get('metadata') or {}),
+                warnings=tuple(str(item) for item in response_payload.get('warnings') or ()),
+                source_filename=str(file.filename or ''),
+                parameters=sketch_parameters,
+            )
+            return JSONResponse(response_payload)
         finally:
             await file.close()
+
+    @app.post('/api/sketch-centerline/draw')
+    async def draw_sketch_centerline(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='sketch draw request',
+            max_bytes=4096,
+        )
+        _reject_extra_fields(raw, {'preview_id', 'optimize_stroke_order'}, 'sketch draw request')
+        entry = _load_sketch_preview(raw.get('preview_id'))
+        optimize_stroke_order = _coerce_bool(
+            raw.get('optimize_stroke_order'),
+            field_name='optimize_stroke_order',
+            default=True,
+        )
+        publish_plan = entry.canonical_plan
+        optimization_stats: dict[str, Any] = {}
+        optimization_ms = 0.0
+        if optimize_stroke_order:
+            optimization_start = time.perf_counter()
+            optimization_result = optimize_canonical_plan(
+                entry.canonical_plan,
+                policy=sketch_draw_optimization_policy,
+            )
+            optimization_ms = _elapsed_ms(optimization_start)
+            publish_plan = optimization_result.plan
+            optimization_stats = optimization_result.stats.to_dict()
+
+        size_summary = _canonical_transport_size_summary(publish_plan)
+        _enforce_sketch_draw_size_limits(size_summary)
+
+        build_start = time.perf_counter()
+        primitive_plan_msg = _build_execution_transport_message(
+            publish_plan,
+            writable_bounds=_carriage_safe_writable_bounds_for_sketch(),
+            shared_config=shared,
+            sampling_policy=runtime_sampling_policy,
+        )
+        transport_build_ms = _elapsed_ms(build_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        publish_ms = _elapsed_ms(publish_start)
+        timings = {
+            'optimization_ms': optimization_ms,
+            'transport_build_ms': transport_build_ms,
+            'publish_ms': publish_ms,
+        }
+        preview_payload = {
+            'stroke_count': entry.stroke_count,
+            'point_count': entry.point_count,
+            'bounds': _drawing_plan_bounds(entry.drawing_plan),
+            'diagnostics': canonical_plan_diagnostics(
+                publish_plan,
+                preview_sampling_policy=preview_sampling_policy,
+                runtime_sampling_policy=runtime_sampling_policy,
+            ),
+        }
+        _record_last_plan_debug(
+            source_type='sketch_centerline',
+            canonical_plan=publish_plan,
+            preview_payload=preview_payload,
+            timings=timings,
+            optimizer_stats=optimization_stats,
+            route_metadata={
+                'preview_id': entry.preview_id,
+                'preview_geometry_mode': entry.preview_geometry_mode,
+                'source_filename': entry.source_filename,
+                'parameters': entry.parameters,
+                'metadata': entry.metadata,
+                'used_full_cached_plan': True,
+                'optimized': bool(optimize_stroke_order),
+            },
+            transport=transport,
+            committed=True,
+        )
+        _record_last_execution_debug(
+            source_type='sketch_centerline',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=timings,
+        )
+        return JSONResponse(
+            {
+                'ok': True,
+                'published': True,
+                'active_mode': MODE_DRAW,
+                'source_type': 'sketch_centerline',
+                'preview_id': entry.preview_id,
+                'preview_geometry_mode': entry.preview_geometry_mode,
+                'stroke_count': entry.stroke_count,
+                'point_count': entry.point_count,
+                'canonical_command_count': len(publish_plan.commands),
+                'cached_canonical_command_count': entry.canonical_command_count,
+                'primitive_count': size_summary['primitive_count'],
+                'primitive_descriptor_bytes': size_summary['primitive_descriptor_bytes'],
+                'used_full_cached_plan': True,
+                'optimized': bool(optimize_stroke_order),
+                'optimization': optimization_stats,
+                'transport': transport,
+                'warnings': list(entry.warnings),
+                'timings_ms': timings,
+            }
+        )
 
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
