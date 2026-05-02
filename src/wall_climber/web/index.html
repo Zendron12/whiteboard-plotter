@@ -453,7 +453,7 @@
     .sketch-preview-box {
       display: none;
       gap: 10px;
-      padding: 10px 12px;
+      padding: 12px;
       border: 1px solid var(--paper-line);
       border-radius: var(--radius-md);
       background: rgba(255, 255, 255, 0.62);
@@ -465,11 +465,52 @@
 
     .sketch-preview-box img {
       width: 100%;
-      max-height: 180px;
+      min-height: 260px;
+      max-height: 520px;
       object-fit: contain;
       border: 1px solid rgba(24, 34, 43, 0.08);
       border-radius: var(--radius-sm);
       background: #fff;
+    }
+
+    .sketch-preview-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .sketch-preview-title {
+      color: var(--ink);
+      font-size: 0.86rem;
+      font-weight: 700;
+    }
+
+    .sketch-preview-note,
+    .sketch-preview-warning {
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }
+
+    .sketch-preview-warning {
+      display: none;
+      padding: 8px 10px;
+      border: 1px solid rgba(201, 95, 56, 0.24);
+      border-radius: var(--radius-sm);
+      background: rgba(201, 95, 56, 0.08);
+      color: #8f3d22;
+    }
+
+    .sketch-preview-warning.active {
+      display: block;
+    }
+
+    .sketch-preview-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .sketch-preview-diag {
@@ -1258,6 +1299,17 @@
                 <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
                 <p class="helper-copy">Sketch Centerline preview only — drawing integration comes later.</p>
                 <div id="sketch-preview-box" class="sketch-preview-box">
+                  <div class="sketch-preview-head">
+                    <div>
+                      <div id="sketch-preview-title" class="sketch-preview-title">SVG Preview</div>
+                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board canvas is a sampled Polyline Canvas Preview.</div>
+                    </div>
+                    <div class="sketch-preview-actions">
+                      <button id="sketch-open-svg-btn" class="quiet-btn" type="button" disabled>Open SVG Preview in New Tab</button>
+                      <button id="sketch-download-svg-btn" class="quiet-btn" type="button" disabled>Download SVG Preview</button>
+                    </div>
+                  </div>
+                  <div id="sketch-preview-warning" class="sketch-preview-warning"></div>
                   <img id="sketch-preview-img" alt="Sketch Centerline SVG preview">
                   <div id="sketch-preview-diag" class="sketch-preview-diag">No sketch preview loaded yet.</div>
                 </div>
@@ -1489,8 +1541,13 @@
         sketchCenterY: document.getElementById('sketch-center-y'),
         sketchPreviewBtn: document.getElementById('sketch-preview-btn'),
         sketchPreviewBox: document.getElementById('sketch-preview-box'),
+        sketchPreviewTitle: document.getElementById('sketch-preview-title'),
+        sketchPreviewNote: document.getElementById('sketch-preview-note'),
+        sketchPreviewWarning: document.getElementById('sketch-preview-warning'),
         sketchPreviewImg: document.getElementById('sketch-preview-img'),
         sketchPreviewDiag: document.getElementById('sketch-preview-diag'),
+        sketchOpenSvgBtn: document.getElementById('sketch-open-svg-btn'),
+        sketchDownloadSvgBtn: document.getElementById('sketch-download-svg-btn'),
         svgInput: document.getElementById('svg-input'),
         svgPreviewBtn: document.getElementById('svg-preview-btn'),
         svgSubmitBtn: document.getElementById('svg-submit-btn'),
@@ -1548,6 +1605,7 @@
         uploadStatusTimer: null,
         previewInteraction: null,
         sketchPreviewUrl: null,
+        sketchPreviewSvgText: '',
         sketchPreviewBusy: false,
       };
 
@@ -1936,6 +1994,7 @@
             URL.revokeObjectURL(state.sketchPreviewUrl);
             state.sketchPreviewUrl = null;
           }
+          state.sketchPreviewSvgText = '';
           return;
         }
         const imageUrl = previewState.rasterOverlay.imageUrl;
@@ -1946,6 +2005,7 @@
           URL.revokeObjectURL(state.sketchPreviewUrl);
           state.sketchPreviewUrl = null;
         }
+        state.sketchPreviewSvgText = '';
       }
 
       function previewBaseBounds(previewState = state.vectorPreview) {
@@ -2370,6 +2430,8 @@
         dom.fileUploadBtn.disabled = !backendHealthy;
         dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
         dom.sketchPreviewBtn.disabled = !backendHealthy || state.sketchPreviewBusy;
+        dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
+        dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
       }
 
@@ -3384,6 +3446,28 @@
         return `x ${formatRange(xMin, xMax)} · y ${formatRange(yMin, yMax)}`;
       }
 
+      function sketchPreviewPointRatio(preview) {
+        const returned = Number(preview && preview.returned_point_count);
+        const original = Number(preview && preview.original_point_count);
+        if (!Number.isFinite(returned) || !Number.isFinite(original) || original <= 0) {
+          return { returned: 0, original: 0, percent: 0 };
+        }
+        return {
+          returned,
+          original,
+          percent: Math.max(0, Math.min(100, (returned / original) * 100)),
+        };
+      }
+
+      function sketchTruncationWarning(payload) {
+        const preview = payload && payload.preview ? payload.preview : {};
+        if (!preview.truncated) {
+          return '';
+        }
+        const ratio = sketchPreviewPointRatio(preview);
+        return `Board canvas preview is truncated. Full result is shown in the SVG preview. Canvas points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%).`;
+      }
+
       function formatSketchTiming(timing) {
         if (!timing || typeof timing !== 'object') {
           return 'timing unavailable';
@@ -3437,12 +3521,18 @@
         const minStroke = Number(metadata.effective_min_stroke_length_px ?? metadata.min_stroke_length_px);
         const curveTolerancePx = Number(metadata.curve_tolerance_px);
         const curveToleranceM = Number(metadata.curve_tolerance_m);
+        const curveCount = Number(metadata.curve_primitive_count || 0);
+        const lineCount = Number(metadata.line_primitive_count || 0);
+        const lineDominance = lineCount > Math.max(50, curveCount * 4)
+          ? 'Many strokes are too short or too sharp to fit safely as curves; they remain line segments.'
+          : '';
+        const truncation = sketchTruncationWarning(payload);
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
-        return [
+        const lines = [
           `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
-          `geometry ${metadata.preview_geometry_mode || '--'} · curves ${Number(metadata.curve_primitive_count || 0)} · Q ${Number(metadata.quadratic_primitive_count || 0)} · C ${Number(metadata.cubic_primitive_count || 0)} · lines ${Number(metadata.line_primitive_count || 0)}`,
+          `geometry ${metadata.preview_geometry_mode || '--'} · curves ${curveCount} · Q ${Number(metadata.quadratic_primitive_count || 0)} · C ${Number(metadata.cubic_primitive_count || 0)} · lines ${lineCount}`,
           `curve tol ${Number.isFinite(curveTolerancePx) ? curveTolerancePx.toFixed(2) : '--'} px · ${Number.isFinite(curveToleranceM) ? curveToleranceM.toFixed(5) : '--'} m · max dim ${Number(metadata.max_image_dim || 0) || '--'}`,
           `preset ${metadata.optimization_preset || '--'} · simplify ${Number.isFinite(simplify) ? simplify.toFixed(2) : '--'} · min stroke ${Number.isFinite(minStroke) ? minStroke.toFixed(1) : '--'} px`,
           `merge ${metadata.merge_enabled ? 'on' : 'off'} · gap ${Number.isFinite(mergeGap) ? mergeGap.toFixed(1) : '--'} px · angle ${Number.isFinite(mergeAngle) ? mergeAngle.toFixed(0) : '--'}°`,
@@ -3453,7 +3543,14 @@
           `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
           `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
           formatSketchTiming(metadata.timing),
-        ].join('\n');
+        ];
+        if (truncation) {
+          lines.splice(7, 0, truncation);
+        }
+        if (lineDominance) {
+          lines.splice(3, 0, lineDominance);
+        }
+        return lines.join('\n');
       }
 
       function setSketchPreviewInlineStatus(kind, message) {
@@ -3464,8 +3561,25 @@
           URL.revokeObjectURL(state.sketchPreviewUrl);
           state.sketchPreviewUrl = null;
         }
+        state.sketchPreviewSvgText = '';
         dom.sketchPreviewImg.removeAttribute('src');
         dom.sketchPreviewImg.style.display = 'none';
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = '';
+          dom.sketchPreviewWarning.classList.remove('active');
+        }
+        if (dom.sketchPreviewTitle) {
+          dom.sketchPreviewTitle.textContent = 'SVG Preview';
+        }
+        if (dom.sketchPreviewNote) {
+          dom.sketchPreviewNote.textContent = 'Full SVG output. Board canvas is a sampled Polyline Canvas Preview.';
+        }
+        if (dom.sketchOpenSvgBtn) {
+          dom.sketchOpenSvgBtn.disabled = true;
+        }
+        if (dom.sketchDownloadSvgBtn) {
+          dom.sketchDownloadSvgBtn.disabled = true;
+        }
         dom.sketchPreviewDiag.textContent = message;
         dom.sketchPreviewBox.classList.add('active');
         if (kind === 'loading') {
@@ -3483,6 +3597,7 @@
           state.sketchPreviewUrl = null;
         }
         const svgText = String(payload.preview_svg || '');
+        state.sketchPreviewSvgText = svgText;
         if (svgText) {
           const blob = new Blob([svgText], { type: 'image/svg+xml' });
           state.sketchPreviewUrl = URL.createObjectURL(blob);
@@ -3491,6 +3606,29 @@
         } else {
           dom.sketchPreviewImg.removeAttribute('src');
           dom.sketchPreviewImg.style.display = 'none';
+        }
+        const metadata = payload.metadata || {};
+        const modeLabel = metadata.preview_geometry_mode === 'polyline'
+          ? 'Polyline Debug'
+          : 'Smooth Curves';
+        if (dom.sketchPreviewTitle) {
+          dom.sketchPreviewTitle.textContent = `SVG Preview · ${modeLabel}`;
+        }
+        if (dom.sketchPreviewNote) {
+          dom.sketchPreviewNote.textContent = modeLabel === 'Smooth Curves'
+            ? 'Full Smooth Curves SVG output. Board canvas is a sampled Polyline Canvas Preview.'
+            : 'Full Polyline Debug SVG output. Board canvas is a sampled Polyline Canvas Preview.';
+        }
+        const warning = sketchTruncationWarning(payload);
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = warning;
+          dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
+        }
+        if (dom.sketchOpenSvgBtn) {
+          dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
+        }
+        if (dom.sketchDownloadSvgBtn) {
+          dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         }
         dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
         dom.sketchPreviewBox.classList.add('active');
@@ -3888,6 +4026,27 @@
           dom.sketchPreviewBtn.textContent = 'Preview as Sketch Centerline';
           refreshUiState();
         }
+      });
+
+      dom.sketchOpenSvgBtn.addEventListener('click', () => {
+        if (!state.sketchPreviewUrl) {
+          handleError('Open SVG preview failed', new Error('No Sketch Centerline SVG preview is available.'));
+          return;
+        }
+        window.open(state.sketchPreviewUrl, '_blank', 'noopener,noreferrer');
+      });
+
+      dom.sketchDownloadSvgBtn.addEventListener('click', () => {
+        if (!state.sketchPreviewUrl) {
+          handleError('Download SVG preview failed', new Error('No Sketch Centerline SVG preview is available.'));
+          return;
+        }
+        const anchor = document.createElement('a');
+        anchor.href = state.sketchPreviewUrl;
+        anchor.download = 'sketch-centerline-preview.svg';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
       });
 
       dom.fileCommitBtn.addEventListener('click', async () => {

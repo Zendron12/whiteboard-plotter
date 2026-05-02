@@ -103,6 +103,8 @@ In `smooth_curves` mode, `preview_svg` is generated from real SVG path commands
 including `Q` and `C` for existing canonical `QuadraticBezier` and
 `CubicBezier` primitives where fitting succeeds. In `polyline` mode, the SVG
 uses polylines and is intended as a debug view of the raw point-stroke output.
+The SVG is the full preview output. `preview.strokes` is a capped point preview
+for the board canvas and may be truncated for performance.
 
 ## Existing UI Preview
 
@@ -120,6 +122,14 @@ preview truncation status, raw/final stroke counts, merge counts, selected
 optimization preset, preview geometry mode, curve/line primitive counts, timing
 stages, effective merge/simplification settings, skeleton backend, threshold
 information, placement metadata, and any warnings.
+
+The File tab separates the two preview surfaces:
+
+- `SVG Preview`: full Smooth Curves or Polyline Debug SVG output. This can be
+  opened in a new tab or downloaded for close inspection.
+- `Board Canvas`: sampled Polyline Canvas Preview from `preview.strokes`. If
+  the response is capped, the UI warns that the board canvas is truncated and
+  shows the full result in the SVG preview instead.
 
 ## Tuning Notes
 
@@ -156,6 +166,12 @@ strokes into canonical `QuadraticBezier` and `CubicBezier` commands for the SVG
 preview. This is not just styling: use `Preview Geometry = Polyline Debug` to
 compare the raw point output against `Smooth Curves` and verify whether the SVG
 contains real curve primitives.
+
+Smooth Curves can still contain many line primitives. Short, sharp, noisy, or
+junction-heavy strokes are left as `LineSegment`s to avoid oversmoothing facial,
+hair, or clothing details. A high `line_primitive_count` relative to curve
+counts means the fitter preserved shape fidelity rather than forcing unsafe
+curves.
 
 Scale and Center controls are placement-only. The default fits the sketch inside
 the board margin and auto-centers it. `Sketch Scale (%)` scales that fitted

@@ -224,14 +224,20 @@ def test_sketch_centerline_preview_endpoint_caps_preview_points(monkeypatch) -> 
 
     response = client.post(
         '/api/sketch-centerline/preview',
-        files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
+        files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'smooth_curves', 'curve_tolerance_px': '3.0'},
     )
 
     assert response.status_code == 200
-    preview = response.json()['preview']
+    payload = response.json()
+    preview = payload['preview']
     assert preview['max_points'] == 2
     assert preview['returned_point_count'] <= 2
     assert preview['truncated'] == (preview['original_point_count'] > preview['returned_point_count'])
+    assert payload['metadata']['preview_geometry_mode'] == 'smooth_curves'
+    assert payload['metadata']['curve_primitive_count'] >= 1
+    assert ' Q ' in payload['preview_svg'] or ' C ' in payload['preview_svg']
+    assert '<polyline' not in payload['preview_svg']
 
 
 def test_sketch_centerline_preview_endpoint_rejects_invalid_file_type() -> None:
