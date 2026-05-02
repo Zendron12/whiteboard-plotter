@@ -221,23 +221,40 @@ by time, pass count, and accepted merge count so one preview does not run for
 many minutes. Curve fitting is also time-capped; if it exceeds its budget, the
 remaining spans stay as line segments and a warning is returned.
 
-This path does not set an upload id, does not create a commit request, and does
-not publish to the robot. `Commit File` is disabled while the Sketch Centerline
-preview is active. Drawing/commit integration remains a later task; the normal
-`Upload + Preview`, `Re-Preview`, and `Commit File` flow continues to use the
-existing upload/vector pipeline.
+This path does not set an upload id and does not reuse the normal file commit
+request. `Commit File` is disabled while the Sketch Centerline preview is
+active. The normal `Upload + Preview`, `Re-Preview`, and `Commit File` flow
+continues to use the existing upload/vector pipeline.
 
 ## Runtime Status
 
-The endpoint validates that the produced `DrawingPathPlan` can convert through
-`drawing_path_plan_to_canonical(plan)`, but it does not publish a
-`PrimitivePathPlan`, does not call Webots, and does not command the robot.
-Runtime drawing integration is intentionally deferred until preview behavior is
-stable and endpoint-level safety checks are added.
+`POST /api/sketch-centerline/preview` is still preview-first. On success it now
+returns a `preview_id` and stores the backend-owned result in a temporary
+process-local cache. The cache is intentionally short-lived: entries expire
+after about 10 minutes, only a small number of previews are retained, and the
+cache is cleared when the backend process restarts.
 
-Smooth curve preview is also preview-only. When Draw Sketch Preview is added
-later, the runtime integration must explicitly choose whether to publish the
-smooth canonical plan or the polyline canonical plan.
+`POST /api/sketch-centerline/draw` accepts only that `preview_id`. It does not
+accept browser-provided SVG, preview points, board-canvas data, or path
+commands. The backend looks up the cached canonical plan, validates it against
+the existing execution transport, converts it to `PrimitivePathPlan`, and
+publishes through the existing ROS/Webots executor path.
+
+The draw source matches the preview geometry mode:
+
+- `Smooth Curves`: publishes the cached smooth canonical plan, including
+  `QuadraticBezier`/`CubicBezier` primitives where curve fitting succeeded.
+- `Polyline Debug`: publishes the cached line-only canonical plan from the
+  DrawingPathPlan adapter.
+
+If the cached plan is too large for the guarded transport limits, the draw
+endpoint returns a clear `413` response with command/primitive counts instead of
+crashing. If the preview expired or the runtime is not ready, the endpoint
+returns a clear error and does not publish.
+
+G-code is not used for runtime drawing. The project runtime remains
+`CanonicalPathPlan` / `PrimitivePathPlan` / ROS executor. G-code may be a future
+optional export format, but it is not the main execution path.
 
 ## Limitations
 

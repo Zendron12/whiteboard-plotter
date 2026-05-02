@@ -1294,10 +1294,12 @@
                   <button id="file-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
                   <button id="file-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
                   <button id="sketch-preview-btn" class="quiet-btn" type="button">Preview as Sketch Centerline</button>
+                  <button id="sketch-draw-btn" class="secondary-btn" type="button" disabled>Draw Sketch Preview</button>
                   <button id="file-commit-btn" class="primary-btn" type="button">Commit File</button>
                 </div>
                 <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
-                <p class="helper-copy">Sketch Centerline preview only — drawing integration comes later.</p>
+                <p class="helper-copy">Sketch Centerline draw uses the backend cached preview only. Normal Commit File remains separate.</p>
+                <p id="sketch-draw-status" class="helper-copy">Draw Sketch Preview is available after a successful Sketch Centerline preview.</p>
                 <div id="sketch-preview-box" class="sketch-preview-box">
                   <div class="sketch-preview-head">
                     <div>
@@ -1540,6 +1542,8 @@
         sketchCenterX: document.getElementById('sketch-center-x'),
         sketchCenterY: document.getElementById('sketch-center-y'),
         sketchPreviewBtn: document.getElementById('sketch-preview-btn'),
+        sketchDrawBtn: document.getElementById('sketch-draw-btn'),
+        sketchDrawStatus: document.getElementById('sketch-draw-status'),
         sketchPreviewBox: document.getElementById('sketch-preview-box'),
         sketchPreviewTitle: document.getElementById('sketch-preview-title'),
         sketchPreviewNote: document.getElementById('sketch-preview-note'),
@@ -1604,9 +1608,11 @@
         previewRefreshTimer: null,
         uploadStatusTimer: null,
         previewInteraction: null,
+        sketchPreviewId: null,
         sketchPreviewUrl: null,
         sketchPreviewSvgText: '',
         sketchPreviewBusy: false,
+        sketchDrawBusy: false,
       };
 
       function escapeHtml(text) {
@@ -2008,6 +2014,18 @@
         state.sketchPreviewSvgText = '';
       }
 
+      function setSketchDrawStatus(message) {
+        if (dom.sketchDrawStatus) {
+          dom.sketchDrawStatus.textContent = message;
+        }
+      }
+
+      function resetSketchDrawState(message = 'Draw Sketch Preview is available after a successful Sketch Centerline preview.') {
+        state.sketchPreviewId = null;
+        state.sketchDrawBusy = false;
+        setSketchDrawStatus(message);
+      }
+
       function previewBaseBounds(previewState = state.vectorPreview) {
         if (!previewState) {
           return null;
@@ -2148,6 +2166,7 @@
         revokePreviewResources(state.vectorPreview);
         state.vectorPreview = null;
         state.previewInteraction = null;
+        resetSketchDrawState();
         if (state.previewRefreshTimer) {
           clearTimeout(state.previewRefreshTimer);
           state.previewRefreshTimer = null;
@@ -2211,6 +2230,7 @@
           rasterOverlay: buildRasterOverlay(imageUrl, payload.raster_overlay),
         };
         revokePreviewResources(state.vectorPreview);
+        resetSketchDrawState('Draw Sketch Preview is unavailable during normal file upload preview.');
         state.vectorPreview = nextState;
         if (commitRequest && commitRequest.placement) {
           setPlacementInputs(commitRequest.placement);
@@ -2236,6 +2256,7 @@
             }
           })();
         revokePreviewResources(state.vectorPreview);
+        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal file preview flow.');
         if (dom.sketchPreviewBox) {
           dom.sketchPreviewBox.classList.remove('active');
         }
@@ -2408,6 +2429,13 @@
           state.vectorPreview &&
           state.vectorPreview.sourceType === 'sketch_centerline'
         );
+        const sketchDrawReady = Boolean(
+          runtimeReady &&
+          sketchPreviewActive &&
+          state.sketchPreviewId &&
+          !state.sketchPreviewBusy &&
+          !state.sketchDrawBusy
+        );
 
         dom.modeButtons.forEach((button) => {
           const active = state.runtime && state.runtime.active_mode === button.dataset.mode;
@@ -2430,6 +2458,7 @@
         dom.fileUploadBtn.disabled = !backendHealthy;
         dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
         dom.sketchPreviewBtn.disabled = !backendHealthy || state.sketchPreviewBusy;
+        dom.sketchDrawBtn.disabled = !backendHealthy || !sketchDrawReady;
         dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
         dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
@@ -3557,6 +3586,11 @@
         if (!dom.sketchPreviewBox || !dom.sketchPreviewImg || !dom.sketchPreviewDiag) {
           return;
         }
+        resetSketchDrawState(
+          kind === 'loading'
+            ? 'Preparing backend-owned Sketch preview. Drawing is disabled until preview succeeds.'
+            : 'Draw Sketch Preview is unavailable until a Sketch Centerline preview succeeds.'
+        );
         if (state.sketchPreviewUrl) {
           URL.revokeObjectURL(state.sketchPreviewUrl);
           state.sketchPreviewUrl = null;
@@ -3636,13 +3670,15 @@
 
       function applySketchCenterlinePreview(payload) {
         const preview = payload.preview || {};
+        state.sketchPreviewId = payload.preview_id || null;
+        state.sketchDrawBusy = false;
         const wrappedPreview = {
           strokes: Array.isArray(preview.strokes) ? preview.strokes : [],
           stroke_count: Number(payload.stroke_count || 0),
           point_count: Number(payload.point_count || 0),
           bounds: payload.bounds || null,
           can_commit: false,
-          validation_error: 'Sketch Centerline preview only — drawing integration comes later.',
+          validation_error: 'Use Draw Sketch Preview for the backend cached sketch plan; normal Commit File is separate.',
           diagnostics: {
             sketch_centerline: {
               canonical_command_count: Number(payload.canonical_command_count || 0),
@@ -3666,8 +3702,12 @@
         };
         renderSketchPreviewSvg(payload);
         dom.previewChip.innerHTML = `<strong>Preview</strong> sketch · ${Number(payload.stroke_count || 0)} strokes`;
-        dom.summaryPreview.textContent = `Sketch Centerline preview only with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Drawing integration comes later.`;
-        setNotice('warning', 'Sketch preview only', 'Sketch Centerline preview only — drawing integration comes later.');
+        const drawAvailability = state.sketchPreviewId
+          ? 'Draw Sketch Preview is available and will use the backend cached canonical plan.'
+          : 'Draw Sketch Preview is unavailable because the backend did not return a preview_id.';
+        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. ${drawAvailability}`;
+        setSketchDrawStatus(drawAvailability);
+        setNotice('warning', 'Sketch preview ready', 'Use Draw Sketch Preview to publish the backend cached plan. Normal Commit File remains separate.');
         pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
         refreshUiState({ redrawBoard: true });
       }
@@ -3734,6 +3774,7 @@
 
       async function uploadAndPreviewFile(file) {
         stopUploadStatusPolling();
+        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal Upload + Preview flow.');
         const form = new FormData();
         form.append('file', file);
         const payload = await apiRequest('/api/draw/file', {
@@ -3799,6 +3840,28 @@
         applySketchCenterlinePreview(payload);
       }
 
+      async function drawSketchCenterlinePreview() {
+        if (!state.sketchPreviewId) {
+          throw new Error('No Sketch Centerline preview_id is available. Run Preview as Sketch Centerline first.');
+        }
+        await ensureMode('draw');
+        const payload = await apiRequest('/api/sketch-centerline/draw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preview_id: state.sketchPreviewId }),
+        });
+        const primitiveCount = Number(payload.primitive_count || 0);
+        const commandCount = Number(payload.canonical_command_count || 0);
+        const geometryMode = payload.preview_geometry_mode === 'polyline'
+          ? 'Polyline Debug'
+          : 'Smooth Curves';
+        setSketchDrawStatus(`Sketch draw published from cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives.`);
+        setNotice('success', 'Sketch draw started', `Published cached ${geometryMode} plan through the existing draw executor.`);
+        pushFeed(`Sketch Centerline draw published (${geometryMode}).`, 'success');
+        refreshRuntime().catch(() => {});
+        return payload;
+      }
+
       function buildUploadPayload() {
         if (!state.latestUploadId) {
           throw new Error('No uploaded file is available yet.');
@@ -3811,6 +3874,7 @@
 
       async function previewUploadedFile() {
         stopUploadStatusPolling();
+        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal file preview flow.');
         const payload = await apiRequest('/api/vector/file/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3913,6 +3977,11 @@
             }
           }
         });
+      });
+
+      dom.fileInput.addEventListener('change', () => {
+        resetSketchDrawState('Draw Sketch Preview is unavailable until this file is previewed as Sketch Centerline.');
+        refreshUiState();
       });
 
       dom.placementResetBtn.addEventListener('click', () => {
@@ -4024,6 +4093,28 @@
         } finally {
           state.sketchPreviewBusy = false;
           dom.sketchPreviewBtn.textContent = 'Preview as Sketch Centerline';
+          refreshUiState();
+        }
+      });
+
+      dom.sketchDrawBtn.addEventListener('click', async () => {
+        state.sketchDrawBusy = true;
+        dom.sketchDrawBtn.textContent = 'Drawing...';
+        setSketchDrawStatus('Publishing cached Sketch Centerline preview through the existing draw executor...');
+        refreshUiState();
+        try {
+          await drawSketchCenterlinePreview();
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Unknown sketch draw error';
+          if (/expired|unknown|preview_id/i.test(message)) {
+            resetSketchDrawState('Sketch preview expired or is no longer available. Preview the sketch again before drawing.');
+          } else {
+            setSketchDrawStatus(`Sketch draw failed: ${message}`);
+          }
+          handleError('Draw Sketch Preview failed', error);
+        } finally {
+          state.sketchDrawBusy = false;
+          dom.sketchDrawBtn.textContent = 'Draw Sketch Preview';
           refreshUiState();
         }
       });

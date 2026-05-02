@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import json
@@ -120,6 +121,7 @@ from wall_climber.ingestion.upload_routing import (
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
 from wall_climber.image_pipeline.curve_fit import drawing_path_plan_to_smooth_canonical
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
+from wall_climber.image_pipeline.types import DrawingPathPlan
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
@@ -162,6 +164,11 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _MAX_SVG_BYTES = 256 * 1024
 _MAX_VECTOR_REQUEST_BYTES = 512 * 1024
 _SKETCH_PREVIEW_MAX_POINTS = 2400
+_SKETCH_PREVIEW_CACHE_TTL_SECONDS = 10 * 60
+_SKETCH_PREVIEW_CACHE_MAX_ENTRIES = 16
+_SKETCH_DRAW_MAX_CANONICAL_COMMANDS = 200_000
+_SKETCH_DRAW_MAX_PRIMITIVES = 200_000
+_SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES = 16 * 1024 * 1024
 _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
@@ -178,6 +185,22 @@ class PreparedImageArtifact:
     image_result: Any
     defaults: dict[str, Any]
     timings_ms: dict[str, float]
+
+
+@dataclass(frozen=True)
+class SketchPreviewCacheEntry:
+    preview_id: str
+    drawing_plan: DrawingPathPlan
+    canonical_plan: CanonicalPathPlan
+    preview_geometry_mode: str
+    metadata: dict[str, Any]
+    warnings: tuple[str, ...]
+    created_at_unix: float
+    source_filename: str
+    parameters: dict[str, Any]
+    stroke_count: int
+    point_count: int
+    canonical_command_count: int
 
 
 class WebBackendNode(Node):
@@ -1497,6 +1520,44 @@ def _canonical_primitive_counts(plan: CanonicalPathPlan) -> dict[str, int]:
     }
 
 
+def _canonical_transport_size_summary(plan: CanonicalPathPlan) -> dict[str, int]:
+    descriptor = canonical_plan_to_primitive_path_plan(plan)
+    primitive_count = len(descriptor['primitives'])
+    descriptor_bytes = len(
+        json.dumps(descriptor, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    )
+    return {
+        'canonical_command_count': int(len(plan.commands)),
+        'primitive_count': int(primitive_count),
+        'primitive_descriptor_bytes': int(descriptor_bytes),
+    }
+
+
+def _enforce_sketch_draw_size_limits(summary: dict[str, int]) -> None:
+    limits = {
+        'max_canonical_command_count': int(_SKETCH_DRAW_MAX_CANONICAL_COMMANDS),
+        'max_primitive_count': int(_SKETCH_DRAW_MAX_PRIMITIVES),
+        'max_primitive_descriptor_bytes': int(_SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES),
+    }
+    violations: list[str] = []
+    if int(summary['canonical_command_count']) > limits['max_canonical_command_count']:
+        violations.append('canonical_command_count')
+    if int(summary['primitive_count']) > limits['max_primitive_count']:
+        violations.append('primitive_count')
+    if int(summary['primitive_descriptor_bytes']) > limits['max_primitive_descriptor_bytes']:
+        violations.append('primitive_descriptor_bytes')
+    if violations:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                'error': 'sketch preview plan is too large for the existing execution transport',
+                'violations': violations,
+                'counts': summary,
+                'limits': limits,
+            },
+        )
+
+
 def _slowest_timing_stage(timing: dict[str, Any]) -> dict[str, Any] | None:
     candidates = {
         key: float(value)
@@ -1512,6 +1573,7 @@ def _slowest_timing_stage(timing: dict[str, Any]) -> dict[str, Any] | None:
 def _sketch_preview_response(
     plan,
     *,
+    preview_id: str | None = None,
     canonical_plan: CanonicalPathPlan,
     board_width_m: float,
     board_height_m: float,
@@ -1552,6 +1614,7 @@ def _sketch_preview_response(
     )
     return {
         'ok': True,
+        'preview_id': preview_id,
         'mode': plan.mode.value,
         'stroke_count': len(plan.strokes),
         'point_count': sum(len(stroke.points) for stroke in plan.strokes),
@@ -1599,6 +1662,70 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         enable_hatch_ordering=True,
         cluster_units=True,
     )
+    sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
+
+    def _sketch_preview_expired(entry: SketchPreviewCacheEntry, *, now: float) -> bool:
+        return (now - float(entry.created_at_unix)) > float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS)
+
+    def _cleanup_sketch_preview_cache(*, now: float | None = None) -> None:
+        current = time.time() if now is None else float(now)
+        expired_ids = [
+            preview_id
+            for preview_id, entry in sketch_preview_cache.items()
+            if _sketch_preview_expired(entry, now=current)
+        ]
+        for preview_id in expired_ids:
+            sketch_preview_cache.pop(preview_id, None)
+        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
+            sketch_preview_cache.popitem(last=False)
+
+    def _store_sketch_preview(
+        *,
+        preview_id: str | None = None,
+        drawing_plan: DrawingPathPlan,
+        canonical_plan: CanonicalPathPlan,
+        preview_geometry_mode: str,
+        metadata: dict[str, Any],
+        warnings: tuple[str, ...],
+        source_filename: str,
+        parameters: dict[str, Any],
+    ) -> str:
+        _cleanup_sketch_preview_cache()
+        preview_id = uuid.uuid4().hex if preview_id is None else str(preview_id)
+        created_at = time.time()
+        sketch_preview_cache[preview_id] = SketchPreviewCacheEntry(
+            preview_id=preview_id,
+            drawing_plan=drawing_plan,
+            canonical_plan=canonical_plan,
+            preview_geometry_mode=preview_geometry_mode,
+            metadata=dict(metadata),
+            warnings=tuple(str(item) for item in warnings),
+            created_at_unix=created_at,
+            source_filename=str(source_filename or ''),
+            parameters=dict(parameters),
+            stroke_count=len(drawing_plan.strokes),
+            point_count=sum(len(stroke.points) for stroke in drawing_plan.strokes),
+            canonical_command_count=len(canonical_plan.commands),
+        )
+        sketch_preview_cache.move_to_end(preview_id)
+        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
+            sketch_preview_cache.popitem(last=False)
+        return preview_id
+
+    def _load_sketch_preview(preview_id: Any) -> SketchPreviewCacheEntry:
+        if not isinstance(preview_id, str) or not preview_id.strip():
+            raise HTTPException(status_code=422, detail='preview_id is required')
+        normalized_id = preview_id.strip()
+        entry = sketch_preview_cache.get(normalized_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail='sketch preview_id is unknown')
+        now = time.time()
+        if _sketch_preview_expired(entry, now=now):
+            sketch_preview_cache.pop(normalized_id, None)
+            raise HTTPException(status_code=410, detail='sketch preview_id has expired')
+        _cleanup_sketch_preview_cache(now=now)
+        sketch_preview_cache.move_to_end(normalized_id)
+        return entry
 
     @app.get('/assets/{asset_path:path}')
     async def assets(asset_path: str) -> FileResponse:
@@ -1764,6 +1891,23 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     maximum=float(shared.board.height),
                 )
             )
+            sketch_parameters = {
+                'margin_m': sketch_margin_m,
+                'max_image_dim': sketch_max_image_dim,
+                'min_component_area_px': sketch_min_component_area_px,
+                'min_stroke_length_px': sketch_min_stroke_length_px,
+                'simplify_epsilon_px': sketch_simplify_epsilon_px,
+                'line_sensitivity': sketch_line_sensitivity,
+                'merge_gap_px': sketch_merge_gap_px,
+                'merge_max_angle_deg': sketch_merge_max_angle_deg,
+                'optimization_preset': sketch_optimization_preset,
+                'preview_geometry_mode': sketch_preview_geometry_mode,
+                'curve_tolerance_px': sketch_curve_tolerance_px,
+                'curve_tolerance_m': sketch_curve_tolerance_m,
+                'scale_percent': sketch_scale_percent,
+                'center_x_m': sketch_center_x_m,
+                'center_y_m': sketch_center_y_m,
+            }
             try:
                 preview_started = time.perf_counter()
                 plan = vectorize_sketch_image_to_plan(
@@ -1825,19 +1969,110 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
 
-            return JSONResponse(
-                _sketch_preview_response(
-                    plan,
-                    canonical_plan=canonical_plan,
-                    board_width_m=float(shared.board.width),
-                    board_height_m=float(shared.board.height),
-                    preview_geometry_mode=sketch_preview_geometry_mode,
-                    use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
-                    curve_metadata=curve_metadata,
-                )
+            preview_id = uuid.uuid4().hex
+            response_payload = _sketch_preview_response(
+                plan,
+                preview_id=preview_id,
+                canonical_plan=canonical_plan,
+                board_width_m=float(shared.board.width),
+                board_height_m=float(shared.board.height),
+                preview_geometry_mode=sketch_preview_geometry_mode,
+                use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
+                curve_metadata=curve_metadata,
             )
+            _store_sketch_preview(
+                preview_id=preview_id,
+                drawing_plan=plan,
+                canonical_plan=canonical_plan,
+                preview_geometry_mode=sketch_preview_geometry_mode,
+                metadata=dict(response_payload.get('metadata') or {}),
+                warnings=tuple(str(item) for item in response_payload.get('warnings') or ()),
+                source_filename=str(file.filename or ''),
+                parameters=sketch_parameters,
+            )
+            return JSONResponse(response_payload)
         finally:
             await file.close()
+
+    @app.post('/api/sketch-centerline/draw')
+    async def draw_sketch_centerline(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='sketch draw request',
+            max_bytes=4096,
+        )
+        _reject_extra_fields(raw, {'preview_id'}, 'sketch draw request')
+        entry = _load_sketch_preview(raw.get('preview_id'))
+        size_summary = _canonical_transport_size_summary(entry.canonical_plan)
+        _enforce_sketch_draw_size_limits(size_summary)
+
+        build_start = time.perf_counter()
+        primitive_plan_msg = _build_execution_transport_message(
+            entry.canonical_plan,
+            writable_bounds=runtime.node.writable_bounds(),
+            shared_config=shared,
+            sampling_policy=runtime_sampling_policy,
+        )
+        transport_build_ms = _elapsed_ms(build_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        publish_ms = _elapsed_ms(publish_start)
+        timings = {
+            'transport_build_ms': transport_build_ms,
+            'publish_ms': publish_ms,
+        }
+        preview_payload = {
+            'stroke_count': entry.stroke_count,
+            'point_count': entry.point_count,
+            'bounds': _drawing_plan_bounds(entry.drawing_plan),
+            'diagnostics': canonical_plan_diagnostics(
+                entry.canonical_plan,
+                preview_sampling_policy=preview_sampling_policy,
+                runtime_sampling_policy=runtime_sampling_policy,
+            ),
+        }
+        _record_last_plan_debug(
+            source_type='sketch_centerline',
+            canonical_plan=entry.canonical_plan,
+            preview_payload=preview_payload,
+            timings=timings,
+            route_metadata={
+                'preview_id': entry.preview_id,
+                'preview_geometry_mode': entry.preview_geometry_mode,
+                'source_filename': entry.source_filename,
+                'parameters': entry.parameters,
+                'metadata': entry.metadata,
+            },
+            transport=transport,
+            committed=True,
+        )
+        _record_last_execution_debug(
+            source_type='sketch_centerline',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=timings,
+        )
+        return JSONResponse(
+            {
+                'ok': True,
+                'published': True,
+                'active_mode': MODE_DRAW,
+                'source_type': 'sketch_centerline',
+                'preview_id': entry.preview_id,
+                'preview_geometry_mode': entry.preview_geometry_mode,
+                'stroke_count': entry.stroke_count,
+                'point_count': entry.point_count,
+                'canonical_command_count': entry.canonical_command_count,
+                'primitive_count': size_summary['primitive_count'],
+                'primitive_descriptor_bytes': size_summary['primitive_descriptor_bytes'],
+                'transport': transport,
+                'warnings': list(entry.warnings),
+                'timings_ms': timings,
+            }
+        )
 
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
