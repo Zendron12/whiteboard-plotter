@@ -513,6 +513,15 @@
       gap: 8px;
     }
 
+    .sketch-evaluation-box {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      border-radius: var(--radius-sm);
+      background: rgba(248, 250, 252, 0.74);
+    }
+
     .sketch-preview-diag {
       color: var(--muted);
       font-size: 0.82rem;
@@ -1250,6 +1259,10 @@
                     <input id="sketch-fit-safe" type="checkbox" checked>
                   </div>
                   <div class="field">
+                    <label for="sketch-safe-fit-padding">Safe Fit Padding (m)</label>
+                    <input id="sketch-safe-fit-padding" type="number" min="0" step="0.005" value="0.03">
+                  </div>
+                  <div class="field">
                     <label for="sketch-optimize-draw">Optimize Stroke Order Before Draw</label>
                     <input id="sketch-optimize-draw" type="checkbox" checked>
                   </div>
@@ -1312,7 +1325,7 @@
                   <div class="sketch-preview-head">
                     <div>
                       <div id="sketch-preview-title" class="sketch-preview-title">SVG Preview</div>
-                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board canvas is a sampled Polyline Canvas Preview.</div>
+                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.</div>
                     </div>
                     <div class="sketch-preview-actions">
                       <button id="sketch-open-svg-btn" class="quiet-btn" type="button" disabled>Open SVG Preview in New Tab</button>
@@ -1322,6 +1335,16 @@
                   <div id="sketch-preview-warning" class="sketch-preview-warning"></div>
                   <img id="sketch-preview-img" alt="Sketch Centerline SVG preview">
                   <div id="sketch-preview-diag" class="sketch-preview-diag">No sketch preview loaded yet.</div>
+                  <div class="sketch-evaluation-box">
+                    <div class="sketch-preview-head">
+                      <div>
+                        <div class="sketch-preview-title">Sketch Baseline / Evaluation</div>
+                        <div class="sketch-preview-note">Report-friendly preview and draw metrics.</div>
+                      </div>
+                      <button id="sketch-download-metrics-btn" class="quiet-btn" type="button" disabled>Download Sketch Metrics JSON</button>
+                    </div>
+                    <div id="sketch-evaluation-diag" class="sketch-preview-diag">No sketch metrics loaded yet.</div>
+                  </div>
                 </div>
               </div>
 
@@ -1539,6 +1562,7 @@
         sketchOptimizationPreset: document.getElementById('sketch-optimization-preset'),
         sketchPreviewGeometry: document.getElementById('sketch-preview-geometry'),
         sketchFitSafe: document.getElementById('sketch-fit-safe'),
+        sketchSafeFitPadding: document.getElementById('sketch-safe-fit-padding'),
         sketchOptimizeDraw: document.getElementById('sketch-optimize-draw'),
         sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
         sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
@@ -1560,8 +1584,10 @@
         sketchPreviewWarning: document.getElementById('sketch-preview-warning'),
         sketchPreviewImg: document.getElementById('sketch-preview-img'),
         sketchPreviewDiag: document.getElementById('sketch-preview-diag'),
+        sketchEvaluationDiag: document.getElementById('sketch-evaluation-diag'),
         sketchOpenSvgBtn: document.getElementById('sketch-open-svg-btn'),
         sketchDownloadSvgBtn: document.getElementById('sketch-download-svg-btn'),
+        sketchDownloadMetricsBtn: document.getElementById('sketch-download-metrics-btn'),
         svgInput: document.getElementById('svg-input'),
         svgPreviewBtn: document.getElementById('svg-preview-btn'),
         svgSubmitBtn: document.getElementById('svg-submit-btn'),
@@ -1621,6 +1647,13 @@
         sketchPreviewId: null,
         sketchPreviewUrl: null,
         sketchPreviewSvgText: '',
+        sketchPreviewPayload: null,
+        sketchPreviewParameters: null,
+        sketchLatestDrawPayload: null,
+        sketchMetricsPayload: null,
+        sketchBoardOverlayImage: null,
+        sketchBoardOverlayLoaded: false,
+        sketchBoardOverlayToken: 0,
         sketchPreviewBusy: false,
         sketchDrawBusy: false,
       };
@@ -2004,7 +2037,59 @@
         };
       }
 
+      function clearSketchBoardOverlay() {
+        state.sketchBoardOverlayToken += 1;
+        if (state.sketchBoardOverlayImage) {
+          state.sketchBoardOverlayImage.onload = null;
+          state.sketchBoardOverlayImage.onerror = null;
+        }
+        state.sketchBoardOverlayImage = null;
+        state.sketchBoardOverlayLoaded = false;
+      }
+
+      function sketchBoardOverlayActive() {
+        return Boolean(
+          state.vectorPreview &&
+          state.vectorPreview.sourceType === 'sketch_centerline' &&
+          state.sketchPreviewUrl &&
+          state.sketchBoardOverlayImage &&
+          state.sketchBoardOverlayLoaded
+        );
+      }
+
+      function prepareSketchBoardOverlay() {
+        clearSketchBoardOverlay();
+        if (!state.sketchPreviewUrl) {
+          return;
+        }
+        const token = state.sketchBoardOverlayToken + 1;
+        state.sketchBoardOverlayToken = token;
+        const image = new Image();
+        state.sketchBoardOverlayImage = image;
+        state.sketchBoardOverlayLoaded = false;
+        image.onload = () => {
+          if (state.sketchBoardOverlayToken !== token || state.sketchBoardOverlayImage !== image) {
+            return;
+          }
+          state.sketchBoardOverlayLoaded = true;
+          updateSketchPreviewDiagnostics();
+          refreshUiState({ redrawBoard: true });
+        };
+        image.onerror = () => {
+          if (state.sketchBoardOverlayToken !== token || state.sketchBoardOverlayImage !== image) {
+            return;
+          }
+          state.sketchBoardOverlayLoaded = false;
+          updateSketchPreviewDiagnostics();
+          refreshUiState({ redrawBoard: true });
+        };
+        image.src = state.sketchPreviewUrl;
+      }
+
       function revokePreviewResources(previewState) {
+        clearSketchBoardOverlay();
+        state.sketchPreviewPayload = null;
+        state.sketchPreviewParameters = null;
         if (!previewState || !previewState.rasterOverlay) {
           if (state.sketchPreviewUrl) {
             URL.revokeObjectURL(state.sketchPreviewUrl);
@@ -2190,6 +2275,9 @@
         if (dom.sketchPreviewDiag) {
           dom.sketchPreviewDiag.textContent = 'No sketch preview loaded yet.';
         }
+        state.sketchPreviewParameters = null;
+        state.sketchLatestDrawPayload = null;
+        updateSketchMetricsPayload();
         dom.previewChip.innerHTML = '<strong>Preview</strong> none';
         dom.summaryPreview.textContent = 'No preview loaded yet.';
         refreshUiState({ redrawBoard: true });
@@ -2276,6 +2364,10 @@
         if (dom.sketchPreviewDiag) {
           dom.sketchPreviewDiag.textContent = 'No sketch preview loaded yet.';
         }
+        state.sketchPreviewPayload = null;
+        state.sketchPreviewParameters = null;
+        state.sketchLatestDrawPayload = null;
+        updateSketchMetricsPayload();
         state.vectorPreview = {
           sourceType,
           preview: payload.preview,
@@ -2471,6 +2563,7 @@
         dom.sketchDrawBtn.disabled = !backendHealthy || !sketchDrawReady;
         dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
         dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
+        dom.sketchDownloadMetricsBtn.disabled = !state.sketchMetricsPayload;
         dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
       }
 
@@ -3036,9 +3129,40 @@
         return 'rgba(201, 95, 56, 0.95)';
       }
 
+      function drawSketchSvgBoardOverlay(layout) {
+        if (!sketchBoardOverlayActive()) {
+          return false;
+        }
+        const boardWidth = Number(layout.board.width);
+        const boardHeight = Number(layout.board.height);
+        if (!Number.isFinite(boardWidth) || !Number.isFinite(boardHeight) || boardWidth <= 0 || boardHeight <= 0) {
+          return false;
+        }
+        const topLeft = boardToCanvas(layout, 0, 0);
+        const bottomRight = boardToCanvas(layout, boardWidth, boardHeight);
+        const x = Math.min(topLeft.x, bottomRight.x);
+        const y = Math.min(topLeft.y, bottomRight.y);
+        const width = Math.abs(bottomRight.x - topLeft.x);
+        const height = Math.abs(bottomRight.y - topLeft.y);
+        if (width <= 0 || height <= 0) {
+          return false;
+        }
+
+        ctx.save();
+        roundedRect(ctx, layout.originX, layout.originY, layout.boardPixelWidth, layout.boardPixelHeight, 22);
+        ctx.clip();
+        ctx.globalAlpha = 0.92;
+        ctx.drawImage(state.sketchBoardOverlayImage, x, y, width, height);
+        ctx.restore();
+        return true;
+      }
+
       function drawVectorPreview(layout) {
         const previewState = state.vectorPreview;
         if (!previewIsBoardVisible(previewState)) {
+          return;
+        }
+        if (previewState.sourceType === 'sketch_centerline' && drawSketchSvgBoardOverlay(layout)) {
           return;
         }
         const preview = previewState && previewState.preview ? previewState.preview : null;
@@ -3511,11 +3635,22 @@
 
       function sketchTruncationWarning(payload) {
         const preview = payload && payload.preview ? payload.preview : {};
-        if (!preview.truncated) {
-          return '';
-        }
+        const hasSvg = Boolean(payload && payload.preview_svg);
+        const overlayActive = sketchBoardOverlayActive();
         const ratio = sketchPreviewPointRatio(preview);
-        return `Board canvas preview is truncated. Full result is shown in the SVG preview. Canvas points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%).`;
+        const pointText = ratio.original > 0
+          ? `Sampled points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%)${preview.truncated ? ' · truncated' : ''}.`
+          : 'Sampled point counts unavailable.';
+        if (hasSvg && overlayActive) {
+          return `Board workspace is showing the full SVG preview. ${pointText} Sampled points are fallback/debug only.`;
+        }
+        if (hasSvg) {
+          return `Board workspace is showing a sampled preview only while the SVG overlay loads. Full result is available in the SVG preview. ${pointText}`;
+        }
+        if (preview.truncated) {
+          return `Board workspace is showing a sampled preview only. Full result is available in the SVG preview when one is returned. ${pointText}`;
+        }
+        return `Board workspace is showing a sampled preview only. ${pointText}`;
       }
 
       function formatSketchTiming(timing) {
@@ -3601,7 +3736,146 @@
         if (lineDominance) {
           lines.splice(3, 0, lineDominance);
         }
+        const safePadding = Number(metadata.safe_fit_padding_m);
+        const requestedScale = Number(metadata.requested_scale_percent);
+        const effectiveScale = Number(metadata.effective_scale_percent ?? metadata.scale_percent);
+        if (Number.isFinite(safePadding)) {
+          lines.splice(4, 0, `safe fit padding ${safePadding.toFixed(3)} m`);
+        }
+        if (metadata.safe_fit_auto_shrink_applied) {
+          lines.splice(
+            5,
+            0,
+            `auto-shrink applied · requested ${Number.isFinite(requestedScale) ? requestedScale.toFixed(1) : '--'}% · effective ${Number.isFinite(effectiveScale) ? effectiveScale.toFixed(1) : '--'}%`
+          );
+        }
         return lines.join('\n');
+      }
+
+      function metricNumber(value, digits = 2, suffix = '') {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? `${numeric.toFixed(digits)}${suffix}` : '--';
+      }
+
+      function sketchEvaluationText(previewPayload = state.sketchPreviewPayload, drawPayload = state.sketchLatestDrawPayload) {
+        if (!previewPayload || !previewPayload.evaluation) {
+          return 'No sketch metrics loaded yet.';
+        }
+        const evaluation = previewPayload.evaluation || {};
+        const metadata = previewPayload.metadata || {};
+        const preview = previewPayload.preview || {};
+        const drawEvaluation = drawPayload && drawPayload.evaluation ? drawPayload.evaluation : null;
+        const overlayLabel = sketchBoardOverlayActive()
+          ? 'full SVG overlay'
+          : (preview.truncated ? 'sampled fallback/truncated' : 'sampled fallback');
+        const lines = [
+          `processing ${metricNumber(evaluation.processing_total_time_ms, 0, ' ms')} · slowest ${(evaluation.timing_slowest_stage && evaluation.timing_slowest_stage.stage) || '--'} ${metricNumber(evaluation.timing_slowest_stage && evaluation.timing_slowest_stage.time_ms, 0, ' ms')}`,
+          `strokes ${Number(evaluation.stroke_count || 0)} · points ${Number(evaluation.point_count || 0)} · commands ${Number(evaluation.canonical_command_count || 0)} · primitives ${Number(evaluation.primitive_count || 0)}`,
+          `draw length ${metricNumber(evaluation.draw_length_m, 3, ' m')} · pen-up travel ${metricNumber(evaluation.estimated_pen_up_travel_m, 3, ' m')} · pen lifts ${Number(evaluation.estimated_pen_lifts || 0)}`,
+          `bounds ${metricNumber(evaluation.bounds && evaluation.bounds.width_m, 3, ' m')} × ${metricNumber(evaluation.bounds && evaluation.bounds.height_m, 3, ' m')} · safe ${formatSketchSafeBounds(metadata)}`,
+          `geometry ${evaluation.preview_geometry_mode || '--'} · preset ${evaluation.optimization_preset || '--'} · max dim ${Number(evaluation.max_image_dim || 0) || '--'}`,
+          `transport ${evaluation.final_transport_validation || '--'} · workspace ${overlayLabel} · full cached plan used for draw`,
+        ];
+        if (metadata.safe_fit_auto_shrink_applied) {
+          lines.push(`safe-fit auto-shrink ${metricNumber(metadata.requested_scale_percent, 1, '%')} → ${metricNumber(metadata.effective_scale_percent, 1, '%')}`);
+        }
+        if (drawEvaluation) {
+          lines.push(
+            `draw published · optimized ${drawEvaluation.optimized ? 'yes' : 'no'} · travel ${metricNumber(drawEvaluation.original_travel_length_m, 3, ' m')} → ${metricNumber(drawEvaluation.optimized_travel_length_m, 3, ' m')} · reduction ${metricNumber(drawEvaluation.travel_reduction_m, 3, ' m')} (${metricNumber(drawEvaluation.travel_reduction_percent, 1, '%')})`
+          );
+        }
+        return lines.join('\n');
+      }
+
+      function updateSketchMetricsPayload() {
+        if (!state.sketchPreviewPayload) {
+          state.sketchMetricsPayload = null;
+          if (dom.sketchEvaluationDiag) {
+            dom.sketchEvaluationDiag.textContent = 'No sketch metrics loaded yet.';
+          }
+          return;
+        }
+        const payload = state.sketchPreviewPayload;
+        state.sketchMetricsPayload = {
+          generated_at: new Date().toISOString(),
+          preview_id: payload.preview_id || state.sketchPreviewId,
+          preview_parameters: state.sketchPreviewParameters || {},
+          preview_metadata: payload.metadata || {},
+          preview_timing: (payload.metadata && payload.metadata.timing) || {},
+          preview_bounds: payload.bounds || {},
+          preview_metrics: payload.metrics || {},
+          preview_evaluation: payload.evaluation || {},
+          preview_counts: {
+            stroke_count: Number(payload.stroke_count || 0),
+            point_count: Number(payload.point_count || 0),
+            canonical_command_count: Number(payload.canonical_command_count || 0),
+            primitive_count: Number(payload.primitive_count || 0),
+          },
+          preview_sample_counts: {
+            max_points: Number(payload.preview && payload.preview.max_points || 0),
+            returned_point_count: Number(payload.preview && payload.preview.returned_point_count || 0),
+            original_point_count: Number(payload.preview && payload.preview.original_point_count || 0),
+            truncated: Boolean(payload.preview && payload.preview.truncated),
+          },
+          board_workspace: {
+            svg_overlay_active: sketchBoardOverlayActive(),
+            sampled_preview_is_fallback: true,
+          },
+          draw_summary: state.sketchLatestDrawPayload ? {
+            ok: Boolean(state.sketchLatestDrawPayload.ok),
+            published: Boolean(state.sketchLatestDrawPayload.published),
+            preview_id: state.sketchLatestDrawPayload.preview_id,
+            preview_geometry_mode: state.sketchLatestDrawPayload.preview_geometry_mode,
+            canonical_command_count: state.sketchLatestDrawPayload.canonical_command_count,
+            primitive_count: state.sketchLatestDrawPayload.primitive_count,
+            used_full_cached_plan: state.sketchLatestDrawPayload.used_full_cached_plan,
+            optimized: state.sketchLatestDrawPayload.optimized,
+            optimization: state.sketchLatestDrawPayload.optimization || {},
+            evaluation: state.sketchLatestDrawPayload.evaluation || {},
+            transport: state.sketchLatestDrawPayload.transport || {},
+            timings_ms: state.sketchLatestDrawPayload.timings_ms || {},
+          } : null,
+        };
+        if (dom.sketchEvaluationDiag) {
+          dom.sketchEvaluationDiag.textContent = sketchEvaluationText();
+        }
+      }
+
+      function updateSketchPreviewDiagnostics(payload = state.sketchPreviewPayload) {
+        if (!payload) {
+          return;
+        }
+        const workspaceStatus = sketchTruncationWarning(payload);
+        const warning = [
+          workspaceStatus,
+          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
+        ].filter(Boolean).join(' ');
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = warning;
+          dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
+        }
+        if (dom.sketchPreviewDiag) {
+          dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
+        }
+        updateSketchMetricsPayload();
+      }
+
+      function clearSketchBoardWorkspacePreviewAfterDraw(message) {
+        if (state.vectorPreview && state.vectorPreview.sourceType === 'sketch_centerline') {
+          state.vectorPreview = null;
+          state.previewInteraction = null;
+        }
+        clearSketchBoardOverlay();
+        state.sketchPreviewId = null;
+        setSketchDrawStatus(message);
+        if (dom.sketchPreviewWarning) {
+          dom.sketchPreviewWarning.textContent = 'Sketch preview remains in the File tab for reference. Board workspace preview was cleared after publish; live robot drawing/trail is shown there.';
+          dom.sketchPreviewWarning.classList.add('active');
+        }
+        dom.previewChip.innerHTML = '<strong>Preview</strong> live drawing';
+        dom.summaryPreview.textContent = 'Sketch preview cleared; showing live robot drawing/trail.';
+        updateSketchMetricsPayload();
+        refreshUiState({ redrawBoard: true });
       }
 
       function setSketchPreviewInlineStatus(kind, message) {
@@ -3618,6 +3892,11 @@
           state.sketchPreviewUrl = null;
         }
         state.sketchPreviewSvgText = '';
+        state.sketchPreviewPayload = null;
+        state.sketchPreviewParameters = null;
+        state.sketchLatestDrawPayload = null;
+        clearSketchBoardOverlay();
+        updateSketchMetricsPayload();
         dom.sketchPreviewImg.removeAttribute('src');
         dom.sketchPreviewImg.style.display = 'none';
         if (dom.sketchPreviewWarning) {
@@ -3628,7 +3907,7 @@
           dom.sketchPreviewTitle.textContent = 'SVG Preview';
         }
         if (dom.sketchPreviewNote) {
-          dom.sketchPreviewNote.textContent = 'Full SVG output. Board canvas is a sampled Polyline Canvas Preview.';
+          dom.sketchPreviewNote.textContent = 'Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = true;
@@ -3654,14 +3933,17 @@
         }
         const svgText = String(payload.preview_svg || '');
         state.sketchPreviewSvgText = svgText;
+        state.sketchPreviewPayload = payload;
         if (svgText) {
           const blob = new Blob([svgText], { type: 'image/svg+xml' });
           state.sketchPreviewUrl = URL.createObjectURL(blob);
           dom.sketchPreviewImg.src = state.sketchPreviewUrl;
           dom.sketchPreviewImg.style.display = '';
+          prepareSketchBoardOverlay();
         } else {
           dom.sketchPreviewImg.removeAttribute('src');
           dom.sketchPreviewImg.style.display = 'none';
+          clearSketchBoardOverlay();
         }
         const metadata = payload.metadata || {};
         const modeLabel = metadata.preview_geometry_mode === 'polyline'
@@ -3672,16 +3954,8 @@
         }
         if (dom.sketchPreviewNote) {
           dom.sketchPreviewNote.textContent = modeLabel === 'Smooth Curves'
-            ? 'Full Smooth Curves SVG output. Board canvas is a sampled Polyline Canvas Preview.'
-            : 'Full Polyline Debug SVG output. Board canvas is a sampled Polyline Canvas Preview.';
-        }
-        const warning = [
-          sketchTruncationWarning(payload),
-          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
-        ].filter(Boolean).join(' ');
-        if (dom.sketchPreviewWarning) {
-          dom.sketchPreviewWarning.textContent = warning;
-          dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
+            ? 'Full Smooth Curves SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.'
+            : 'Full Polyline Debug SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
@@ -3689,7 +3963,7 @@
         if (dom.sketchDownloadSvgBtn) {
           dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         }
-        dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
+        updateSketchPreviewDiagnostics(payload);
         dom.sketchPreviewBox.classList.add('active');
       }
 
@@ -3730,7 +4004,7 @@
         const drawAvailability = state.sketchPreviewId
           ? 'Draw Sketch Preview is available and will use the backend cached canonical plan.'
           : 'Draw Sketch Preview is unavailable because the backend did not return a preview_id.';
-        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
+        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Board Workspace uses the full SVG overlay when available; sampled points are fallback/debug. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
         setSketchDrawStatus(drawAvailability);
         setNotice('warning', 'Sketch preview ready', 'Use Draw Sketch Preview to publish the backend cached plan. Normal Commit File remains separate.');
         pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
@@ -3839,25 +4113,38 @@
         }
         stopUploadStatusPolling();
         setSketchPreviewInlineStatus('loading', 'Vectorizing sketch...');
+        const sketchParameters = {
+          optimization_preset: String(dom.sketchOptimizationPreset.value || 'detail'),
+          preview_geometry_mode: String(dom.sketchPreviewGeometry.value || 'smooth_curves'),
+          fit_to_safe_area: Boolean(dom.sketchFitSafe.checked),
+          safe_fit_padding_m: Math.max(0, Number(dom.sketchSafeFitPadding.value || 0.03)),
+          max_image_dim: Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000)))),
+          curve_tolerance_px: Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0)),
+          margin_m: Number(dom.sketchMargin.value || 0.05),
+          min_component_area_px: Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2))),
+          line_sensitivity: Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0))),
+          min_stroke_length_px: Math.max(0, Number(dom.sketchMinStroke.value || 1)),
+          merge_gap_px: Math.max(0, Number(dom.sketchMergeGap.value || 0)),
+          simplify_epsilon_px: Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25)),
+          scale_percent: Math.max(1, Number(dom.sketchScalePercent.value || 100)),
+          center_x_m: dom.sketchCenterX.value.trim() === '' ? null : Number(dom.sketchCenterX.value),
+          center_y_m: dom.sketchCenterY.value.trim() === '' ? null : Number(dom.sketchCenterY.value),
+        };
+        state.sketchPreviewParameters = sketchParameters;
+        state.sketchLatestDrawPayload = null;
         const form = new FormData();
         form.append('file', file);
-        form.append('optimization_preset', String(dom.sketchOptimizationPreset.value || 'detail'));
-        form.append('preview_geometry_mode', String(dom.sketchPreviewGeometry.value || 'smooth_curves'));
-        form.append('fit_to_safe_area', dom.sketchFitSafe.checked ? 'true' : 'false');
-        form.append('max_image_dim', String(Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000))))));
-        form.append('curve_tolerance_px', String(Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0))));
-        form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
-        form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2)))));
-        form.append('line_sensitivity', String(Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0)))));
-        form.append('min_stroke_length_px', String(Math.max(0, Number(dom.sketchMinStroke.value || 1))));
-        form.append('merge_gap_px', String(Math.max(0, Number(dom.sketchMergeGap.value || 0))));
-        form.append('simplify_epsilon_px', String(Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25))));
-        form.append('scale_percent', String(Math.max(1, Number(dom.sketchScalePercent.value || 100))));
-        if (dom.sketchCenterX.value.trim() !== '') {
-          form.append('center_x_m', String(Number(dom.sketchCenterX.value)));
+        Object.entries(sketchParameters).forEach(([key, value]) => {
+          if (value === null || value === undefined) {
+            return;
+          }
+          form.append(key, String(value));
+        });
+        if (sketchParameters.center_x_m !== null && !Number.isFinite(sketchParameters.center_x_m)) {
+          throw new Error('Sketch Center X must be numeric when provided.');
         }
-        if (dom.sketchCenterY.value.trim() !== '') {
-          form.append('center_y_m', String(Number(dom.sketchCenterY.value)));
+        if (sketchParameters.center_y_m !== null && !Number.isFinite(sketchParameters.center_y_m)) {
+          throw new Error('Sketch Center Y must be numeric when provided.');
         }
         const payload = await apiRequest('/api/sketch-centerline/preview', {
           method: 'POST',
@@ -3889,7 +4176,10 @@
         const optimizedText = payload.optimized
           ? `optimized · travel reduction ${Number.isFinite(travelReduction) ? travelReduction.toFixed(3) : '--'} m`
           : 'not optimized';
-        setSketchDrawStatus(`Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`);
+        state.sketchLatestDrawPayload = payload;
+        updateSketchMetricsPayload();
+        const publishStatus = `Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`;
+        clearSketchBoardWorkspacePreviewAfterDraw(`${publishStatus} Sketch preview cleared; showing live robot drawing/trail.`);
         setNotice('success', 'Sketch draw started', `Published cached ${geometryMode} plan through the existing draw executor.`);
         pushFeed(`Sketch Centerline draw published (${geometryMode}).`, 'success');
         refreshRuntime().catch(() => {});
@@ -4172,6 +4462,25 @@
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
+      });
+
+      dom.sketchDownloadMetricsBtn.addEventListener('click', () => {
+        if (!state.sketchMetricsPayload) {
+          handleError('Download Sketch Metrics failed', new Error('No Sketch Centerline metrics are available.'));
+          return;
+        }
+        const blob = new Blob(
+          [JSON.stringify(state.sketchMetricsPayload, null, 2)],
+          { type: 'application/json' }
+        );
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `sketch-centerline-metrics-${state.sketchMetricsPayload.preview_id || 'latest'}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
       });
 
       dom.fileCommitBtn.addEventListener('click', async () => {
