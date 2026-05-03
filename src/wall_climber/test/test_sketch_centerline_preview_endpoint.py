@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import cv2  # type: ignore
 import numpy
@@ -102,8 +103,19 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['metadata']['fit_to_safe_area'] is True
     assert payload['metadata']['safe_x_min'] == 0.348
     assert payload['metadata']['safe_x_max'] == 6.14
+    assert payload['metadata']['safe_fit_padding_m'] == 0.03
+    assert payload['metadata']['safe_fit_padded_bounds_m']['x_min'] > payload['metadata']['safe_x_min']
+    assert payload['metadata']['safe_fit_padded_bounds_m']['x_max'] < payload['metadata']['safe_x_max']
+    assert payload['metadata']['safe_fit_auto_shrink_applied'] is False
+    assert payload['metadata']['effective_scale_percent'] == 80.0
     assert payload['metadata']['curve_tolerance_px'] == 1.25
     assert payload['metadata']['max_image_dim'] == 1000
+    assert payload['metadata']['transport_validation']['final_transport_validation'] == 'ok'
+    assert payload['primitive_count'] >= 1
+    assert payload['evaluation']['final_transport_validation'] == 'ok'
+    assert payload['evaluation']['primitive_count'] == payload['primitive_count']
+    assert payload['evaluation']['draw_length_m'] >= 0.0
+    json.dumps(payload['evaluation'])
     assert payload['metadata']['timing']['curve_fit_time_ms'] >= 0.0
     assert payload['metadata']['line_primitive_count'] >= 1
     assert 'effective_threshold_value' in payload['metadata']
@@ -123,6 +135,63 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['preview']['max_points'] > 0
     assert payload['preview']['returned_point_count'] <= payload['preview']['max_points']
     assert payload['preview']['original_point_count'] == payload['point_count']
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_validates_final_transport_before_caching(monkeypatch) -> None:
+    client, runtime = _client_and_runtime()
+
+    def reject_transport(*_args, **_kwargs):
+        raise web_server._SketchTransportValidationFailure(
+            'draw segment[2] extends outside carriage-safe writable bounds',
+            error_code='outside_carriage_safe_writable_bounds',
+            max_overrun_m=0.20,
+            segment_index=2,
+        )
+
+    monkeypatch.setattr(web_server, '_validate_sketch_transport_for_preview', reject_transport)
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'polyline'},
+    )
+
+    assert response.status_code == 422
+    assert 'Fit to Robot-Safe Area' in response.json()['detail']
+    assert 'preview_id' not in response.json()
+    assert runtime.node.publish_count == 0
+
+
+def test_sketch_centerline_preview_auto_shrink_retry_metadata(monkeypatch) -> None:
+    client, runtime = _client_and_runtime()
+    real_validate = web_server._validate_sketch_transport_for_preview
+    calls = {'count': 0}
+
+    def fail_once(*args, **kwargs):
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise web_server._SketchTransportValidationFailure(
+                'draw segment[2] extends outside carriage-safe writable bounds',
+                error_code='outside_carriage_safe_writable_bounds',
+                max_overrun_m=0.002,
+                segment_index=2,
+            )
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(web_server, '_validate_sketch_transport_for_preview', fail_once)
+    response = client.post(
+        '/api/sketch-centerline/preview',
+        files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
+        data={'preview_geometry_mode': 'polyline', 'scale_percent': '100'},
+    )
+
+    assert response.status_code == 200, response.text
+    metadata = response.json()['metadata']
+    assert calls['count'] == 2
+    assert metadata['safe_fit_auto_shrink_applied'] is True
+    assert metadata['requested_scale_percent'] == 100.0
+    assert metadata['effective_scale_percent'] == 98.0
+    assert 'draw segment[2]' in metadata['safe_fit_retry_reason']
     assert runtime.node.publish_count == 0
 
 

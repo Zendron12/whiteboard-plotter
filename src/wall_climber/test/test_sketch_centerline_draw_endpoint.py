@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import cv2  # type: ignore
 import numpy
@@ -236,6 +237,11 @@ def test_draw_uses_cached_smooth_canonical_plan() -> None:
     assert body['canonical_command_count'] >= 1
     assert body['primitive_count'] >= 1
     assert 'travel_reduction_m' in body['optimization']
+    assert body['evaluation']['used_full_cached_plan'] is True
+    assert body['evaluation']['preview_geometry_mode'] == 'smooth_curves'
+    assert body['evaluation']['primitive_count'] == body['primitive_count']
+    assert body['evaluation']['travel_reduction_percent'] >= 0.0
+    json.dumps(body['evaluation'])
     assert runtime.node.publish_count == 1
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
     assert _FakePathPrimitive.QUADRATIC_BEZIER in primitive_types or _FakePathPrimitive.CUBIC_BEZIER in primitive_types
@@ -252,6 +258,7 @@ def test_draw_uses_cached_polyline_canonical_plan() -> None:
     body = response.json()
     assert body['preview_geometry_mode'] == 'polyline'
     assert body['used_full_cached_plan'] is True
+    assert body['evaluation']['preview_geometry_mode'] == 'polyline'
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
     assert _FakePathPrimitive.LINE_SEGMENT in primitive_types
     assert _FakePathPrimitive.QUADRATIC_BEZIER not in primitive_types
@@ -304,6 +311,8 @@ def test_draw_uses_full_cached_plan_when_canvas_preview_is_truncated(monkeypatch
     assert body['used_full_cached_plan'] is True
     assert body['cached_canonical_command_count'] == payload['canonical_command_count']
     assert body['primitive_count'] > payload['preview']['returned_point_count']
+    assert body['evaluation']['used_full_cached_plan'] is True
+    assert body['evaluation']['primitive_count'] == body['primitive_count']
     assert runtime.node.publish_count == 1
 
 
