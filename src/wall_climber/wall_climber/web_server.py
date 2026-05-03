@@ -176,6 +176,9 @@ _SKETCH_SAFE_FIT_ERROR_MESSAGE = (
     'Sketch placement is outside the robot-safe drawable bounds. Try enabling '
     'Fit to Robot-Safe Area, increasing Safe Fit Padding, or reducing Scale.'
 )
+_DRAW_LIBRARY_REQUEST_BYTES = 4096
+_DRAW_LIBRARY_ALLOWED_SUFFIXES = ('.png', '.jpg', '.jpeg')
+_DRAW_LIBRARY_SUBDIR = Path('assets') / 'draw_library'
 _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
@@ -501,6 +504,10 @@ class BackendRuntime:
     @property
     def web_dir(self) -> Path:
         return self._web_dir
+
+    @property
+    def share_dir(self) -> Path:
+        return self._share_dir
 
     def attach_server(self, server: uvicorn.Server) -> None:
         self._server = server
@@ -1469,6 +1476,83 @@ def _validate_sketch_upload(upload: UploadFile, content: bytes) -> None:
         raise HTTPException(status_code=415, detail='sketch preview accepts PNG or JPG uploads only')
 
 
+def _coerce_draw_library_id(value: Any) -> int:
+    try:
+        image_id = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail='draw library id must be an integer')
+    if image_id < 1:
+        raise HTTPException(status_code=422, detail='draw library id must be >= 1')
+    return image_id
+
+
+def _safe_draw_library_relative_path(value: Any) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=422, detail='draw library manifest entry file must be a non-empty string')
+    rel_path = Path(value.strip())
+    if rel_path.is_absolute() or any(part in ('', '.', '..') for part in rel_path.parts):
+        raise HTTPException(status_code=422, detail='draw library manifest entry file must stay inside assets/draw_library')
+    return rel_path
+
+
+def _draw_library_manifest_entry(library_dir: Path, image_id: int) -> dict[str, Any] | None:
+    manifest_path = library_dir / 'manifest.json'
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f'invalid draw library manifest.json: {exc}')
+    entries = manifest.get('entries') if isinstance(manifest, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=422, detail='draw library manifest.json must contain an entries list')
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            entry_id = int(entry.get('id'))
+        except (TypeError, ValueError):
+            continue
+        if entry_id == image_id:
+            return entry
+    return None
+
+
+def _resolve_draw_library_asset(library_dir: Path, image_id: int) -> tuple[Path, dict[str, Any]]:
+    if not library_dir.is_dir():
+        raise HTTPException(status_code=404, detail='draw library is not installed in the wall_climber package share')
+
+    manifest_entry = _draw_library_manifest_entry(library_dir, image_id)
+    if manifest_entry is not None:
+        rel_path = _safe_draw_library_relative_path(manifest_entry.get('file'))
+        candidate = library_dir / rel_path
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f'draw library image id {image_id} file is missing')
+        suffix = candidate.suffix.lower()
+        if suffix not in _DRAW_LIBRARY_ALLOWED_SUFFIXES:
+            raise HTTPException(status_code=415, detail='draw library demo supports PNG or JPG images only')
+        return candidate, {
+            'id': image_id,
+            'name': str(manifest_entry.get('name') or f'Picture {image_id}'),
+            'file': str(rel_path),
+            'default_mode': str(manifest_entry.get('default_mode') or 'sketch_centerline'),
+            'source': 'manifest',
+        }
+
+    for suffix in _DRAW_LIBRARY_ALLOWED_SUFFIXES:
+        candidate = library_dir / f'{image_id}{suffix}'
+        if candidate.is_file():
+            return candidate, {
+                'id': image_id,
+                'name': f'Picture {image_id}',
+                'file': candidate.name,
+                'default_mode': 'sketch_centerline',
+                'source': 'numbered_file',
+            }
+
+    raise HTTPException(status_code=404, detail=f'draw library image id {image_id} was not found')
+
+
 def _drawing_plan_bounds(plan) -> dict[str, float]:
     points = [point for stroke in plan.strokes for point in stroke.points]
     if not points:
@@ -2060,6 +2144,87 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         sketch_preview_cache.move_to_end(normalized_id)
         return entry
 
+    def _draw_library_dir() -> Path:
+        share_dir = getattr(runtime, 'share_dir', None)
+        if share_dir is None:
+            share_dir = Path(runtime.web_dir).parent
+        return Path(share_dir) / _DRAW_LIBRARY_SUBDIR
+
+    def _build_draw_library_sketch_plan(content: bytes) -> tuple[DrawingPathPlan, CanonicalPathPlan, dict[str, Any], dict[str, Any]]:
+        sketch_safe_bounds = _carriage_safe_writable_bounds_for_sketch()
+        sketch_fit_bounds = _shrink_bounds(sketch_safe_bounds, _SKETCH_SAFE_FIT_PADDING_M_DEFAULT)
+        preview_started = time.perf_counter()
+        try:
+            plan = vectorize_sketch_image_to_plan(
+                content,
+                board_width_m=float(shared.board.width),
+                board_height_m=float(shared.board.height),
+                margin_m=0.05,
+                max_image_dim=1000,
+                min_component_area_px=2,
+                min_stroke_length_px=1.0,
+                simplify_epsilon_px=0.25,
+                line_sensitivity=0.0,
+                merge_gap_px=0.0,
+                merge_max_angle_deg=20.0,
+                optimization_preset='detail',
+                scale_percent=100.0,
+                center_x_m=None,
+                center_y_m=None,
+                fit_bounds_m=sketch_fit_bounds,
+                validation_bounds_m=sketch_safe_bounds,
+            )
+            curve_fit_start = time.perf_counter()
+            scale_m_per_px = float(dict(plan.metadata).get('scale_m_per_px') or 0.0)
+            curve_tolerance_m = max(1.0e-6, 1.0 * scale_m_per_px)
+            smooth_result = drawing_path_plan_to_smooth_canonical(
+                plan,
+                curve_tolerance_m=curve_tolerance_m,
+                max_curve_segment_points=32,
+                max_fit_time_ms=3000.0,
+            )
+            canonical_plan = smooth_result.plan
+            curve_fit_time_ms = (time.perf_counter() - curve_fit_start) * 1000.0
+            timing = dict(plan.metadata.get('timing') or {})
+            timing['curve_fit_time_ms'] = float(curve_fit_time_ms)
+            timing['preview_total_time_ms'] = (time.perf_counter() - preview_started) * 1000.0
+            timing['slowest_stage'] = _slowest_timing_stage(timing)
+            plan.metadata['timing'] = timing
+            plan.metadata.update(
+                {
+                    'preview_geometry_mode': 'smooth_curves',
+                    'curve_tolerance_px': 1.0,
+                    'curve_tolerance_m': float(curve_tolerance_m),
+                    'fit_to_safe_area': True,
+                    'safe_fit_padding_m': float(_SKETCH_SAFE_FIT_PADDING_M_DEFAULT),
+                    'safe_bounds_m': sketch_safe_bounds,
+                    'safe_fit_padded_bounds_m': sketch_fit_bounds,
+                    'fit_bounds_m': sketch_fit_bounds,
+                    'validation_bounds_m': sketch_safe_bounds,
+                    'safe_x_min': float(sketch_safe_bounds['x_min']),
+                    'safe_x_max': float(sketch_safe_bounds['x_max']),
+                    'safe_y_min': float(sketch_safe_bounds['y_min']),
+                    'safe_y_max': float(sketch_safe_bounds['y_max']),
+                    'safe_width': float(sketch_safe_bounds['width']),
+                    'safe_height': float(sketch_safe_bounds['height']),
+                    **dict(smooth_result.metadata),
+                    **_canonical_primitive_counts(canonical_plan),
+                }
+            )
+            transport_summary = _validate_sketch_transport_for_preview(
+                canonical_plan,
+                writable_bounds=sketch_safe_bounds,
+                shared_config=shared,
+                sampling_policy=runtime_sampling_policy,
+            )
+            return plan, canonical_plan, sketch_safe_bounds, transport_summary
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except _SketchTransportValidationFailure as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+
     @app.get('/assets/{asset_path:path}')
     async def assets(asset_path: str) -> FileResponse:
         return FileResponse(_resolve_web_asset_path(runtime.web_dir, asset_path))
@@ -2524,6 +2689,143 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'evaluation': evaluation,
                 'transport': transport,
                 'warnings': list(entry.warnings),
+                'timings_ms': timings,
+            }
+        )
+
+    @app.post('/api/draw-library/draw')
+    async def draw_library_image(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='draw library request',
+            max_bytes=_DRAW_LIBRARY_REQUEST_BYTES,
+        )
+        _reject_extra_fields(raw, {'id'}, 'draw library request')
+        image_id = _coerce_draw_library_id(raw.get('id'))
+        asset_path, asset_metadata = _resolve_draw_library_asset(_draw_library_dir(), image_id)
+        try:
+            content = asset_path.read_bytes()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail=f'draw library image id {image_id} could not be read: {exc}') from exc
+        if not content:
+            raise HTTPException(status_code=422, detail=f'draw library image id {image_id} is empty')
+
+        plan, canonical_plan, safe_bounds, transport_summary = _build_draw_library_sketch_plan(content)
+        optimization_start = time.perf_counter()
+        optimization_result = optimize_canonical_plan(
+            canonical_plan,
+            policy=sketch_draw_optimization_policy,
+        )
+        optimization_ms = _elapsed_ms(optimization_start)
+        publish_plan = optimization_result.plan
+        optimization_stats = optimization_result.stats.to_dict()
+        build_start = time.perf_counter()
+        primitive_plan_msg, size_summary = _build_validated_sketch_transport_message(
+            publish_plan,
+            writable_bounds=safe_bounds,
+            shared_config=shared,
+            sampling_policy=runtime_sampling_policy,
+        )
+        transport_build_ms = _elapsed_ms(build_start)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            primitive_plan_msg,
+            allowed_modes=(MODE_DRAW,),
+        )
+        publish_ms = _elapsed_ms(publish_start)
+        warnings = list(dict.fromkeys(
+            [str(item) for item in plan.metrics.warnings]
+            + [str(item) for item in (plan.metadata.get('warnings') or ())]
+        ))
+        cache_like_entry = SketchPreviewCacheEntry(
+            preview_id=f'draw-library-{image_id}',
+            drawing_plan=plan,
+            canonical_plan=canonical_plan,
+            preview_geometry_mode='smooth_curves',
+            metadata=dict(plan.metadata),
+            warnings=tuple(warnings),
+            created_at_unix=time.time(),
+            source_filename=str(asset_metadata['file']),
+            parameters={
+                'id': image_id,
+                'safe_fit_padding_m': _SKETCH_SAFE_FIT_PADDING_M_DEFAULT,
+                'preview_geometry_mode': 'smooth_curves',
+                'optimization_preset': 'detail',
+                'max_image_dim': 1000,
+                'curve_tolerance_px': 1.0,
+                'optimize_stroke_order': True,
+            },
+            stroke_count=len(plan.strokes),
+            point_count=sum(len(stroke.points) for stroke in plan.strokes),
+            canonical_command_count=len(canonical_plan.commands),
+        )
+        evaluation = _sketch_draw_evaluation(
+            entry=cache_like_entry,
+            publish_plan=publish_plan,
+            size_summary=size_summary,
+            optimization_stats=optimization_stats,
+            optimized=True,
+            transport=transport,
+        )
+        timings = {
+            'optimization_ms': optimization_ms,
+            'transport_build_ms': transport_build_ms,
+            'publish_ms': publish_ms,
+        }
+        preview_payload = {
+            'stroke_count': cache_like_entry.stroke_count,
+            'point_count': cache_like_entry.point_count,
+            'bounds': _drawing_plan_bounds(plan),
+            'diagnostics': canonical_plan_diagnostics(
+                publish_plan,
+                preview_sampling_policy=preview_sampling_policy,
+                runtime_sampling_policy=runtime_sampling_policy,
+            ),
+        }
+        _record_last_plan_debug(
+            source_type='draw_library',
+            canonical_plan=publish_plan,
+            preview_payload=preview_payload,
+            timings=timings,
+            optimizer_stats=optimization_stats,
+            route_metadata={
+                'draw_library': asset_metadata,
+                'used_backend_owned_plan': True,
+                'preview_geometry_mode': 'smooth_curves',
+                'evaluation': evaluation,
+                'transport_validation': transport_summary,
+            },
+            transport=transport,
+            committed=True,
+        )
+        _record_last_execution_debug(
+            source_type='draw_library',
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=timings,
+        )
+        return JSONResponse(
+            {
+                'ok': True,
+                'published': True,
+                'active_mode': MODE_DRAW,
+                'source_type': 'draw_library',
+                'id': image_id,
+                'file': asset_metadata['file'],
+                'name': asset_metadata['name'],
+                'preview_geometry_mode': 'smooth_curves',
+                'stroke_count': cache_like_entry.stroke_count,
+                'point_count': cache_like_entry.point_count,
+                'canonical_command_count': len(publish_plan.commands),
+                'cached_canonical_command_count': len(canonical_plan.commands),
+                'primitive_count': size_summary['primitive_count'],
+                'primitive_descriptor_bytes': size_summary['primitive_descriptor_bytes'],
+                'used_backend_owned_plan': True,
+                'optimized': True,
+                'optimization': optimization_stats,
+                'evaluation': evaluation,
+                'transport': transport,
+                'warnings': warnings,
                 'timings_ms': timings,
             }
         )

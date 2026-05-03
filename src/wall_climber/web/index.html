@@ -696,6 +696,53 @@
       display: grid;
     }
 
+    .voice-panel {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.58);
+    }
+
+    .voice-panel-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .voice-panel-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .voice-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .voice-transcript {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      border-radius: var(--radius-sm);
+      background: rgba(255, 255, 255, 0.68);
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+
+    .voice-command-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
     textarea,
     input[type="number"],
     input[type="text"],
@@ -978,6 +1025,10 @@
         grid-template-columns: 1fr;
       }
 
+      .voice-command-row {
+        grid-template-columns: 1fr;
+      }
+
       .control-body {
         grid-template-columns: 1fr;
       }
@@ -1210,6 +1261,30 @@
               <button id="tool-text-btn" data-tool="text" class="active" type="button">Text</button>
               <button id="tool-file-btn" data-tool="file" type="button">File</button>
               <button id="tool-svg-btn" data-tool="svg" type="button">SVG Markup</button>
+            </div>
+
+            <div id="voice-panel" class="voice-panel">
+              <div class="voice-panel-head">
+                <div>
+                  <div class="voice-panel-title">Voice Command Demo</div>
+                  <p class="helper-copy">Use Chromium/Chrome/Edge for microphone support. Vivaldi may not support Web Speech API reliably.</p>
+                </div>
+                <div class="action-row">
+                  <button id="voice-start-btn" class="secondary-btn" type="button">Start Voice</button>
+                  <button id="voice-stop-btn" class="quiet-btn" type="button">Stop Voice</button>
+                </div>
+              </div>
+              <div id="voice-status" class="micro-pill"><strong>Voice</strong> stopped</div>
+              <div class="voice-grid">
+                <div class="voice-transcript">
+                  <div><strong>Last heard:</strong> <span id="voice-transcript">--</span></div>
+                  <div><strong>Parsed:</strong> <span id="voice-parsed">--</span></div>
+                </div>
+                <div class="voice-command-row">
+                  <input id="voice-command-input" type="text" placeholder="Voice command text fallback">
+                  <button id="voice-run-command-btn" class="quiet-btn" type="button">Run Voice Command</button>
+                </div>
+              </div>
             </div>
 
               <div id="tool-text-panel" class="tool-panel active">
@@ -1611,6 +1686,14 @@
         overlayCurvesToggle: document.getElementById('overlay-curves-toggle'),
         overlayFallbackToggle: document.getElementById('overlay-fallback-toggle'),
         overlayColorToggle: document.getElementById('overlay-color-toggle'),
+        voicePanel: document.getElementById('voice-panel'),
+        voiceStartBtn: document.getElementById('voice-start-btn'),
+        voiceStopBtn: document.getElementById('voice-stop-btn'),
+        voiceStatus: document.getElementById('voice-status'),
+        voiceTranscript: document.getElementById('voice-transcript'),
+        voiceParsed: document.getElementById('voice-parsed'),
+        voiceCommandInput: document.getElementById('voice-command-input'),
+        voiceRunCommandBtn: document.getElementById('voice-run-command-btn'),
       };
 
       const ctx = dom.canvas.getContext('2d', { alpha: false });
@@ -1656,6 +1739,14 @@
         sketchBoardOverlayToken: 0,
         sketchPreviewBusy: false,
         sketchDrawBusy: false,
+        voiceRecognitionCtor: null,
+        voiceRecognition: null,
+        voiceSupported: false,
+        voiceListening: false,
+        voiceMode: 'text',
+        voiceAutoWriteTimer: null,
+        voiceAutoWriteInterval: null,
+        voiceAutoWriteDeadline: 0,
       };
 
       function escapeHtml(text) {
@@ -2565,6 +2656,11 @@
         dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
         dom.sketchDownloadMetricsBtn.disabled = !state.sketchMetricsPayload;
         dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
+        if (dom.voiceStartBtn && dom.voiceStopBtn && dom.voiceRunCommandBtn) {
+          dom.voiceStartBtn.disabled = !state.voiceSupported || state.voiceListening;
+          dom.voiceStopBtn.disabled = !state.voiceSupported || !state.voiceListening;
+          dom.voiceRunCommandBtn.disabled = !backendHealthy;
+        }
       }
 
       function setOverlay(title, copy, visible) {
@@ -4246,6 +4342,295 @@
         pushFeed(`${prefix}: ${message}`, 'error');
       }
 
+      function setVoiceStatus(kind, message) {
+        if (!dom.voiceStatus) {
+          return;
+        }
+        const label = kind === 'listening'
+          ? 'listening'
+          : kind === 'unsupported'
+            ? 'unsupported'
+            : kind === 'error'
+              ? 'error'
+              : kind === 'recognized'
+                ? 'recognized'
+                : 'stopped';
+        dom.voiceStatus.innerHTML = `<strong>Voice</strong> ${escapeHtml(label)} · ${escapeHtml(message)}`;
+      }
+
+      function setVoiceTranscript(text, parsed) {
+        if (dom.voiceTranscript) {
+          dom.voiceTranscript.textContent = text || '--';
+        }
+        if (dom.voiceParsed) {
+          dom.voiceParsed.textContent = parsed || '--';
+        }
+      }
+
+      function normalizeVoiceCommand(text) {
+        return String(text || '')
+          .toLowerCase()
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      function voiceNumberValue(raw) {
+        const value = String(raw || '').toLowerCase();
+        const words = {
+          one: 1,
+          two: 2,
+          three: 3,
+          four: 4,
+          five: 5,
+          six: 6,
+          seven: 7,
+          eight: 8,
+          nine: 9,
+          ten: 10,
+        };
+        if (Object.prototype.hasOwnProperty.call(words, value)) {
+          return words[value];
+        }
+        const numeric = Number(value);
+        return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
+      }
+
+      function parseVoiceCommand(text) {
+        const normalized = normalizeVoiceCommand(text);
+        if (!normalized) {
+          return null;
+        }
+        if (/^(text|write|typing) mode$/.test(normalized)) {
+          return { type: 'mode', mode: 'text', label: 'switch to Text mode' };
+        }
+        if (/^(draw|file|image) mode$/.test(normalized)) {
+          return { type: 'mode', mode: 'draw', label: 'switch to File/Draw mode' };
+        }
+        if (/^(stop|stop drawing|cancel)$/.test(normalized)) {
+          return { type: 'stop', label: 'stop requested' };
+        }
+        const pictureMatch = normalized.match(/^draw\s+(picture|image|pic|photo)(?:\s+number)?\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)$/);
+        if (pictureMatch) {
+          const imageId = voiceNumberValue(pictureMatch[2]);
+          if (imageId) {
+            return { type: 'draw_library', id: imageId, label: `draw picture number ${imageId}` };
+          }
+        }
+        return null;
+      }
+
+      function clearVoiceAutoWriteTimers() {
+        if (state.voiceAutoWriteTimer) {
+          clearTimeout(state.voiceAutoWriteTimer);
+          state.voiceAutoWriteTimer = null;
+        }
+        if (state.voiceAutoWriteInterval) {
+          clearInterval(state.voiceAutoWriteInterval);
+          state.voiceAutoWriteInterval = null;
+        }
+        state.voiceAutoWriteDeadline = 0;
+      }
+
+      function cancelVoiceAutoWrite(message) {
+        if (!state.voiceAutoWriteTimer && !state.voiceAutoWriteInterval) {
+          return;
+        }
+        clearVoiceAutoWriteTimers();
+        if (message) {
+          setVoiceStatus('recognized', message);
+          setVoiceTranscript(dom.voiceTranscript ? dom.voiceTranscript.textContent : '', message);
+        }
+      }
+
+      function updateVoiceAutoWriteCountdown() {
+        if (!state.voiceAutoWriteDeadline) {
+          return;
+        }
+        const remainingMs = Math.max(0, state.voiceAutoWriteDeadline - Date.now());
+        const remainingSec = Math.ceil(remainingMs / 1000);
+        setVoiceStatus('recognized', `Dictation captured. Auto-write in ${remainingSec}s unless you edit.`);
+        setVoiceTranscript(dom.voiceTranscript ? dom.voiceTranscript.textContent : '', `dictation · auto-write in ${remainingSec}s`);
+      }
+
+      function scheduleVoiceAutoWrite() {
+        clearVoiceAutoWriteTimers();
+        state.voiceAutoWriteDeadline = Date.now() + 5000;
+        updateVoiceAutoWriteCountdown();
+        state.voiceAutoWriteInterval = setInterval(updateVoiceAutoWriteCountdown, 500);
+        state.voiceAutoWriteTimer = setTimeout(async () => {
+          clearVoiceAutoWriteTimers();
+          const text = dom.textInput.value.trim();
+          if (!text) {
+            setVoiceStatus('error', 'Auto-write skipped because the text box is empty.');
+            return;
+          }
+          try {
+            setVoiceStatus('recognized', 'Auto-writing dictated text...');
+            await commitText(text);
+            setVoiceStatus('recognized', 'Auto-write sent through the existing Write Text flow.');
+            setVoiceTranscript(text, 'dictation · auto-write sent');
+          } catch (error) {
+            const message = error && error.message ? error.message : 'Unknown auto-write error';
+            setVoiceStatus('error', message);
+            handleError('Voice auto-write failed', error);
+          }
+        }, 5000);
+      }
+
+      function appendVoiceDictation(text) {
+        const phrase = String(text || '').trim();
+        if (!phrase) {
+          return;
+        }
+        state.voiceMode = 'text';
+        setActiveTool('text');
+        const current = dom.textInput.value.trimEnd();
+        dom.textInput.value = current ? `${current} ${phrase}` : phrase;
+        scheduleVoiceAutoWrite();
+        pushFeed(`Voice dictated text: ${phrase}`, 'info');
+      }
+
+      async function runDrawLibraryVoiceCommand(imageId) {
+        await ensureMode('draw');
+        setActiveTool('file');
+        setVoiceStatus('recognized', `Drawing picture number ${imageId}...`);
+        const payload = await apiRequest('/api/draw-library/draw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: imageId }),
+        });
+        const primitiveCount = Number(payload.primitive_count || 0);
+        setVoiceStatus('recognized', `Drawing picture number ${imageId} started · ${primitiveCount} primitives.`);
+        setVoiceTranscript(`draw picture number ${imageId}`, `published draw-library id ${imageId}`);
+        pushFeed(`Voice command published draw-library picture ${imageId}.`, 'success');
+        refreshRuntime().catch(() => {});
+        return payload;
+      }
+
+      async function runVoiceCommandText(text, { source = 'voice' } = {}) {
+        const spoken = String(text || '').trim();
+        if (!spoken) {
+          setVoiceStatus('error', 'No voice command text was provided.');
+          setVoiceTranscript('', 'empty command');
+          return;
+        }
+        const command = parseVoiceCommand(spoken);
+        setVoiceTranscript(spoken, command ? command.label : 'dictation/unrecognized');
+        if (!command) {
+          if (state.voiceMode === 'text') {
+            appendVoiceDictation(spoken);
+            return;
+          }
+          setVoiceStatus('error', 'No supported command recognized. Say text mode, draw mode, draw picture number 1, or stop.');
+          return;
+        }
+
+        cancelVoiceAutoWrite();
+        if (command.type === 'mode' && command.mode === 'text') {
+          state.voiceMode = 'text';
+          setActiveTool('text');
+          await ensureMode('text');
+          setVoiceStatus('recognized', 'Text mode ready. Dictated phrases will fill the existing text box.');
+          pushFeed(`${source} command switched to text mode.`, 'success');
+          return;
+        }
+        if (command.type === 'mode' && command.mode === 'draw') {
+          state.voiceMode = 'draw';
+          setActiveTool('file');
+          await ensureMode('draw');
+          setVoiceStatus('recognized', 'Draw mode ready. Say draw picture number 1.');
+          pushFeed(`${source} command switched to draw mode.`, 'success');
+          return;
+        }
+        if (command.type === 'stop') {
+          const message = 'Stop recognized, but runtime cancel is not implemented yet.';
+          setVoiceStatus('recognized', message);
+          setVoiceTranscript(spoken, message);
+          setNotice('warning', 'Stop not implemented', message);
+          pushFeed(message, 'info');
+          return;
+        }
+        if (command.type === 'draw_library') {
+          state.voiceMode = 'draw';
+          await runDrawLibraryVoiceCommand(command.id);
+        }
+      }
+
+      function initializeVoiceRecognition() {
+        state.voiceRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+        state.voiceSupported = Boolean(state.voiceRecognitionCtor);
+        if (!state.voiceSupported) {
+          setVoiceStatus('unsupported', 'Voice recognition is not supported in this browser. Use Chrome/Edge or type commands manually.');
+          setVoiceTranscript('', 'manual fallback available');
+          return;
+        }
+        setVoiceStatus('stopped', 'Ready. Use Chromium/Chrome/Edge for microphone support.');
+        setVoiceTranscript('', 'say text mode, draw mode, draw picture number 1, or stop');
+      }
+
+      function startVoiceRecognition() {
+        if (!state.voiceSupported || !state.voiceRecognitionCtor) {
+          setVoiceStatus('unsupported', 'Voice recognition is not supported in this browser. Use Chrome/Edge or type commands manually.');
+          return;
+        }
+        if (!state.voiceRecognition) {
+          const recognition = new state.voiceRecognitionCtor();
+          recognition.continuous = true;
+          recognition.interimResults = false;
+          recognition.lang = 'en-US';
+          recognition.onstart = () => {
+            state.voiceListening = true;
+            setVoiceStatus('listening', 'Listening...');
+            syncControls();
+          };
+          recognition.onend = () => {
+            state.voiceListening = false;
+            setVoiceStatus('stopped', 'Stopped. Manual fallback remains available.');
+            syncControls();
+          };
+          recognition.onerror = (event) => {
+            const message = event && event.error ? String(event.error) : 'speech recognition error';
+            state.voiceListening = false;
+            setVoiceStatus('error', message);
+            syncControls();
+          };
+          recognition.onresult = (event) => {
+            for (let index = event.resultIndex; index < event.results.length; index += 1) {
+              const result = event.results[index];
+              if (!result || !result.isFinal || !result[0]) {
+                continue;
+              }
+              runVoiceCommandText(result[0].transcript, { source: 'voice' }).catch((error) => {
+                const message = error && error.message ? error.message : 'Unknown voice command error';
+                setVoiceStatus('error', message);
+                handleError('Voice command failed', error);
+              });
+            }
+          };
+          state.voiceRecognition = recognition;
+        }
+        try {
+          state.voiceRecognition.start();
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Could not start voice recognition.';
+          setVoiceStatus('error', message);
+        }
+      }
+
+      function stopVoiceRecognition() {
+        if (!state.voiceRecognition) {
+          state.voiceListening = false;
+          setVoiceStatus('stopped', 'Stopped.');
+          syncControls();
+          return;
+        }
+        state.voiceListening = false;
+        state.voiceRecognition.stop();
+        setVoiceStatus('stopped', 'Stopping...');
+        syncControls();
+      }
+
       function setActiveTool(tool) {
         state.activeTool = tool;
         dom.toolButtons.forEach((button) => {
@@ -4264,6 +4649,7 @@
       dom.modeButtons.forEach((button) => {
         button.addEventListener('click', async () => {
           try {
+            cancelVoiceAutoWrite('Auto-write canceled for manual edit. Press Write Text when ready.');
             await setMode(button.dataset.mode);
             clearNotice();
           } catch (error) {
@@ -4285,7 +4671,44 @@
 
       dom.toolButtons.forEach((button) => {
         button.addEventListener('click', () => {
+          cancelVoiceAutoWrite('Auto-write canceled for manual edit. Press Write Text when ready.');
           setActiveTool(button.dataset.tool);
+        });
+      });
+
+      if (dom.voiceStartBtn) {
+        dom.voiceStartBtn.addEventListener('click', startVoiceRecognition);
+      }
+
+      if (dom.voiceStopBtn) {
+        dom.voiceStopBtn.addEventListener('click', stopVoiceRecognition);
+      }
+
+      if (dom.voiceRunCommandBtn) {
+        dom.voiceRunCommandBtn.addEventListener('click', async () => {
+          try {
+            await runVoiceCommandText(dom.voiceCommandInput.value, { source: 'manual fallback' });
+          } catch (error) {
+            const message = error && error.message ? error.message : 'Unknown voice command error';
+            setVoiceStatus('error', message);
+            handleError('Voice command failed', error);
+          }
+        });
+      }
+
+      if (dom.voiceCommandInput) {
+        dom.voiceCommandInput.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') {
+            return;
+          }
+          event.preventDefault();
+          dom.voiceRunCommandBtn.click();
+        });
+      }
+
+      ['focus', 'click', 'input'].forEach((eventName) => {
+        dom.textInput.addEventListener(eventName, () => {
+          cancelVoiceAutoWrite('Auto-write canceled for manual edit. Press Write Text when ready.');
         });
       });
 
@@ -4337,6 +4760,7 @@
       });
 
       dom.textSubmitBtn.addEventListener('click', async () => {
+        cancelVoiceAutoWrite();
         const text = dom.textInput.value.trim();
         if (!text) {
           handleError('Text commit failed', new Error('Enter text before sending.'));
@@ -4359,6 +4783,7 @@
       });
 
       dom.textClearBtn.addEventListener('click', () => {
+        cancelVoiceAutoWrite('Auto-write canceled for manual edit. Press Write Text when ready.');
         dom.textInput.value = '';
       });
 
@@ -4662,6 +5087,14 @@
       });
 
       window.addEventListener('beforeunload', () => {
+        clearVoiceAutoWriteTimers();
+        if (state.voiceRecognition) {
+          try {
+            state.voiceRecognition.stop();
+          } catch (_error) {
+            // Browser may already have stopped speech recognition.
+          }
+        }
         if (state.runtimeTimer) {
           clearInterval(state.runtimeTimer);
           state.runtimeTimer = null;
@@ -4669,6 +5102,7 @@
       });
 
       pushFeed('UI initialized. Waiting for backend and rosbridge.', 'info');
+      initializeVoiceRecognition();
       syncPlacementLabels();
       syncPlacementDefaults(true);
       setTextFontSource('relief_singleline');

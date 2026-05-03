@@ -15,6 +15,9 @@ def package_files(directory: str, install_root: str):
         paths.append((install_path, files))
     return paths
 
+
+_draw_library_dir = os.path.join('..', '..', 'assets', 'draw_library')
+
 setup(
     name=package_name,
     version='0.0.0',
@@ -36,6 +39,9 @@ setup(
 
         # Web UI assets
         *package_files('web', os.path.join('share', package_name, 'web')),
+
+        # Numbered demo drawing library assets
+        *package_files(_draw_library_dir, os.path.join('share', package_name, 'assets', 'draw_library')),
     ],
     install_requires=[
         # Keep runtime Python dependencies in sync with package.xml exec_depend entries.
