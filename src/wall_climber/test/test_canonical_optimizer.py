@@ -50,6 +50,35 @@ def test_optimizer_merges_collinear_lines_and_prunes_tiny_primitives() -> None:
     assert result.stats.pruned_primitives == 1
 
 
+def test_optimizer_preserves_tiny_primitives_when_pruning_disabled() -> None:
+    plan = CanonicalPathPlan(
+        frame='board',
+        theta_ref=0.0,
+        commands=(
+            PenDown(),
+            LineSegment(start=(0.0, 0.0), end=(0.0004, 0.0)),
+            PenUp(),
+        ),
+    )
+
+    result = optimize_canonical_plan(
+        plan,
+        policy=CanonicalOptimizationPolicy(
+            label='preserve_tiny',
+            reorder_units=False,
+            merge_collinear_lines=False,
+            prune_tiny_primitives=False,
+            tiny_primitive_m=0.001,
+        ),
+    )
+
+    lines = [command for command in result.plan.commands if isinstance(command, LineSegment)]
+    assert len(lines) == 1
+    assert lines[0].start == (0.0, 0.0)
+    assert lines[0].end == (0.0004, 0.0)
+    assert result.stats.pruned_primitives == 0
+
+
 def test_optimizer_removes_duplicate_units_and_reorders_for_shorter_travel() -> None:
     plan = CanonicalPathPlan(
         frame='board',

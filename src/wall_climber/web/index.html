@@ -1267,6 +1267,10 @@
                     <input id="sketch-optimize-draw" type="checkbox" checked>
                   </div>
                   <div class="field">
+                    <label for="sketch-preserve-tiny">Preserve Tiny Details</label>
+                    <input id="sketch-preserve-tiny" type="checkbox" checked>
+                  </div>
+                  <div class="field">
                     <label for="sketch-max-image-dim">Sketch Max Image Dim</label>
                     <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
                   </div>
@@ -1564,6 +1568,7 @@
         sketchFitSafe: document.getElementById('sketch-fit-safe'),
         sketchSafeFitPadding: document.getElementById('sketch-safe-fit-padding'),
         sketchOptimizeDraw: document.getElementById('sketch-optimize-draw'),
+        sketchPreserveTiny: document.getElementById('sketch-preserve-tiny'),
         sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
         sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
         sketchMargin: document.getElementById('sketch-margin'),
@@ -3783,6 +3788,9 @@
           lines.push(
             `draw published · optimized ${drawEvaluation.optimized ? 'yes' : 'no'} · travel ${metricNumber(drawEvaluation.original_travel_length_m, 3, ' m')} → ${metricNumber(drawEvaluation.optimized_travel_length_m, 3, ' m')} · reduction ${metricNumber(drawEvaluation.travel_reduction_m, 3, ' m')} (${metricNumber(drawEvaluation.travel_reduction_percent, 1, '%')})`
           );
+          lines.push(
+            `tiny details ${drawEvaluation.preserve_tiny_details ? 'preserved' : 'cleanup allowed'} · pruning ${drawEvaluation.tiny_primitive_pruning_enabled ? 'on' : 'off'} · pruned ${Number(drawEvaluation.pruned_primitives || 0)} · expanded ${Number(drawEvaluation.tiny_detail_marks_expanded || 0)} · min mark ${metricNumber(drawEvaluation.minimum_detail_mark_m, 4, ' m')}`
+          );
         }
         return lines.join('\n');
       }
@@ -3830,6 +3838,12 @@
             primitive_count: state.sketchLatestDrawPayload.primitive_count,
             used_full_cached_plan: state.sketchLatestDrawPayload.used_full_cached_plan,
             optimized: state.sketchLatestDrawPayload.optimized,
+            preserve_tiny_details: state.sketchLatestDrawPayload.preserve_tiny_details,
+            tiny_detail_marks_expanded: state.sketchLatestDrawPayload.tiny_detail_marks_expanded,
+            minimum_detail_mark_m: state.sketchLatestDrawPayload.minimum_detail_mark_m,
+            tiny_primitive_pruning_enabled: state.sketchLatestDrawPayload.tiny_primitive_pruning_enabled,
+            pruned_primitives: state.sketchLatestDrawPayload.pruned_primitives,
+            optimization_policy_label: state.sketchLatestDrawPayload.optimization_policy_label,
             optimization: state.sketchLatestDrawPayload.optimization || {},
             evaluation: state.sketchLatestDrawPayload.evaluation || {},
             transport: state.sketchLatestDrawPayload.transport || {},
@@ -4164,6 +4178,7 @@
           body: JSON.stringify({
             preview_id: state.sketchPreviewId,
             optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
+            preserve_tiny_details: Boolean(dom.sketchPreserveTiny.checked),
           }),
         });
         const primitiveCount = Number(payload.primitive_count || 0);

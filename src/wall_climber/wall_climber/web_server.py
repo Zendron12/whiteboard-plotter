@@ -85,6 +85,7 @@ from wall_climber.canonical_optimizer import (
     optimize_canonical_plan,
 )
 from wall_climber.canonical_path import (
+    ArcSegment,
     CanonicalCommand,
     CanonicalPathPlan,
     CubicBezier,
@@ -172,6 +173,8 @@ _SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES = 16 * 1024 * 1024
 _SKETCH_SAFE_FIT_PADDING_M_DEFAULT = 0.03
 _SKETCH_SAFE_FIT_AUTO_SHRINK_FACTOR = 0.98
 _SKETCH_SAFE_FIT_AUTO_SHRINK_MAX_OVERRUN_M = 0.05
+_SKETCH_TINY_DETAIL_MARK_M_DEFAULT = 0.0015
+_SKETCH_TINY_DETAIL_MARK_M_MAX = 0.0020
 _SKETCH_SAFE_FIT_ERROR_MESSAGE = (
     'Sketch placement is outside the robot-safe drawable bounds. Try enabling '
     'Fit to Robot-Safe Area, increasing Safe Fit Padding, or reducing Scale.'
@@ -208,6 +211,13 @@ class SketchPreviewCacheEntry:
     stroke_count: int
     point_count: int
     canonical_command_count: int
+
+
+@dataclass(frozen=True)
+class SketchTinyDetailProtectionResult:
+    plan: CanonicalPathPlan
+    tiny_detail_marks_expanded: int
+    minimum_detail_mark_m: float
 
 
 class _SketchTransportValidationFailure(Exception):
@@ -1092,6 +1102,27 @@ def _sketch_draw_optimization_policy(shared_config) -> CanonicalOptimizationPoli
     )
 
 
+def _sketch_draw_cleanup_policy(shared_config) -> CanonicalOptimizationPolicy:
+    policy = _sketch_draw_optimization_policy(shared_config)
+    return CanonicalOptimizationPolicy(
+        label='sketch_centerline_draw_cleanup',
+        merge_collinear_lines=policy.merge_collinear_lines,
+        reorder_units=policy.reorder_units,
+        cluster_units=policy.cluster_units,
+        merge_travel_moves=policy.merge_travel_moves,
+        remove_duplicate_units=policy.remove_duplicate_units,
+        prune_tiny_primitives=True,
+        fit_arcs=policy.fit_arcs,
+        enable_hatch_ordering=policy.enable_hatch_ordering,
+        tiny_primitive_m=policy.tiny_primitive_m,
+        arc_fit_tolerance_m=policy.arc_fit_tolerance_m,
+        merge_angle_tolerance_deg=policy.merge_angle_tolerance_deg,
+        merge_distance_tolerance_m=policy.merge_distance_tolerance_m,
+        dedupe_precision_m=policy.dedupe_precision_m,
+        cluster_cell_size_m=policy.cluster_cell_size_m,
+    )
+
+
 def _sampling_validation_step_m(policy: SamplingPolicy) -> float:
     candidates = [
         float(policy.curve_tolerance_m),
@@ -1661,6 +1692,182 @@ def _canonical_transport_size_summary(plan: CanonicalPathPlan) -> dict[str, int]
     }
 
 
+def _is_canonical_draw_primitive(command: CanonicalCommand) -> bool:
+    return isinstance(command, (LineSegment, ArcSegment, QuadraticBezier, CubicBezier))
+
+
+def _arc_endpoint(command: ArcSegment, angle_rad: float) -> tuple[float, float]:
+    return (
+        float(command.center[0]) + float(command.radius) * math.cos(float(angle_rad)),
+        float(command.center[1]) + float(command.radius) * math.sin(float(angle_rad)),
+    )
+
+
+def _canonical_draw_start(command: CanonicalCommand) -> tuple[float, float]:
+    if isinstance(command, (LineSegment, QuadraticBezier, CubicBezier)):
+        return command.start
+    if isinstance(command, ArcSegment):
+        return _arc_endpoint(command, command.start_angle_rad)
+    raise TypeError(f'unsupported draw primitive {type(command)!r}')
+
+
+def _canonical_draw_end(command: CanonicalCommand) -> tuple[float, float]:
+    if isinstance(command, (LineSegment, QuadraticBezier, CubicBezier)):
+        return command.end
+    if isinstance(command, ArcSegment):
+        return _arc_endpoint(command, command.start_angle_rad + command.sweep_angle_rad)
+    raise TypeError(f'unsupported draw primitive {type(command)!r}')
+
+
+def _canonical_draw_length(command: CanonicalCommand) -> float:
+    if isinstance(command, LineSegment):
+        return float(numpy.hypot(command.end[0] - command.start[0], command.end[1] - command.start[1]))
+    if isinstance(command, QuadraticBezier):
+        return float(
+            numpy.hypot(command.control[0] - command.start[0], command.control[1] - command.start[1])
+            + numpy.hypot(command.end[0] - command.control[0], command.end[1] - command.control[1])
+        )
+    if isinstance(command, CubicBezier):
+        return float(
+            numpy.hypot(command.control1[0] - command.start[0], command.control1[1] - command.start[1])
+            + numpy.hypot(command.control2[0] - command.control1[0], command.control2[1] - command.control1[1])
+            + numpy.hypot(command.end[0] - command.control2[0], command.end[1] - command.control2[1])
+        )
+    if isinstance(command, ArcSegment):
+        return float(abs(float(command.radius) * float(command.sweep_angle_rad)))
+    raise TypeError(f'unsupported draw primitive {type(command)!r}')
+
+
+def _canonical_draw_points(command: CanonicalCommand) -> tuple[tuple[float, float], ...]:
+    if isinstance(command, LineSegment):
+        return (command.start, command.end)
+    if isinstance(command, QuadraticBezier):
+        return (command.start, command.control, command.end)
+    if isinstance(command, CubicBezier):
+        return (command.start, command.control1, command.control2, command.end)
+    if isinstance(command, ArcSegment):
+        start = _arc_endpoint(command, command.start_angle_rad)
+        end = _arc_endpoint(command, command.start_angle_rad + command.sweep_angle_rad)
+        radius = abs(float(command.radius))
+        cx, cy = float(command.center[0]), float(command.center[1])
+        return (
+            start,
+            end,
+            (cx - radius, cy),
+            (cx + radius, cy),
+            (cx, cy - radius),
+            (cx, cy + radius),
+        )
+    raise TypeError(f'unsupported draw primitive {type(command)!r}')
+
+
+def _tiny_draw_unit_mark(
+    unit: tuple[CanonicalCommand, ...],
+    *,
+    minimum_detail_mark_m: float,
+) -> LineSegment:
+    all_points = tuple(point for command in unit for point in _canonical_draw_points(command))
+    min_x = min(float(point[0]) for point in all_points)
+    max_x = max(float(point[0]) for point in all_points)
+    min_y = min(float(point[1]) for point in all_points)
+    max_y = max(float(point[1]) for point in all_points)
+    center = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)
+    direction = (
+        _canonical_draw_end(unit[-1])[0] - _canonical_draw_start(unit[0])[0],
+        _canonical_draw_end(unit[-1])[1] - _canonical_draw_start(unit[0])[1],
+    )
+    direction_norm = float(numpy.hypot(direction[0], direction[1]))
+    if direction_norm <= 1.0e-9:
+        for command in unit:
+            start = _canonical_draw_start(command)
+            end = _canonical_draw_end(command)
+            candidate = (end[0] - start[0], end[1] - start[1])
+            candidate_norm = float(numpy.hypot(candidate[0], candidate[1]))
+            if candidate_norm > direction_norm:
+                direction = candidate
+                direction_norm = candidate_norm
+    if direction_norm <= 1.0e-9:
+        unit_vector = (1.0, 0.0)
+    else:
+        unit_vector = (direction[0] / direction_norm, direction[1] / direction_norm)
+    half = float(minimum_detail_mark_m) * 0.5
+    return LineSegment(
+        start=(center[0] - unit_vector[0] * half, center[1] - unit_vector[1] * half),
+        end=(center[0] + unit_vector[0] * half, center[1] + unit_vector[1] * half),
+    )
+
+
+def _protect_sketch_tiny_detail_units(
+    canonical_plan: CanonicalPathPlan,
+    *,
+    minimum_detail_mark_m: float = _SKETCH_TINY_DETAIL_MARK_M_DEFAULT,
+) -> SketchTinyDetailProtectionResult:
+    mark_length = min(
+        _SKETCH_TINY_DETAIL_MARK_M_MAX,
+        max(_SKETCH_TINY_DETAIL_MARK_M_DEFAULT, float(minimum_detail_mark_m)),
+    )
+    output: list[CanonicalCommand] = []
+    current_unit: list[CanonicalCommand] = []
+    pen_down = False
+    expanded_count = 0
+
+    def flush_unit() -> None:
+        nonlocal expanded_count
+        if not current_unit:
+            return
+        unit = tuple(current_unit)
+        current_unit.clear()
+        points = tuple(point for command in unit for point in _canonical_draw_points(command))
+        min_x = min(float(point[0]) for point in points)
+        max_x = max(float(point[0]) for point in points)
+        min_y = min(float(point[1]) for point in points)
+        max_y = max(float(point[1]) for point in points)
+        bbox_diag = float(numpy.hypot(max_x - min_x, max_y - min_y))
+        total_length = float(sum(_canonical_draw_length(command) for command in unit))
+        if total_length <= mark_length and bbox_diag <= mark_length:
+            output.append(_tiny_draw_unit_mark(unit, minimum_detail_mark_m=mark_length))
+            expanded_count += 1
+        else:
+            output.extend(unit)
+
+    for command in canonical_plan.commands:
+        if isinstance(command, PenDown):
+            flush_unit()
+            pen_down = True
+            output.append(command)
+            continue
+        if isinstance(command, PenUp):
+            flush_unit()
+            pen_down = False
+            output.append(command)
+            continue
+        if isinstance(command, TravelMove):
+            flush_unit()
+            output.append(command)
+            continue
+        if pen_down and _is_canonical_draw_primitive(command):
+            current_unit.append(command)
+            continue
+        flush_unit()
+        output.append(command)
+    flush_unit()
+    if expanded_count == 0:
+        return SketchTinyDetailProtectionResult(
+            plan=canonical_plan,
+            tiny_detail_marks_expanded=0,
+            minimum_detail_mark_m=float(mark_length),
+        )
+    return SketchTinyDetailProtectionResult(
+        plan=CanonicalPathPlan(
+            frame=canonical_plan.frame,
+            theta_ref=canonical_plan.theta_ref,
+            commands=tuple(output),
+        ),
+        tiny_detail_marks_expanded=int(expanded_count),
+        minimum_detail_mark_m=float(mark_length),
+    )
+
+
 def _enforce_sketch_draw_size_limits(summary: dict[str, int]) -> None:
     limits = {
         'max_canonical_command_count': int(_SKETCH_DRAW_MAX_CANONICAL_COMMANDS),
@@ -1825,6 +2032,12 @@ def _sketch_draw_evaluation(
     optimization_stats: dict[str, Any],
     optimized: bool,
     transport: dict[str, Any],
+    preserve_tiny_details: bool,
+    tiny_primitive_pruning_enabled: bool,
+    tiny_primitive_m: float,
+    tiny_detail_marks_expanded: int,
+    minimum_detail_mark_m: float,
+    optimization_policy_label: str,
 ) -> dict[str, Any]:
     original_travel = float(optimization_stats.get('original_travel_length_m', 0.0))
     optimized_travel = float(optimization_stats.get('optimized_travel_length_m', original_travel))
@@ -1842,6 +2055,15 @@ def _sketch_draw_evaluation(
         'primitive_count': int(size_summary.get('primitive_count', 0)),
         'primitive_descriptor_bytes': int(size_summary.get('primitive_descriptor_bytes', 0)),
         'optimized': bool(optimized),
+        'preserve_tiny_details': bool(preserve_tiny_details),
+        'tiny_primitive_pruning_enabled': bool(tiny_primitive_pruning_enabled),
+        'tiny_primitive_m': float(tiny_primitive_m),
+        'pruned_primitives': int(optimization_stats.get('pruned_primitives', 0)),
+        'tiny_detail_marks_expanded': int(tiny_detail_marks_expanded),
+        'minimum_detail_mark_m': float(minimum_detail_mark_m),
+        'optimization_policy_label': str(
+            optimization_stats.get('policy_label') or optimization_policy_label
+        ),
         'original_travel_length_m': original_travel,
         'optimized_travel_length_m': optimized_travel,
         'travel_reduction_m': travel_reduction,
@@ -1968,6 +2190,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         cluster_units=True,
     )
     sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
+    sketch_draw_cleanup_policy = _sketch_draw_cleanup_policy(shared)
     sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
 
     def _carriage_safe_writable_bounds_for_sketch() -> dict[str, float]:
@@ -2422,12 +2645,27 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             name='sketch draw request',
             max_bytes=4096,
         )
-        _reject_extra_fields(raw, {'preview_id', 'optimize_stroke_order'}, 'sketch draw request')
+        _reject_extra_fields(
+            raw,
+            {'preview_id', 'optimize_stroke_order', 'preserve_tiny_details'},
+            'sketch draw request',
+        )
         entry = _load_sketch_preview(raw.get('preview_id'))
         optimize_stroke_order = _coerce_bool(
             raw.get('optimize_stroke_order'),
             field_name='optimize_stroke_order',
             default=True,
+        )
+        preserve_tiny_details = _coerce_bool(
+            raw.get('preserve_tiny_details'),
+            field_name='preserve_tiny_details',
+            default=True,
+        )
+        active_sketch_policy = (
+            sketch_draw_optimization_policy if preserve_tiny_details else sketch_draw_cleanup_policy
+        )
+        tiny_primitive_pruning_enabled = bool(
+            optimize_stroke_order and active_sketch_policy.prune_tiny_primitives
         )
         publish_plan = entry.canonical_plan
         optimization_stats: dict[str, Any] = {}
@@ -2436,11 +2674,21 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             optimization_start = time.perf_counter()
             optimization_result = optimize_canonical_plan(
                 entry.canonical_plan,
-                policy=sketch_draw_optimization_policy,
+                policy=active_sketch_policy,
             )
             optimization_ms = _elapsed_ms(optimization_start)
             publish_plan = optimization_result.plan
             optimization_stats = optimization_result.stats.to_dict()
+        tiny_detail_marks_expanded = 0
+        minimum_detail_mark_m = float(_SKETCH_TINY_DETAIL_MARK_M_DEFAULT)
+        if preserve_tiny_details:
+            protection_result = _protect_sketch_tiny_detail_units(
+                publish_plan,
+                minimum_detail_mark_m=_SKETCH_TINY_DETAIL_MARK_M_DEFAULT,
+            )
+            publish_plan = protection_result.plan
+            tiny_detail_marks_expanded = protection_result.tiny_detail_marks_expanded
+            minimum_detail_mark_m = protection_result.minimum_detail_mark_m
 
         build_start = time.perf_counter()
         primitive_plan_msg, size_summary = _build_validated_sketch_transport_message(
@@ -2463,6 +2711,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             optimization_stats=optimization_stats,
             optimized=bool(optimize_stroke_order),
             transport=transport,
+            preserve_tiny_details=bool(preserve_tiny_details),
+            tiny_primitive_pruning_enabled=bool(tiny_primitive_pruning_enabled),
+            tiny_primitive_m=float(active_sketch_policy.tiny_primitive_m),
+            tiny_detail_marks_expanded=int(tiny_detail_marks_expanded),
+            minimum_detail_mark_m=float(minimum_detail_mark_m),
+            optimization_policy_label=str(active_sketch_policy.label),
         )
         timings = {
             'optimization_ms': optimization_ms,
@@ -2493,6 +2747,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'metadata': entry.metadata,
                 'used_full_cached_plan': True,
                 'optimized': bool(optimize_stroke_order),
+                'preserve_tiny_details': bool(preserve_tiny_details),
+                'tiny_detail_marks_expanded': int(tiny_detail_marks_expanded),
+                'minimum_detail_mark_m': float(minimum_detail_mark_m),
                 'evaluation': evaluation,
             },
             transport=transport,
@@ -2520,6 +2777,15 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'primitive_descriptor_bytes': size_summary['primitive_descriptor_bytes'],
                 'used_full_cached_plan': True,
                 'optimized': bool(optimize_stroke_order),
+                'preserve_tiny_details': bool(preserve_tiny_details),
+                'tiny_detail_marks_expanded': int(tiny_detail_marks_expanded),
+                'minimum_detail_mark_m': float(minimum_detail_mark_m),
+                'tiny_primitive_pruning_enabled': bool(tiny_primitive_pruning_enabled),
+                'tiny_primitive_m': float(active_sketch_policy.tiny_primitive_m),
+                'pruned_primitives': int(optimization_stats.get('pruned_primitives', 0)),
+                'optimization_policy_label': str(
+                    optimization_stats.get('policy_label') or active_sketch_policy.label
+                ),
                 'optimization': optimization_stats,
                 'evaluation': evaluation,
                 'transport': transport,

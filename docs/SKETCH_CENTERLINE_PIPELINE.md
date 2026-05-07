@@ -309,6 +309,23 @@ before publishing. This is robot travel optimization, not image-stroke merging:
 it does not connect unrelated sketch strokes, simplify away details, or change
 the extracted drawing geometry.
 
+`Preserve Tiny Details` is also enabled by default for Sketch Centerline draw.
+Some very small marks, such as a nose dot or short facial detail, can appear in
+the preview/SVG but disappear during actual draw if the final transport or
+executor cleanup treats the isolated path as too short to keep. Sketch draw
+therefore protects only isolated tiny draw units: the whole unit must have a
+very small total drawable length and a very small bounding box. Short segments
+inside a normal longer stroke or curve are not expanded.
+
+When protection is active, an isolated tiny unit may be replaced by a tiny
+centered mark that preserves the original direction when possible. The default
+minimum visible mark length is conservative, about `0.0015 m`, and the first
+implementation caps it at `0.0020 m` to avoid turning small intentional marks
+into large artifacts. The expanded mark still goes through the same robot-safe
+bounds and transport validation before publishing. If `Preserve Tiny Details`
+is disabled, the draw path may use conservative cleanup/pruning and tiny marks
+can be lost.
+
 G-code is not used for runtime drawing. The project runtime remains
 `CanonicalPathPlan` / `PrimitivePathPlan` / ROS executor. G-code may be a future
 optional export format, but it is not the main execution path.

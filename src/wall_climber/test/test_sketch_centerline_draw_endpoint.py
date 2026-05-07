@@ -173,10 +173,18 @@ def _preview(
     return payload
 
 
-def _draw(client: TestClient, preview_id: str, *, optimize_stroke_order: bool | None = None):
+def _draw(
+    client: TestClient,
+    preview_id: str,
+    *,
+    optimize_stroke_order: bool | None = None,
+    preserve_tiny_details: bool | None = None,
+):
     payload = {'preview_id': preview_id}
     if optimize_stroke_order is not None:
         payload['optimize_stroke_order'] = optimize_stroke_order
+    if preserve_tiny_details is not None:
+        payload['preserve_tiny_details'] = preserve_tiny_details
     return client.post(
         '/api/sketch-centerline/draw',
         json=payload,
@@ -241,6 +249,11 @@ def test_draw_uses_cached_smooth_canonical_plan() -> None:
     assert body['evaluation']['preview_geometry_mode'] == 'smooth_curves'
     assert body['evaluation']['primitive_count'] == body['primitive_count']
     assert body['evaluation']['travel_reduction_percent'] >= 0.0
+    assert body['preserve_tiny_details'] is True
+    assert body['tiny_primitive_pruning_enabled'] is False
+    assert body['evaluation']['preserve_tiny_details'] is True
+    assert body['evaluation']['tiny_primitive_pruning_enabled'] is False
+    assert body['evaluation']['minimum_detail_mark_m'] == pytest.approx(0.0015)
     json.dumps(body['evaluation'])
     assert runtime.node.publish_count == 1
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
@@ -263,6 +276,83 @@ def test_draw_uses_cached_polyline_canonical_plan() -> None:
     assert _FakePathPrimitive.LINE_SEGMENT in primitive_types
     assert _FakePathPrimitive.QUADRATIC_BEZIER not in primitive_types
     assert _FakePathPrimitive.CUBIC_BEZIER not in primitive_types
+
+
+def test_tiny_detail_protection_expands_only_isolated_units() -> None:
+    plan = CanonicalPathPlan(
+        frame='board',
+        theta_ref=0.0,
+        commands=(
+            PenDown(),
+            LineSegment(start=(1.0, 1.0), end=(1.0004, 1.0)),
+            PenUp(),
+            TravelMove(start=(1.0004, 1.0), end=(2.0, 2.0)),
+            PenDown(),
+            LineSegment(start=(2.0, 2.0), end=(2.01, 2.0)),
+            LineSegment(start=(2.01, 2.0), end=(2.0104, 2.0)),
+            PenUp(),
+        ),
+    )
+
+    result = web_server._protect_sketch_tiny_detail_units(plan)
+
+    assert result.tiny_detail_marks_expanded == 1
+    assert result.minimum_detail_mark_m == pytest.approx(0.0015)
+    lines = [command for command in result.plan.commands if isinstance(command, LineSegment)]
+    assert len(lines) == 3
+    expanded = lines[0]
+    expanded_length = ((expanded.end[0] - expanded.start[0]) ** 2 + (expanded.end[1] - expanded.start[1]) ** 2) ** 0.5
+    expanded_center = ((expanded.start[0] + expanded.end[0]) * 0.5, (expanded.start[1] + expanded.end[1]) * 0.5)
+    assert 0.0015 <= expanded_length <= 0.0020
+    assert expanded_center == pytest.approx((1.0002, 1.0))
+    assert expanded.end[0] > expanded.start[0]
+    assert lines[1].start == (2.0, 2.0)
+    assert lines[1].end == (2.01, 2.0)
+    assert lines[2].start == (2.01, 2.0)
+    assert lines[2].end == (2.0104, 2.0)
+
+
+def test_tiny_detail_protection_uses_existing_safe_bounds_validation() -> None:
+    plan = CanonicalPathPlan(
+        frame='board',
+        theta_ref=0.0,
+        commands=(
+            PenDown(),
+            LineSegment(start=(0.0003, 1.0), end=(0.0004, 1.0)),
+            PenUp(),
+        ),
+    )
+    protected = web_server._protect_sketch_tiny_detail_units(plan)
+
+    with pytest.raises(HTTPException) as exc_info:
+        web_server._build_validated_sketch_transport_message(
+            protected.plan,
+            writable_bounds={'x_min': 0.0, 'x_max': 6.3, 'y_min': 0.0, 'y_max': 3.0},
+            shared_config=load_shared_config(),
+            sampling_policy=web_server._runtime_sampling_policy(load_shared_config()),
+        )
+
+    assert exc_info.value.status_code == 422
+
+
+def test_draw_can_disable_tiny_detail_preservation() -> None:
+    client, runtime = _client_and_runtime()
+    payload = _preview(client, preview_geometry_mode='polyline')
+
+    response = _draw(
+        client,
+        payload['preview_id'],
+        preserve_tiny_details=False,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['preserve_tiny_details'] is False
+    assert body['tiny_detail_marks_expanded'] == 0
+    assert body['tiny_primitive_pruning_enabled'] is True
+    assert body['evaluation']['preserve_tiny_details'] is False
+    assert body['evaluation']['tiny_primitive_pruning_enabled'] is True
+    assert runtime.node.publish_count == 1
 
 
 def test_oversized_cached_plan_returns_structured_413(monkeypatch) -> None:
