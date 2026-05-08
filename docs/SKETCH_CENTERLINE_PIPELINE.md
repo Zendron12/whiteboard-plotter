@@ -114,11 +114,11 @@ The existing File upload section exposes this mode as a preview-only option.
 Choose a PNG/JPG in the normal file input, optionally adjust `Sketch Margin (m)`,
 `Optimization Preset`, `Preview Geometry`, `Sketch Max Image Dim`, Curve
 Tolerance, `Sketch Noise Area (px)`, Line Sensitivity, Min Stroke Length,
-Stroke Merge Gap, Simplify Epsilon, Sketch Scale, Sketch Center X/Y, and
-`Safe Fit Padding (m)`, then click `Preview as Sketch Centerline`.
-`Fit to Robot-Safe Area` is enabled by default. This fits and centers the sketch
-in a padded robot-safe region where the pen path keeps the carriage body inside
-the board and inside the configured safe cable workspace.
+Stroke Merge Gap, Simplify Epsilon, Sketch Scale, and Sketch Center X/Y, then
+click `Preview as Sketch Centerline`. `Fit to Robot-Safe Area` is enabled by
+default. This fits and centers the sketch in the drawable region where the pen
+path keeps the carriage body inside the board and inside the configured safe
+cable workspace.
 
 The UI calls `/api/sketch-centerline/preview`, displays the returned
 `preview_svg`, and uses that same full SVG as the Board Workspace preview
@@ -127,13 +127,6 @@ preview truncation status, raw/final stroke counts, merge counts, selected
 optimization preset, preview geometry mode, curve/line primitive counts, timing
 stages, effective merge/simplification settings, skeleton backend, threshold
 information, placement metadata, and any warnings.
-
-Preview also performs the same final transport validation used before drawing:
-the selected cached canonical plan is sampled with the runtime policy, checked
-against carriage-safe writable bounds and safe cable workspace, converted to the
-existing `PrimitivePathPlan` transport shape, and checked against guarded size
-limits. This catches placement errors before the user clicks Draw Sketch
-Preview.
 
 The File tab separates the two preview surfaces:
 
@@ -144,26 +137,6 @@ The File tab separates the two preview surfaces:
 - `Sampled Canvas Preview`: fallback/debug rendering from `preview.strokes`.
   If the response is capped, the UI reports returned/original point counts, but
   the visible board preview should come from the full SVG overlay.
-
-`Safe Fit Padding (m)` defaults to `0.03`. It shrinks the auto-fit rectangle
-used for safe-fit previews while still validating the final drawing against the
-true robot-safe writable bounds. This avoids boundary rounding and curve
-sampling cases where a preview placed exactly at scale `100%` looked safe but
-later failed during final transport validation. If safe-fit is enabled and final
-transport validation misses by a small carriage-safe bounds margin, the backend
-retries once at `98%` of the requested scale and reports
-`safe_fit_auto_shrink_applied`, `requested_scale_percent`,
-`effective_scale_percent`, and `safe_fit_retry_reason` in metadata. Manual
-board-fit placement with `Fit to Robot-Safe Area` disabled is never silently
-shrunk.
-
-The `Sketch Baseline / Evaluation` box summarizes report-oriented metrics:
-processing time, slowest stage, stroke/point/command/primitive counts, draw
-length, estimated pen-up travel, estimated pen lifts, safe bounds status, full
-cached plan status, and draw optimization results after Draw Sketch Preview.
-`Download Sketch Metrics JSON` exports the latest preview parameters, metadata,
-timing, bounds, transport validation summary, optimization stats, and draw
-publish summary for graduation-report evidence.
 
 ## Tuning Notes
 
@@ -308,23 +281,6 @@ canonical optimizer to reorder and reverse draw units to reduce pen-up travel
 before publishing. This is robot travel optimization, not image-stroke merging:
 it does not connect unrelated sketch strokes, simplify away details, or change
 the extracted drawing geometry.
-
-`Preserve Tiny Details` is also enabled by default for Sketch Centerline draw.
-Some very small marks, such as a nose dot or short facial detail, can appear in
-the preview/SVG but disappear during actual draw if the final transport or
-executor cleanup treats the isolated path as too short to keep. Sketch draw
-therefore protects only isolated tiny draw units: the whole unit must have a
-very small total drawable length and a very small bounding box. Short segments
-inside a normal longer stroke or curve are not expanded.
-
-When protection is active, an isolated tiny unit may be replaced by a tiny
-centered mark that preserves the original direction when possible. The default
-minimum visible mark length is conservative, about `0.0015 m`, and the first
-implementation caps it at `0.0020 m` to avoid turning small intentional marks
-into large artifacts. The expanded mark still goes through the same robot-safe
-bounds and transport validation before publishing. If `Preserve Tiny Details`
-is disabled, the draw path may use conservative cleanup/pruning and tiny marks
-can be lost.
 
 G-code is not used for runtime drawing. The project runtime remains
 `CanonicalPathPlan` / `PrimitivePathPlan` / ROS executor. G-code may be a future
