@@ -35,10 +35,38 @@ The canonical command set is:
 - Cleanup remains in Python during this gate.
 - Preview sampling and legacy export sampling happen late, through `canonical_adapters` and the C++ geometry sampler when available.
 
+## Preview/Draw Cache Contract
+
+Preview endpoints for text, SVG, uploaded SVG/image files, and sketch centerline
+inputs now store the generated `CanonicalPathPlan` in a process-local preview
+cache. Each preview response returns:
+
+- `preview_id`
+- `canonical_hash`
+- the existing preview payload
+- a compatibility `commit_request` that includes `preview_id`
+
+`canonical_hash` is a SHA-256 hash of a stable serialized canonical plan with
+rounded numeric values. It is used to prove that preview and draw are using the
+same canonical geometry.
+
+The generic draw endpoint is:
+
+```text
+POST /api/draw
+```
+
+It accepts `preview_id`, loads the cached `CanonicalPathPlan`, validates and
+exports it to `PrimitivePathPlan`, and publishes it. It does not re-read or
+re-vectorize the original source. Compatibility commit endpoints still exist
+for the current UI, but when a `preview_id` is supplied they draw from the cache.
+
 ## Compatibility Rules
 
 - Public HTTP endpoints do not change.
 - Runtime transport now uses `PrimitivePathPlan`.
+- Final preview-first draw flows should use `preview_id`; source-rebuild commit
+  paths are compatibility behavior while the UI migration is in progress.
 - `DrawPlan` may still appear only in older diagnostic/export helpers while those seams are
   being retired.
 - `pen_strokes_to_canonical_plan()` and `canonical_plan_from_pen_strokes()` are legacy compatibility helpers and must not be used by the text/SVG/image production builders.

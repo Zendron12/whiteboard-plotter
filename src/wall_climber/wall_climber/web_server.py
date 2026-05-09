@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import threading
 import time
@@ -67,6 +68,7 @@ except ImportError as exc:
 else:
     _ROS_IMPORT_ERROR = None
 
+from wall_climber import canonical_adapters as _canonical_adapters
 from wall_climber.canonical_adapters import (
     SamplingPolicy,
     canonical_plan_debug_payload,
@@ -85,6 +87,7 @@ from wall_climber.canonical_optimizer import (
     optimize_canonical_plan,
 )
 from wall_climber.canonical_path import (
+    ArcSegment,
     CanonicalCommand,
     CanonicalPathPlan,
     CubicBezier,
@@ -94,6 +97,7 @@ from wall_climber.canonical_path import (
     QuadraticBezier,
     TravelMove,
 )
+from wall_climber.canonical_tiny_details import expand_tiny_details_in_canonical_plan
 from wall_climber.canonical_ops import (
     cleanup_canonical_plan,
     default_image_placement,
@@ -166,6 +170,8 @@ _MAX_VECTOR_REQUEST_BYTES = 512 * 1024
 _SKETCH_PREVIEW_MAX_POINTS = 2400
 _SKETCH_PREVIEW_CACHE_TTL_SECONDS = 10 * 60
 _SKETCH_PREVIEW_CACHE_MAX_ENTRIES = 16
+_PREVIEW_CACHE_TTL_SECONDS = 30 * 60
+_PREVIEW_CACHE_MAX_ENTRIES = 48
 _SKETCH_DRAW_MAX_CANONICAL_COMMANDS = 200_000
 _SKETCH_DRAW_MAX_PRIMITIVES = 200_000
 _SKETCH_DRAW_MAX_PRIMITIVE_DESCRIPTOR_BYTES = 16 * 1024 * 1024
@@ -188,10 +194,43 @@ class PreparedImageArtifact:
 
 
 @dataclass(frozen=True)
+class PreviewCacheEntry:
+    preview_id: str
+    source_type: str
+    canonical_plan: CanonicalPathPlan
+    canonical_hash: str
+    executable_canonical_plan: CanonicalPathPlan
+    executable_canonical_hash: str
+    primitive_descriptor: dict[str, Any]
+    primitive_plan: PrimitivePathPlan
+    primitive_hash: str
+    execution_preview_svg: str
+    execution_hash: str
+    settings_hash: str
+    metrics: dict[str, Any]
+    preview_payload: dict[str, Any]
+    commit_request: dict[str, Any]
+    created_at_unix: float
+    input_type: str
+    pipeline_mode: str
+    source_hash: str | None
+    settings: dict[str, Any]
+    metadata: dict[str, Any]
+    warnings: tuple[str, ...]
+    source_filename: str
+    drawing_plan: DrawingPathPlan | None
+    command_metadata: tuple[dict[str, Any] | None, ...] | None
+    optimizer_stats: dict[str, Any] | None
+    route_metadata: dict[str, Any] | None
+    curve_fit_payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class SketchPreviewCacheEntry:
     preview_id: str
     drawing_plan: DrawingPathPlan
     canonical_plan: CanonicalPathPlan
+    canonical_hash: str
     preview_geometry_mode: str
     metadata: dict[str, Any]
     warnings: tuple[str, ...]
@@ -904,6 +943,131 @@ def _validate_upload_id(raw_upload_id: Any) -> str:
     return upload_id
 
 
+def _validate_preview_id(raw_preview_id: Any) -> str:
+    if not isinstance(raw_preview_id, str):
+        raise HTTPException(status_code=422, detail='preview_id must be a string')
+    preview_id = raw_preview_id.strip().lower()
+    if len(preview_id) != 32 or any(ch not in '0123456789abcdef' for ch in preview_id):
+        raise HTTPException(status_code=422, detail='preview_id must be a 32-char lowercase hex string')
+    return preview_id
+
+
+def _stable_float(value: float, *, precision: int = 7) -> float:
+    rounded = round(float(value), precision)
+    return 0.0 if abs(rounded) < (10.0 ** -precision) else rounded
+
+
+def _stable_point_payload(point: tuple[float, float]) -> list[float]:
+    return [_stable_float(point[0]), _stable_float(point[1])]
+
+
+def _stable_payload(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return _stable_float(value)
+    if isinstance(value, numpy.generic):
+        return _stable_payload(value.item())
+    if isinstance(value, (list, tuple)):
+        return [_stable_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_payload(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if hasattr(value, '__dict__'):
+        return _stable_payload(vars(value))
+    return str(value)
+
+
+def _stable_hash(value: Any) -> str:
+    payload = _stable_payload(value)
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def settings_hash(settings: dict[str, Any]) -> str:
+    excluded = {'preview_id', 'created_at', 'created_at_unix', 'expires_at_unix', 'ttl_seconds'}
+    filtered = {
+        key: value
+        for key, value in settings.items()
+        if key not in excluded
+    }
+    return _stable_hash(filtered)
+
+
+def _canonical_command_payload(command: CanonicalCommand) -> dict[str, Any]:
+    if isinstance(command, PenUp):
+        return {'type': 'pen_up'}
+    if isinstance(command, PenDown):
+        return {'type': 'pen_down'}
+    if isinstance(command, TravelMove):
+        return {
+            'type': 'travel',
+            'start': _stable_point_payload(command.start),
+            'end': _stable_point_payload(command.end),
+        }
+    if isinstance(command, LineSegment):
+        return {
+            'type': 'line',
+            'start': _stable_point_payload(command.start),
+            'end': _stable_point_payload(command.end),
+        }
+    if isinstance(command, ArcSegment):
+        return {
+            'type': 'arc',
+            'center': _stable_point_payload(command.center),
+            'radius': _stable_float(command.radius),
+            'start_angle_rad': _stable_float(command.start_angle_rad),
+            'sweep_angle_rad': _stable_float(command.sweep_angle_rad),
+        }
+    if isinstance(command, QuadraticBezier):
+        return {
+            'type': 'quadratic',
+            'start': _stable_point_payload(command.start),
+            'control': _stable_point_payload(command.control),
+            'end': _stable_point_payload(command.end),
+        }
+    if isinstance(command, CubicBezier):
+        return {
+            'type': 'cubic',
+            'start': _stable_point_payload(command.start),
+            'control1': _stable_point_payload(command.control1),
+            'control2': _stable_point_payload(command.control2),
+            'end': _stable_point_payload(command.end),
+        }
+    raise ValueError(f'Unsupported canonical command {type(command)!r}.')
+
+
+def canonical_plan_stable_payload(plan: CanonicalPathPlan) -> dict[str, Any]:
+    return {
+        'frame': str(plan.frame),
+        'theta_ref': _stable_float(plan.theta_ref),
+        'commands': [
+            _canonical_command_payload(command)
+            for command in plan.commands
+        ],
+    }
+
+
+def canonical_plan_hash(plan: CanonicalPathPlan) -> str:
+    payload = canonical_plan_stable_payload(plan)
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _content_hash(content: bytes | str | dict[str, Any] | None) -> str | None:
+    if content is None:
+        return None
+    if isinstance(content, bytes):
+        payload = content
+    elif isinstance(content, str):
+        payload = content.encode('utf-8')
+    else:
+        payload = json.dumps(content, sort_keys=True, separators=(',', ':'), default=str).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _resolve_text_start_placement(
     raw_placement: Any,
     *,
@@ -1222,17 +1386,37 @@ def _build_primitive_path_plan_message(
     canonical_plan: CanonicalPathPlan,
 ) -> PrimitivePathPlan:
     descriptor = canonical_plan_to_primitive_path_plan(canonical_plan)
+    return _primitive_path_plan_message_from_descriptor(descriptor)
+
+
+def _primitive_path_plan_message_from_descriptor(
+    descriptor: dict[str, Any],
+) -> PrimitivePathPlan:
+    def board_point_from_payload(point: dict[str, Any]):
+        try:
+            return BoardPoint(
+                x=float(point['x']),
+                y=float(point['y']),
+            )
+        except TypeError:
+            board_point = BoardPoint()
+            board_point.x = float(point['x'])
+            board_point.y = float(point['y'])
+            return board_point
+
     plan = PrimitivePathPlan()
     plan.frame = str(descriptor['frame'])
     plan.theta_ref = float(descriptor['theta_ref'])
+    if not hasattr(plan, 'primitives'):
+        plan.primitives = []
     type_codes = {
-        'PEN_UP': PathPrimitive.PEN_UP,
-        'PEN_DOWN': PathPrimitive.PEN_DOWN,
-        'TRAVEL_MOVE': PathPrimitive.TRAVEL_MOVE,
-        'LINE_SEGMENT': PathPrimitive.LINE_SEGMENT,
-        'ARC_SEGMENT': PathPrimitive.ARC_SEGMENT,
-        'QUADRATIC_BEZIER': PathPrimitive.QUADRATIC_BEZIER,
-        'CUBIC_BEZIER': PathPrimitive.CUBIC_BEZIER,
+        'PEN_UP': getattr(PathPrimitive, 'PEN_UP', 1),
+        'PEN_DOWN': getattr(PathPrimitive, 'PEN_DOWN', 2),
+        'TRAVEL_MOVE': getattr(PathPrimitive, 'TRAVEL_MOVE', 3),
+        'LINE_SEGMENT': getattr(PathPrimitive, 'LINE_SEGMENT', 4),
+        'ARC_SEGMENT': getattr(PathPrimitive, 'ARC_SEGMENT', 5),
+        'QUADRATIC_BEZIER': getattr(PathPrimitive, 'QUADRATIC_BEZIER', 6),
+        'CUBIC_BEZIER': getattr(PathPrimitive, 'CUBIC_BEZIER', 7),
     }
     for primitive_descriptor in descriptor['primitives']:
         primitive = PathPrimitive()
@@ -1242,10 +1426,7 @@ def _build_primitive_path_plan_message(
             setattr(
                 primitive,
                 field_name,
-                BoardPoint(
-                    x=float(point['x']),
-                    y=float(point['y']),
-                ),
+                board_point_from_payload(point),
             )
         primitive.radius = float(primitive_descriptor['radius'])
         primitive.start_angle_rad = float(primitive_descriptor['start_angle_rad'])
@@ -1375,8 +1556,8 @@ def _validate_sketch_upload(upload: UploadFile, content: bytes) -> None:
 
     suffix = Path(upload.filename or '').suffix.lower()
     normalized_type = str(upload.content_type or '').split(';', 1)[0].strip().lower()
-    if suffix not in {'.png', '.jpg', '.jpeg'} and normalized_type not in {'image/png', 'image/jpeg'}:
-        raise HTTPException(status_code=415, detail='sketch preview accepts PNG or JPG uploads only')
+    if suffix not in {'.png', '.jpg', '.jpeg', '.webp'} and normalized_type not in {'image/png', 'image/jpeg', 'image/webp'}:
+        raise HTTPException(status_code=415, detail='sketch preview accepts PNG, JPG, or WebP uploads only')
 
 
 def _drawing_plan_bounds(plan) -> dict[str, float]:
@@ -1546,6 +1727,73 @@ def _smooth_sketch_preview_svg(
     )
 
 
+def _sampled_paths_bounds(sampled_paths) -> dict[str, float] | None:
+    points = [
+        point
+        for sampled in sampled_paths
+        if sampled.draw
+        for point in sampled.points
+    ]
+    if not points:
+        return None
+    x_values = [float(point[0]) for point in points]
+    y_values = [float(point[1]) for point in points]
+    return {
+        'x_min': min(x_values),
+        'x_max': max(x_values),
+        'y_min': min(y_values),
+        'y_max': max(y_values),
+        'width': max(x_values) - min(x_values),
+        'height': max(y_values) - min(y_values),
+    }
+
+
+def _sampled_paths_length(sampled_paths, *, draw: bool) -> float:
+    total = 0.0
+    for sampled in sampled_paths:
+        if bool(sampled.draw) != bool(draw):
+            continue
+        for index in range(1, len(sampled.points)):
+            start = sampled.points[index - 1]
+            end = sampled.points[index]
+            total += float(numpy.hypot(end[0] - start[0], end[1] - start[1]))
+    return total
+
+
+def _sampled_paths_stable_payload(sampled_paths) -> list[dict[str, Any]]:
+    return [
+        {
+            'draw': bool(sampled.draw),
+            'points': [
+                _stable_point_payload((float(point[0]), float(point[1])))
+                for point in sampled.points
+            ],
+        }
+        for sampled in sampled_paths
+    ]
+
+
+def _execution_preview_svg_from_sampled_paths(
+    sampled_paths,
+    *,
+    board_width_m: float,
+    board_height_m: float,
+) -> str:
+    draw_strokes = [
+        [
+            [float(point[0]), float(point[1])]
+            for point in sampled.points
+        ]
+        for sampled in sampled_paths
+        if sampled.draw and len(sampled.points) >= 2
+    ]
+    return _sketch_preview_svg(
+        draw_strokes,
+        board_width_m=board_width_m,
+        board_height_m=board_height_m,
+    )
+
+
 def _canonical_primitive_counts(plan: CanonicalPathPlan) -> dict[str, int]:
     line_count = sum(isinstance(command, LineSegment) for command in plan.commands)
     quadratic_count = sum(isinstance(command, QuadraticBezier) for command in plan.commands)
@@ -1712,7 +1960,25 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         cluster_units=True,
     )
     sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
+    preview_cache: OrderedDict[str, PreviewCacheEntry] = OrderedDict()
     sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
+
+    def _preview_optimization_policy(source_type: str) -> CanonicalOptimizationPolicy:
+        if source_type == 'sketch_centerline':
+            return sketch_draw_optimization_policy
+        if source_type == 'image':
+            return image_optimization_policy
+        if source_type == 'svg':
+            return svg_optimization_policy
+        return _draw_optimization_policy(
+            shared,
+            label=f'{source_type}_preview',
+            reorder_units=True,
+            fit_arcs=False,
+        )
+
+    def _preview_allowed_modes(source_type: str) -> tuple[str, ...]:
+        return (MODE_TEXT,) if source_type == 'text' else (MODE_DRAW,)
 
     def _carriage_safe_writable_bounds_for_sketch() -> dict[str, float]:
         try:
@@ -1740,6 +2006,329 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             'width': float(shared.board.width),
             'height': float(shared.board.height),
         }
+
+    def _preview_writable_bounds_for_source(source_type: str) -> dict[str, float]:
+        if source_type == 'sketch_centerline':
+            return _carriage_safe_writable_bounds_for_sketch()
+        return runtime.node.carriage_safe_writable_bounds()
+
+    def _tiny_detail_policy_for_preview(
+        source_type: str,
+        settings_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_settings = settings_payload.get('settings')
+        settings = raw_settings if isinstance(raw_settings, dict) else {}
+        def setting_value(key: str, default: Any) -> Any:
+            value = settings.get(key, default)
+            return default if value is None else value
+
+        eligible = str(source_type) == 'sketch_centerline'
+        if eligible:
+            preserve = _coerce_bool(
+                settings.get('preserve_tiny_details'),
+                field_name='preserve_tiny_details',
+                default=True,
+            )
+        else:
+            preserve = False
+        runtime_draw_step = runtime_sampling_policy.draw_step_m
+        default_min_feature = max(
+            0.0035,
+            float(runtime_draw_step) * 1.5 if runtime_draw_step is not None else 0.0045,
+        )
+        minimum_feature = _coerce_float(
+            setting_value('minimum_drawable_feature_m', default_min_feature),
+            field_name='minimum_drawable_feature_m',
+            minimum=0.0005,
+            maximum=0.03,
+        )
+        candidate_max = _coerce_float(
+            setting_value('tiny_detail_candidate_max_feature_m', minimum_feature * 0.75),
+            field_name='tiny_detail_candidate_max_feature_m',
+            minimum=0.0001,
+            maximum=0.03,
+        )
+        expand_mode = str(setting_value('tiny_detail_expand_mode', 'micro_cross')).strip().lower()
+        if expand_mode not in {'micro_cross', 'micro_loop'}:
+            raise HTTPException(
+                status_code=422,
+                detail="tiny_detail_expand_mode must be 'micro_cross' or 'micro_loop'",
+            )
+        max_expansions = _coerce_int(
+            setting_value('tiny_detail_max_expansions', 512),
+            field_name='tiny_detail_max_expansions',
+            minimum=0,
+            maximum=10_000,
+        )
+        return {
+            'eligible': bool(eligible),
+            'preserve_tiny_details': bool(preserve),
+            'minimum_drawable_feature_m': float(minimum_feature),
+            'tiny_detail_candidate_max_feature_m': float(candidate_max),
+            'tiny_detail_expand_mode': expand_mode,
+            'tiny_detail_max_expansions': int(max_expansions),
+        }
+
+    def _build_executable_preview_payload(
+        canonical_plan: CanonicalPathPlan,
+        *,
+        source_type: str,
+        settings_payload: dict[str, Any],
+        writable_bounds: dict[str, float],
+        optimize_stroke_order: bool,
+        existing_optimizer_stats: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        executable_plan = canonical_plan
+        tiny_detail_policy = _tiny_detail_policy_for_preview(source_type, settings_payload)
+        effective_settings_payload = dict(settings_payload)
+        effective_settings_payload['tiny_detail_policy'] = tiny_detail_policy
+        tiny_detail_metrics = {
+            'preserve_tiny_details': bool(tiny_detail_policy['preserve_tiny_details']),
+            'tiny_detail_expand_mode': tiny_detail_policy['tiny_detail_expand_mode'],
+            'minimum_drawable_feature_m': float(tiny_detail_policy['minimum_drawable_feature_m']),
+            'tiny_detail_candidate_max_feature_m': float(
+                tiny_detail_policy['tiny_detail_candidate_max_feature_m']
+            ),
+            'tiny_detail_max_expansions': int(tiny_detail_policy['tiny_detail_max_expansions']),
+            'tiny_details_detected': 0,
+            'tiny_details_preserved': 0,
+            'tiny_details_expanded': 0,
+            'tiny_details_skipped_by_limit': 0,
+            'tiny_details_expansion_added_commands': 0,
+        }
+        if bool(tiny_detail_policy['preserve_tiny_details']):
+            try:
+                tiny_detail_result = expand_tiny_details_in_canonical_plan(
+                    executable_plan,
+                    preserve=True,
+                    minimum_drawable_feature_m=float(tiny_detail_policy['minimum_drawable_feature_m']),
+                    candidate_max_feature_m=float(
+                        tiny_detail_policy['tiny_detail_candidate_max_feature_m']
+                    ),
+                    expand_mode=str(tiny_detail_policy['tiny_detail_expand_mode']),
+                    max_expansions=int(tiny_detail_policy['tiny_detail_max_expansions']),
+                    bounds=writable_bounds,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            executable_plan = tiny_detail_result.plan
+            tiny_detail_metrics = dict(tiny_detail_result.metrics)
+        optimization_stats = dict(existing_optimizer_stats or {})
+        optimization_ms = 0.0
+        if optimize_stroke_order:
+            optimization_started = time.perf_counter()
+            optimization_result = optimize_canonical_plan(
+                executable_plan,
+                policy=_preview_optimization_policy(source_type),
+            )
+            optimization_ms = max(0.0, (time.perf_counter() - optimization_started) * 1000.0)
+            executable_plan = optimization_result.plan
+            optimization_stats = optimization_result.stats.to_dict()
+
+        sampled_paths = _validated_runtime_sampled_paths(
+            executable_plan,
+            writable_bounds=writable_bounds,
+            shared_config=shared,
+            sampling_policy=runtime_sampling_policy,
+        )
+        primitive_descriptor = canonical_plan_to_primitive_path_plan(executable_plan)
+        primitive_plan = _primitive_path_plan_message_from_descriptor(primitive_descriptor)
+        primitive_hash = _stable_hash(primitive_descriptor)
+        execution_payload = _sampled_paths_stable_payload(sampled_paths)
+        execution_hash = _stable_hash(execution_payload)
+        cpp_available = getattr(_canonical_adapters, '_geometry_cpp', None) is not None
+        draw_path_count = sum(1 for sampled in sampled_paths if sampled.draw)
+        travel_path_count = sum(1 for sampled in sampled_paths if not sampled.draw)
+        draw_sample_count = sum(len(sampled.points) for sampled in sampled_paths if sampled.draw)
+        travel_sample_count = sum(len(sampled.points) for sampled in sampled_paths if not sampled.draw)
+        return {
+            'executable_canonical_plan': executable_plan,
+            'executable_canonical_hash': canonical_plan_hash(executable_plan),
+            'primitive_descriptor': primitive_descriptor,
+            'primitive_plan': primitive_plan,
+            'primitive_hash': primitive_hash,
+            'execution_preview_svg': _execution_preview_svg_from_sampled_paths(
+                sampled_paths,
+                board_width_m=float(shared.board.width),
+                board_height_m=float(shared.board.height),
+            ),
+            'execution_hash': execution_hash,
+            'settings_hash': settings_hash(effective_settings_payload),
+            'metrics': {
+                'execution_preview_source': 'cpp_geometry_binding' if cpp_available else 'python_runtime_sampling',
+                'cpp_exact_preview': bool(cpp_available),
+                **tiny_detail_metrics,
+                'optimized': bool(optimize_stroke_order),
+                'optimization': optimization_stats,
+                'optimization_ms': float(optimization_ms),
+                'canonical_command_count': int(len(canonical_plan.commands)),
+                'executable_canonical_command_count': int(len(executable_plan.commands)),
+                'primitive_count': int(len(primitive_descriptor.get('primitives') or ())),
+                'draw_path_count': int(draw_path_count),
+                'travel_path_count': int(travel_path_count),
+                'draw_sample_count': int(draw_sample_count),
+                'travel_sample_count': int(travel_sample_count),
+                'draw_length_m': _sampled_paths_length(sampled_paths, draw=True),
+                'travel_length_m': _sampled_paths_length(sampled_paths, draw=False),
+                'bounds': _sampled_paths_bounds(sampled_paths),
+                'runtime_sampling_policy': _stable_payload(runtime_sampling_policy),
+            },
+        }
+
+    def _preview_cache_expired(entry: PreviewCacheEntry, *, now: float) -> bool:
+        return (now - float(entry.created_at_unix)) > float(_PREVIEW_CACHE_TTL_SECONDS)
+
+    def _cleanup_preview_cache(*, now: float | None = None) -> None:
+        current = time.time() if now is None else float(now)
+        expired_ids = [
+            preview_id
+            for preview_id, entry in preview_cache.items()
+            if _preview_cache_expired(entry, now=current)
+        ]
+        for preview_id in expired_ids:
+            preview_cache.pop(preview_id, None)
+        while len(preview_cache) > int(_PREVIEW_CACHE_MAX_ENTRIES):
+            preview_cache.popitem(last=False)
+
+    def _store_preview(
+        *,
+        preview_id: str | None = None,
+        source_type: str,
+        canonical_plan: CanonicalPathPlan,
+        preview_payload: dict[str, Any],
+        commit_request: dict[str, Any] | None,
+        input_type: str,
+        pipeline_mode: str,
+        source_hash: str | None = None,
+        settings: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        warnings: tuple[str, ...] = (),
+        source_filename: str = '',
+        drawing_plan: DrawingPathPlan | None = None,
+        command_metadata: tuple[dict[str, Any] | None, ...] | None = None,
+        optimizer_stats: dict[str, Any] | None = None,
+        route_metadata: dict[str, Any] | None = None,
+        curve_fit_payload: dict[str, Any] | None = None,
+        optimize_stroke_order: bool = False,
+        writable_bounds: dict[str, float] | None = None,
+    ) -> PreviewCacheEntry:
+        _cleanup_preview_cache()
+        normalized_id = uuid.uuid4().hex if preview_id is None else _validate_preview_id(preview_id)
+        canonical_hash = canonical_plan_hash(canonical_plan)
+        geometry_settings = {
+            'source_type': str(source_type),
+            'input_type': str(input_type),
+            'pipeline_mode': str(pipeline_mode),
+            'settings': dict(settings or {}),
+            'optimize_stroke_order': bool(optimize_stroke_order),
+        }
+        executable_payload = _build_executable_preview_payload(
+            canonical_plan,
+            source_type=str(source_type),
+            settings_payload=geometry_settings,
+            writable_bounds=writable_bounds or _preview_writable_bounds_for_source(str(source_type)),
+            optimize_stroke_order=bool(optimize_stroke_order),
+            existing_optimizer_stats=optimizer_stats,
+        )
+        enriched_preview = dict(preview_payload)
+        enriched_preview['canonical_hash'] = canonical_hash
+        enriched_preview['executable_canonical_hash'] = executable_payload['executable_canonical_hash']
+        enriched_preview['primitive_hash'] = executable_payload['primitive_hash']
+        enriched_preview['execution_hash'] = executable_payload['execution_hash']
+        enriched_preview['settings_hash'] = executable_payload['settings_hash']
+        enriched_preview['preview_id'] = normalized_id
+        enriched_commit_request = dict(commit_request or {})
+        enriched_commit_request['preview_id'] = normalized_id
+        entry = PreviewCacheEntry(
+            preview_id=normalized_id,
+            source_type=str(source_type),
+            canonical_plan=canonical_plan,
+            canonical_hash=canonical_hash,
+            executable_canonical_plan=executable_payload['executable_canonical_plan'],
+            executable_canonical_hash=executable_payload['executable_canonical_hash'],
+            primitive_descriptor=executable_payload['primitive_descriptor'],
+            primitive_plan=executable_payload['primitive_plan'],
+            primitive_hash=executable_payload['primitive_hash'],
+            execution_preview_svg=executable_payload['execution_preview_svg'],
+            execution_hash=executable_payload['execution_hash'],
+            settings_hash=executable_payload['settings_hash'],
+            metrics=dict(executable_payload['metrics']),
+            preview_payload=enriched_preview,
+            commit_request=enriched_commit_request,
+            created_at_unix=time.time(),
+            input_type=str(input_type),
+            pipeline_mode=str(pipeline_mode),
+            source_hash=source_hash,
+            settings=dict(settings or {}),
+            metadata=dict(metadata or {}),
+            warnings=tuple(str(item) for item in warnings),
+            source_filename=str(source_filename or ''),
+            drawing_plan=drawing_plan,
+            command_metadata=command_metadata,
+            optimizer_stats=dict(optimizer_stats or {}),
+            route_metadata=dict(route_metadata or {}),
+            curve_fit_payload=dict(curve_fit_payload or {}),
+        )
+        preview_cache[normalized_id] = entry
+        preview_cache.move_to_end(normalized_id)
+        while len(preview_cache) > int(_PREVIEW_CACHE_MAX_ENTRIES):
+            preview_cache.popitem(last=False)
+        return entry
+
+    def _load_preview(preview_id: Any) -> PreviewCacheEntry:
+        normalized_id = _validate_preview_id(preview_id)
+        entry = preview_cache.get(normalized_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail='preview_id is unknown')
+        now = time.time()
+        if _preview_cache_expired(entry, now=now):
+            preview_cache.pop(normalized_id, None)
+            raise HTTPException(status_code=410, detail='preview_id has expired')
+        _cleanup_preview_cache(now=now)
+        preview_cache.move_to_end(normalized_id)
+        return entry
+
+    def _preview_contract_payload(entry: PreviewCacheEntry) -> dict[str, Any]:
+        expires_at_unix = float(entry.created_at_unix) + float(_PREVIEW_CACHE_TTL_SECONDS)
+        return {
+            'preview_id': entry.preview_id,
+            'canonical_hash': entry.canonical_hash,
+            'executable_canonical_hash': entry.executable_canonical_hash,
+            'primitive_hash': entry.primitive_hash,
+            'execution_hash': entry.execution_hash,
+            'settings_hash': entry.settings_hash,
+            'execution_preview_svg': entry.execution_preview_svg,
+            'metrics': dict(entry.metrics),
+            'source_type': entry.source_type,
+            'input_type': entry.input_type,
+            'pipeline_mode': entry.pipeline_mode,
+            'source_hash': entry.source_hash,
+            'created_at_unix': float(entry.created_at_unix),
+            'expires_at_unix': expires_at_unix,
+            'ttl_seconds': max(0.0, expires_at_unix - time.time()),
+        }
+
+    def _attach_preview_contract(payload: dict[str, Any], entry: PreviewCacheEntry) -> dict[str, Any]:
+        enriched = dict(payload)
+        existing_metrics = dict(enriched.get('metrics') or {})
+        contract = _preview_contract_payload(entry)
+        contract_metrics = dict(contract.get('metrics') or {})
+        existing_metrics.update(contract_metrics)
+        contract['metrics'] = existing_metrics
+        enriched.update(contract)
+        enriched['preview'] = dict(enriched.get('preview') or {})
+        enriched['preview']['canonical_hash'] = entry.canonical_hash
+        enriched['preview']['executable_canonical_hash'] = entry.executable_canonical_hash
+        enriched['preview']['primitive_hash'] = entry.primitive_hash
+        enriched['preview']['execution_hash'] = entry.execution_hash
+        enriched['preview']['settings_hash'] = entry.settings_hash
+        enriched['preview']['preview_id'] = entry.preview_id
+        enriched['preview']['execution_preview_svg'] = entry.execution_preview_svg
+        enriched['commit_request'] = dict(enriched.get('commit_request') or entry.commit_request)
+        enriched['commit_request']['preview_id'] = entry.preview_id
+        enriched['draw_request'] = dict(enriched.get('draw_request') or enriched['commit_request'])
+        enriched['draw_request']['preview_id'] = entry.preview_id
+        return enriched
 
     def _sketch_preview_expired(entry: SketchPreviewCacheEntry, *, now: float) -> bool:
         return (now - float(entry.created_at_unix)) > float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS)
@@ -1770,10 +2359,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         _cleanup_sketch_preview_cache()
         preview_id = uuid.uuid4().hex if preview_id is None else str(preview_id)
         created_at = time.time()
+        sketch_canonical_hash = canonical_plan_hash(canonical_plan)
         sketch_preview_cache[preview_id] = SketchPreviewCacheEntry(
             preview_id=preview_id,
             drawing_plan=drawing_plan,
             canonical_plan=canonical_plan,
+            canonical_hash=sketch_canonical_hash,
             preview_geometry_mode=preview_geometry_mode,
             metadata=dict(metadata),
             warnings=tuple(str(item) for item in warnings),
@@ -1852,7 +2443,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         payload = runtime.last_curve_fit_debug_snapshot()
         return JSONResponse(payload or {'available': False})
 
-    @app.post('/api/sketch-centerline/preview')
     async def preview_sketch_centerline(
         file: UploadFile = File(...),
         margin_m: Optional[float] = Form(None),
@@ -1871,6 +2461,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         center_x_m: Optional[float] = Form(None),
         center_y_m: Optional[float] = Form(None),
         fit_to_safe_area: Optional[bool] = Form(None),
+        optimize_stroke_order: Optional[bool] = Form(None),
+        preserve_tiny_details: Optional[bool] = Form(None),
+        minimum_drawable_feature_m: Optional[float] = Form(None),
+        tiny_detail_candidate_max_feature_m: Optional[float] = Form(None),
+        tiny_detail_expand_mode: Optional[str] = Form(None),
+        tiny_detail_max_expansions: Optional[int] = Form(None),
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
@@ -1938,6 +2534,11 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     status_code=422,
                     detail="preview_geometry_mode must be one of: smooth_curves, polyline",
                 )
+            sketch_optimize_stroke_order = _coerce_bool(
+                False if optimize_stroke_order is None else optimize_stroke_order,
+                field_name='optimize_stroke_order',
+                default=False,
+            )
             sketch_curve_tolerance_px = _coerce_float(
                 1.0 if curve_tolerance_px is None else curve_tolerance_px,
                 field_name='curve_tolerance_px',
@@ -1994,6 +2595,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'center_x_m': sketch_center_x_m,
                 'center_y_m': sketch_center_y_m,
                 'fit_to_safe_area': sketch_fit_to_safe_area,
+                'optimize_stroke_order': sketch_optimize_stroke_order,
+                'preserve_tiny_details': preserve_tiny_details,
+                'minimum_drawable_feature_m': minimum_drawable_feature_m,
+                'tiny_detail_candidate_max_feature_m': tiny_detail_candidate_max_feature_m,
+                'tiny_detail_expand_mode': tiny_detail_expand_mode,
+                'tiny_detail_max_expansions': tiny_detail_max_expansions,
             }
             try:
                 preview_started = time.perf_counter()
@@ -2079,6 +2686,23 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
                 curve_metadata=curve_metadata,
             )
+            generic_entry = _store_preview(
+                preview_id=preview_id,
+                source_type='sketch_centerline',
+                canonical_plan=canonical_plan,
+                preview_payload=dict(response_payload.get('preview') or {}),
+                commit_request={'preview_id': preview_id},
+                input_type='sketch_image',
+                pipeline_mode='sketch_centerline',
+                source_hash=_content_hash(content),
+                settings=sketch_parameters,
+                metadata=dict(response_payload.get('metadata') or {}),
+                warnings=tuple(str(item) for item in response_payload.get('warnings') or ()),
+                source_filename=str(file.filename or ''),
+                drawing_plan=plan,
+                route_metadata=dict(response_payload.get('metadata') or {}),
+                optimize_stroke_order=sketch_optimize_stroke_order,
+            )
             _store_sketch_preview(
                 preview_id=preview_id,
                 drawing_plan=plan,
@@ -2089,11 +2713,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 source_filename=str(file.filename or ''),
                 parameters=sketch_parameters,
             )
-            return JSONResponse(response_payload)
+            return JSONResponse(_attach_preview_contract(response_payload, generic_entry))
         finally:
             await file.close()
 
-    @app.post('/api/sketch-centerline/draw')
     async def draw_sketch_centerline(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -2119,6 +2742,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             optimization_ms = _elapsed_ms(optimization_start)
             publish_plan = optimization_result.plan
             optimization_stats = optimization_result.stats.to_dict()
+        publish_canonical_hash = canonical_plan_hash(publish_plan)
 
         size_summary = _canonical_transport_size_summary(publish_plan)
         _enforce_sketch_draw_size_limits(size_summary)
@@ -2160,6 +2784,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             optimizer_stats=optimization_stats,
             route_metadata={
                 'preview_id': entry.preview_id,
+                'canonical_hash': publish_canonical_hash,
+                'cached_canonical_hash': entry.canonical_hash,
                 'preview_geometry_mode': entry.preview_geometry_mode,
                 'source_filename': entry.source_filename,
                 'parameters': entry.parameters,
@@ -2183,6 +2809,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'active_mode': MODE_DRAW,
                 'source_type': 'sketch_centerline',
                 'preview_id': entry.preview_id,
+                'canonical_hash': publish_canonical_hash,
+                'cached_canonical_hash': entry.canonical_hash,
                 'preview_geometry_mode': entry.preview_geometry_mode,
                 'stroke_count': entry.stroke_count,
                 'point_count': entry.point_count,
@@ -2198,6 +2826,357 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'timings_ms': timings,
             }
         )
+
+    def _cached_preview_allowed_modes(entry: PreviewCacheEntry) -> tuple[str, ...]:
+        return _preview_allowed_modes(entry.source_type)
+
+    def _cached_preview_writable_bounds(entry: PreviewCacheEntry) -> dict[str, float]:
+        if entry.source_type == 'sketch_centerline':
+            return _carriage_safe_writable_bounds_for_sketch()
+        return runtime.node.carriage_safe_writable_bounds()
+
+    def _draw_cached_preview_response(
+        entry: PreviewCacheEntry,
+    ) -> dict[str, Any]:
+        if entry.source_type == 'sketch_centerline':
+            size_summary = _canonical_transport_size_summary(entry.executable_canonical_plan)
+            _enforce_sketch_draw_size_limits(size_summary)
+        publish_start = time.perf_counter()
+        transport = runtime.node.publish_execution_plan(
+            entry.primitive_plan,
+            allowed_modes=_cached_preview_allowed_modes(entry),
+        )
+        publish_ms = _elapsed_ms(publish_start)
+        timings = {
+            'optimization_ms': 0.0,
+            'transport_build_ms': 0.0,
+            'publish_ms': publish_ms,
+        }
+        preview_payload = dict(entry.preview_payload)
+        preview_payload['preview_id'] = entry.preview_id
+        preview_payload['canonical_hash'] = entry.canonical_hash
+        preview_payload['executable_canonical_hash'] = entry.executable_canonical_hash
+        preview_payload['primitive_hash'] = entry.primitive_hash
+        preview_payload['execution_hash'] = entry.execution_hash
+        preview_payload['settings_hash'] = entry.settings_hash
+        preview_payload['execution_preview_svg'] = entry.execution_preview_svg
+        preview_payload['diagnostics'] = canonical_plan_diagnostics(
+            entry.executable_canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        _record_last_plan_debug(
+            source_type=entry.source_type,
+            canonical_plan=entry.executable_canonical_plan,
+            preview_payload=preview_payload,
+            timings=timings,
+            optimizer_stats=entry.metrics.get('optimization') or entry.optimizer_stats,
+            route_metadata={
+                **dict(entry.route_metadata or {}),
+                'preview_id': entry.preview_id,
+                'input_type': entry.input_type,
+                'pipeline_mode': entry.pipeline_mode,
+                'source_hash': entry.source_hash,
+                'settings': entry.settings,
+                'settings_hash': entry.settings_hash,
+                'metadata': entry.metadata,
+                'used_cached_executable_payload': True,
+                'optimized': bool(entry.metrics.get('optimized')),
+                'cached_canonical_hash': entry.canonical_hash,
+                'published_canonical_hash': entry.executable_canonical_hash,
+                'primitive_hash': entry.primitive_hash,
+                'execution_hash': entry.execution_hash,
+            },
+            transport=transport,
+            committed=True,
+            command_metadata=entry.command_metadata,
+        )
+        _record_last_execution_debug(
+            source_type=entry.source_type,
+            preview_payload=preview_payload,
+            transport=transport,
+            timings=timings,
+        )
+        if entry.curve_fit_payload:
+            _record_last_curve_fit_debug(entry.curve_fit_payload)
+        elif entry.source_type == 'svg':
+            _record_curve_fit_unavailable('svg')
+
+        primitive_count = len(entry.primitive_descriptor.get('primitives') or ())
+        primitive_descriptor_bytes = len(
+            json.dumps(entry.primitive_descriptor, separators=(',', ':'), sort_keys=True).encode('utf-8')
+        )
+        return {
+            'ok': True,
+            'published': True,
+            'active_mode': MODE_TEXT if entry.source_type == 'text' else MODE_DRAW,
+            'source_type': entry.source_type,
+            'input_type': entry.input_type,
+            'pipeline_mode': entry.pipeline_mode,
+            'preview_id': entry.preview_id,
+            'canonical_hash': entry.canonical_hash,
+            'cached_canonical_hash': entry.canonical_hash,
+            'executable_canonical_hash': entry.executable_canonical_hash,
+            'primitive_hash': entry.primitive_hash,
+            'execution_hash': entry.execution_hash,
+            'settings_hash': entry.settings_hash,
+            'preview_draw_hash_match': entry.executable_canonical_hash == entry.executable_canonical_hash,
+            'primitive_hash_match': True,
+            'execution_hash_match': True,
+            'used_cached_preview_plan': True,
+            'used_cached_executable_payload': True,
+            'optimized': bool(entry.metrics.get('optimized')),
+            'optimization': dict(entry.metrics.get('optimization') or {}),
+            'metrics': dict(entry.metrics),
+            'canonical_command_count': len(entry.executable_canonical_plan.commands),
+            'cached_canonical_command_count': len(entry.canonical_plan.commands),
+            'primitive_count': int(primitive_count),
+            'primitive_descriptor_bytes': int(primitive_descriptor_bytes),
+            'transport': transport,
+            'warnings': list(entry.warnings),
+            'timings_ms': timings,
+        }
+
+    @app.post('/api/draw')
+    @app.post('/api/preview/draw')
+    async def draw_cached_preview(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='cached preview draw request',
+            max_bytes=4096,
+        )
+        _reject_extra_fields(raw, {'preview_id'}, 'cached preview draw request')
+        if raw.get('preview_id') is None:
+            raise HTTPException(status_code=400, detail='preview_id is required')
+        entry = _load_preview(raw.get('preview_id'))
+        return JSONResponse(_draw_cached_preview_response(entry))
+
+    @app.delete('/api/preview/{preview_id}')
+    async def clear_cached_preview(preview_id: str) -> JSONResponse:
+        normalized_id = _validate_preview_id(preview_id)
+        removed = preview_cache.pop(normalized_id, None)
+        sketch_preview_cache.pop(normalized_id, None)
+        if removed is None:
+            raise HTTPException(status_code=404, detail='preview_id is unknown')
+        return JSONResponse({'ok': True, 'preview_id': normalized_id, 'cleared': True})
+
+    def _preview_settings(raw_settings: Any, *, name: str) -> dict[str, Any]:
+        if raw_settings is None:
+            return {}
+        if not isinstance(raw_settings, dict):
+            raise HTTPException(status_code=422, detail=f'{name}.settings must be an object')
+        return dict(raw_settings)
+
+    def _preview_json_builder_raw(raw: dict[str, Any], *, required_key: str) -> dict[str, Any]:
+        settings = _preview_settings(raw.get('settings'), name='preview request')
+        payload = dict(settings)
+        payload[required_key] = raw.get(required_key)
+        if raw.get('placement') is not None and 'placement' not in payload:
+            payload['placement'] = raw.get('placement')
+        return payload
+
+    def _svg_upload_requested(upload: Any, content: bytes, requested_input_type: str) -> bool:
+        if requested_input_type == 'svg':
+            return True
+        if requested_input_type not in {'auto', ''}:
+            return False
+        suffix = Path(getattr(upload, 'filename', '') or '').suffix.lower()
+        normalized_type = str(getattr(upload, 'content_type', '') or '').split(';', 1)[0].strip().lower()
+        stripped = content.lstrip()[:256].lower()
+        return (
+            suffix == '.svg'
+            or normalized_type in {'image/svg+xml', 'application/svg+xml', 'text/svg+xml'}
+            or stripped.startswith(b'<svg')
+            or b'<svg' in stripped
+        )
+
+    def _json_text_preview_response(raw: dict[str, Any]) -> JSONResponse:
+        builder_raw = _preview_json_builder_raw(raw, required_key='text')
+        _, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
+            builder_raw,
+            request_name='preview text request',
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        _record_last_plan_debug(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            committed=False,
+        )
+        preview_entry = _store_preview(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='text',
+            pipeline_mode='text_vector',
+            source_hash=_content_hash({'text': builder_raw.get('text'), 'settings': commit_request}),
+            settings=commit_request,
+            writable_bounds=writable_bounds,
+        )
+        return JSONResponse(
+            _attach_preview_contract(
+                {
+                    'ok': True,
+                    'source_type': 'text',
+                    'preview': preview_payload,
+                    'preview_svg': preview_entry.execution_preview_svg,
+                    'commit_request': commit_request,
+                },
+                preview_entry,
+            )
+        )
+
+    def _json_svg_preview_response(raw: dict[str, Any], *, source_hash: str | None = None) -> JSONResponse:
+        builder_raw = _preview_json_builder_raw(raw, required_key='svg')
+        placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
+            builder_raw,
+            request_name='preview svg request',
+        )
+        preview_start = time.perf_counter()
+        preview_payload = _preview_payload_from_strokes(
+            placed_strokes,
+            placement_result,
+            outside_safe_points=outside_safe_points,
+            normalized_plan=plan_preview,
+            canonical_plan=canonical_plan,
+            preview_sampling_policy=preview_sampling_policy,
+            runtime_sampling_policy=runtime_sampling_policy,
+        )
+        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
+        build_timings['publish_ms'] = 0.0
+        _record_last_plan_debug(
+            source_type='svg',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            timings=build_timings,
+            committed=False,
+        )
+        _record_curve_fit_unavailable('svg')
+        preview_entry = _store_preview(
+            source_type='svg',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='svg',
+            pipeline_mode='svg_vector',
+            source_hash=source_hash or _content_hash(builder_raw.get('svg')),
+            settings={
+                key: value
+                for key, value in commit_request.items()
+                if key != 'svg'
+            },
+            writable_bounds=writable_bounds,
+        )
+        return JSONResponse(
+            _attach_preview_contract(
+                {
+                    'ok': True,
+                    'source_type': 'svg',
+                    'preview': preview_payload,
+                    'preview_svg': preview_entry.execution_preview_svg,
+                    'commit_request': commit_request,
+                },
+                preview_entry,
+            )
+        )
+
+    @app.post('/api/preview')
+    async def generate_preview(request: Request) -> JSONResponse:
+        content_type = str(request.headers.get('content-type') or '').lower()
+        if 'multipart/form-data' in content_type:
+            form = await request.form()
+            upload = form.get('file')
+            if upload is None or not hasattr(upload, 'read'):
+                raise HTTPException(status_code=422, detail='preview file upload requires a file field')
+            requested_input_type = str(form.get('input_type') or 'auto').strip().lower()
+            if requested_input_type not in {'auto', 'sketch_image', 'image', 'svg'}:
+                raise HTTPException(status_code=422, detail='input_type must be one of: auto, sketch_image, image, svg')
+            settings_json = form.get('settings_json')
+            if settings_json in (None, ''):
+                settings = {}
+            else:
+                try:
+                    settings = json.loads(str(settings_json))
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(status_code=422, detail=f'settings_json is invalid JSON: {exc}')
+                settings = _preview_settings(settings, name='preview file request')
+            form_settings = {
+                str(key): value
+                for key, value in form.items()
+                if str(key) not in {'file', 'input_type', 'settings_json'}
+            }
+            settings = {**form_settings, **settings}
+            content = await upload.read(_MAX_UPLOAD_BYTES + 1)
+            if _svg_upload_requested(upload, content, requested_input_type):
+                try:
+                    svg_text = content.decode('utf-8')
+                except UnicodeDecodeError as exc:
+                    raise HTTPException(status_code=422, detail=f'preview SVG upload is not UTF-8: {exc}')
+                return _json_svg_preview_response(
+                    {
+                        'input_type': 'svg',
+                        'svg': svg_text,
+                        'settings': settings,
+                    },
+                    source_hash=_content_hash(content),
+                )
+            if requested_input_type == 'svg':
+                raise HTTPException(status_code=422, detail='selected SVG input is not an SVG upload')
+            try:
+                await upload.seek(0)
+            except AttributeError:
+                upload.file.seek(0)
+            return await preview_sketch_centerline(
+                file=upload,
+                margin_m=settings.get('margin_m'),
+                max_image_dim=settings.get('max_image_dim'),
+                min_component_area_px=settings.get('min_component_area_px'),
+                min_stroke_length_px=settings.get('min_stroke_length_px'),
+                simplify_epsilon_px=settings.get('simplify_epsilon_px'),
+                line_sensitivity=settings.get('line_sensitivity'),
+                merge_gap_px=settings.get('merge_gap_px'),
+                merge_max_angle_deg=settings.get('merge_max_angle_deg'),
+                optimization_preset=settings.get('optimization_preset'),
+                preview_geometry_mode=settings.get('preview_geometry_mode'),
+                curve_tolerance_px=settings.get('curve_tolerance_px'),
+                curve_tolerance_m=settings.get('curve_tolerance_m'),
+                scale_percent=settings.get('scale_percent'),
+                center_x_m=settings.get('center_x_m'),
+                center_y_m=settings.get('center_y_m'),
+                fit_to_safe_area=settings.get('fit_to_safe_area'),
+                optimize_stroke_order=settings.get('optimize_stroke_order'),
+                preserve_tiny_details=settings.get('preserve_tiny_details'),
+                minimum_drawable_feature_m=settings.get('minimum_drawable_feature_m'),
+                tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),
+                tiny_detail_expand_mode=settings.get('tiny_detail_expand_mode'),
+                tiny_detail_max_expansions=settings.get('tiny_detail_max_expansions'),
+            )
+
+        raw = await _load_json_request(
+            request,
+            name='preview request',
+            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
+        )
+        _reject_extra_fields(raw, {'input_type', 'text', 'svg', 'settings', 'placement'}, 'preview request')
+        input_type = str(raw.get('input_type') or 'auto').strip().lower()
+        if input_type == 'text':
+            return _json_text_preview_response(raw)
+        if input_type == 'svg':
+            return _json_svg_preview_response(raw)
+        raise HTTPException(status_code=422, detail='JSON preview input_type must be text or svg')
 
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
@@ -3030,7 +4009,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         payload['upload_id'] = upload_id
         return payload
 
-    @app.post('/api/text')
     async def submit_text(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3083,6 +4061,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'ok': True,
                 'published': True,
                 'active_mode': MODE_TEXT,
+                'source_type': 'text',
+                'canonical_hash': canonical_plan_hash(canonical_plan),
                 'transport': transport,
                 'preview': preview_payload,
                 'commit_request': commit_request,
@@ -3094,10 +4074,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     async def submit_draw_plan(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=409,
-            detail='raw /api/draw/plan has been removed; use /api/vector/svg/commit or /api/vector/image/commit',
+            detail='raw /api/draw/plan has been removed; use /api/preview then /api/draw with preview_id',
         )
 
-    @app.post('/api/vector/text/preview')
     async def preview_text_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3127,22 +4106,40 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             timings=build_timings,
             committed=False,
         )
-        return JSONResponse(
+        preview_entry = _store_preview(
+            source_type='text',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='text',
+            pipeline_mode='text_vector',
+            source_hash=_content_hash(raw),
+            settings=commit_request,
+        )
+        response_payload = _attach_preview_contract(
             {
                 'ok': True,
                 'source_type': 'text',
                 'preview': preview_payload,
                 'commit_request': commit_request,
-            }
+            },
+            preview_entry,
+        )
+        return JSONResponse(
+            response_payload
         )
 
-    @app.post('/api/vector/text/commit')
     async def commit_text_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
             name='vector text commit',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
+        if raw.get('preview_id') is not None:
+            entry = _load_preview(raw.get('preview_id'))
+            if entry.source_type != 'text':
+                raise HTTPException(status_code=409, detail='preview_id does not reference a text preview')
+            return JSONResponse(_draw_cached_preview_response(entry))
         placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             raw,
             request_name='vector text commit',
@@ -3190,6 +4187,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'published': True,
                 'active_mode': MODE_TEXT,
                 'source_type': 'text',
+                'canonical_hash': canonical_plan_hash(canonical_plan),
                 'transport': transport,
                 'preview': preview_payload,
                 'commit_request': commit_request,
@@ -3197,7 +4195,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             }
         )
 
-    @app.post('/api/vector/svg/preview')
     async def preview_svg_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3228,22 +4225,44 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             committed=False,
         )
         _record_curve_fit_unavailable('svg')
-        return JSONResponse(
+        preview_entry = _store_preview(
+            source_type='svg',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='svg',
+            pipeline_mode='svg_vector',
+            source_hash=_content_hash(raw.get('svg')),
+            settings={
+                key: value
+                for key, value in commit_request.items()
+                if key != 'svg'
+            },
+        )
+        response_payload = _attach_preview_contract(
             {
                 'ok': True,
                 'source_type': 'svg',
                 'preview': preview_payload,
                 'commit_request': commit_request,
-            }
+            },
+            preview_entry,
+        )
+        return JSONResponse(
+            response_payload
         )
 
-    @app.post('/api/vector/svg/commit')
     async def commit_svg_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
             name='vector svg commit',
             max_bytes=_MAX_VECTOR_REQUEST_BYTES,
         )
+        if raw.get('preview_id') is not None:
+            entry = _load_preview(raw.get('preview_id'))
+            if entry.source_type != 'svg':
+                raise HTTPException(status_code=409, detail='preview_id does not reference an SVG preview')
+            return JSONResponse(_draw_cached_preview_response(entry))
         placed_strokes, canonical_plan, placement_result, _, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
             raw,
             request_name='vector svg commit',
@@ -3290,6 +4309,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'published': True,
                 'active_mode': MODE_DRAW,
                 'source_type': 'svg',
+                'canonical_hash': canonical_plan_hash(canonical_plan),
                 'transport': transport,
                 'preview': preview_payload,
                 'commit_request': commit_request,
@@ -3297,7 +4317,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             }
         )
 
-    @app.post('/api/vector/file/preview')
     async def preview_uploaded_file_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3308,6 +4327,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             raw,
             {
                 'upload_id',
+                'preview_id',
+                'optimize_stroke_order',
                 'placement',
                 'curve_tolerance',
                 'simplify_epsilon',
@@ -3322,6 +4343,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         source_type = _uploaded_source_type(metadata)
         file_raw = dict(raw)
         file_raw.pop('upload_id', None)
+        file_raw.pop('preview_id', None)
+        file_raw.pop('optimize_stroke_order', None)
 
         if source_type == 'svg':
             svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file request')
@@ -3350,14 +4373,35 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 committed=False,
             )
             _record_curve_fit_unavailable('svg')
-            return JSONResponse(
+            commit_request = _uploaded_commit_request(upload_id, commit_tail)
+            preview_entry = _store_preview(
+                source_type='svg',
+                canonical_plan=canonical_plan,
+                preview_payload=preview_payload,
+                commit_request=commit_request,
+                input_type='svg',
+                pipeline_mode='svg_vector',
+                source_hash=_content_hash(payload),
+                settings={
+                    key: value
+                    for key, value in commit_request.items()
+                    if key not in {'svg', 'upload_id'}
+                },
+                metadata={'upload': metadata},
+                source_filename=str(metadata.get('original_filename') or ''),
+            )
+            response_payload = _attach_preview_contract(
                 {
                     'ok': True,
                     'source_type': 'svg',
                     'upload': metadata,
                     'preview': preview_payload,
-                    'commit_request': _uploaded_commit_request(upload_id, commit_tail),
-                }
+                    'commit_request': commit_request,
+                },
+                preview_entry,
+            )
+            return JSONResponse(
+                response_payload
             )
 
         prepared_artifact = runtime.prepared_image_artifact(
@@ -3397,18 +4441,38 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             command_metadata=command_metadata,
         )
         _record_last_curve_fit_debug(curve_fit_payload)
-        return JSONResponse(
+        commit_request = {'upload_id': upload_id, **commit_tail}
+        preview_entry = _store_preview(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='image',
+            pipeline_mode=str(image_info.get('pipeline', {}).get('route') or 'image_vector'),
+            source_hash=_content_hash(payload),
+            settings=commit_request,
+            metadata={'upload': metadata, 'image_info': image_info},
+            source_filename=str(metadata.get('original_filename') or ''),
+            command_metadata=command_metadata,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            curve_fit_payload=curve_fit_payload,
+        )
+        response_payload = _attach_preview_contract(
             {
                 'ok': True,
                 'source_type': 'image',
                 'upload': metadata,
                 'image_info': image_info,
                 'preview': preview_payload,
-                'commit_request': {'upload_id': upload_id, **commit_tail},
-            }
+                'commit_request': commit_request,
+            },
+            preview_entry,
+        )
+        return JSONResponse(
+            response_payload
         )
 
-    @app.post('/api/vector/file/commit')
     async def commit_uploaded_file_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3419,6 +4483,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             raw,
             {
                 'upload_id',
+                'preview_id',
+                'optimize_stroke_order',
                 'placement',
                 'curve_tolerance',
                 'simplify_epsilon',
@@ -3428,11 +4494,18 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             },
             'vector file commit',
         )
+        if raw.get('preview_id') is not None:
+            entry = _load_preview(raw.get('preview_id'))
+            if entry.source_type not in {'svg', 'image'}:
+                raise HTTPException(status_code=409, detail='preview_id does not reference a file preview')
+            return JSONResponse(_draw_cached_preview_response(entry))
         upload_id = _validate_upload_id(raw.get('upload_id'))
         metadata, payload = runtime.load_upload(upload_id)
         source_type = _uploaded_source_type(metadata)
         file_raw = dict(raw)
         file_raw.pop('upload_id', None)
+        file_raw.pop('preview_id', None)
+        file_raw.pop('optimize_stroke_order', None)
 
         if source_type == 'svg':
             svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file commit')
@@ -3483,6 +4556,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     'published': True,
                     'active_mode': MODE_DRAW,
                     'source_type': 'svg',
+                    'canonical_hash': canonical_plan_hash(canonical_plan),
                     'transport': transport,
                     'upload': metadata,
                     'preview': preview_payload,
@@ -3550,6 +4624,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'published': True,
                 'active_mode': MODE_DRAW,
                 'source_type': 'image',
+                'canonical_hash': canonical_plan_hash(canonical_plan),
                 'transport': transport,
                 'upload': metadata,
                 'image_info': image_info,
@@ -3559,7 +4634,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             }
         )
 
-    @app.post('/api/vector/image/preview')
     async def preview_uploaded_image_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3570,6 +4644,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             raw,
             {
                 'upload_id',
+                'preview_id',
+                'optimize_stroke_order',
                 'placement',
                 'min_perimeter_px',
                 'contour_simplify_ratio',
@@ -3581,6 +4657,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         metadata, payload = runtime.load_upload(upload_id)
         image_raw = dict(raw)
         image_raw.pop('upload_id', None)
+        image_raw.pop('preview_id', None)
+        image_raw.pop('optimize_stroke_order', None)
         prepared_artifact = runtime.prepared_image_artifact(
             upload_id,
             metadata=metadata,
@@ -3619,7 +4697,23 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             command_metadata=command_metadata,
         )
         _record_last_curve_fit_debug(curve_fit_payload)
-        return JSONResponse(
+        preview_entry = _store_preview(
+            source_type='image',
+            canonical_plan=canonical_plan,
+            preview_payload=preview_payload,
+            commit_request=commit_request,
+            input_type='image',
+            pipeline_mode=str(image_info.get('pipeline', {}).get('route') or 'image_vector'),
+            source_hash=_content_hash(payload),
+            settings=commit_request,
+            metadata={'upload': metadata, 'image_info': image_info},
+            source_filename=str(metadata.get('original_filename') or ''),
+            command_metadata=command_metadata,
+            optimizer_stats=image_info.get('optimization'),
+            route_metadata=image_info.get('pipeline'),
+            curve_fit_payload=curve_fit_payload,
+        )
+        response_payload = _attach_preview_contract(
             {
                 'ok': True,
                 'source_type': 'image',
@@ -3627,10 +4721,13 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'image_info': image_info,
                 'preview': preview_payload,
                 'commit_request': commit_request,
-            }
+            },
+            preview_entry,
+        )
+        return JSONResponse(
+            response_payload
         )
 
-    @app.post('/api/vector/image/commit')
     async def commit_uploaded_image_vector(request: Request) -> JSONResponse:
         raw = await _load_json_request(
             request,
@@ -3641,6 +4738,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             raw,
             {
                 'upload_id',
+                'preview_id',
+                'optimize_stroke_order',
                 'placement',
                 'min_perimeter_px',
                 'contour_simplify_ratio',
@@ -3648,10 +4747,17 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             },
             'vector image commit',
         )
+        if raw.get('preview_id') is not None:
+            entry = _load_preview(raw.get('preview_id'))
+            if entry.source_type != 'image':
+                raise HTTPException(status_code=409, detail='preview_id does not reference an image preview')
+            return JSONResponse(_draw_cached_preview_response(entry))
         upload_id = _validate_upload_id(raw.get('upload_id'))
         metadata, payload = runtime.load_upload(upload_id)
         image_raw = dict(raw)
         image_raw.pop('upload_id', None)
+        image_raw.pop('preview_id', None)
+        image_raw.pop('optimize_stroke_order', None)
         prepared_artifact = runtime.prepared_image_artifact(
             upload_id,
             metadata=metadata,
@@ -3711,6 +4817,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'published': True,
                 'active_mode': MODE_DRAW,
                 'source_type': 'image',
+                'canonical_hash': canonical_plan_hash(canonical_plan),
                 'transport': transport,
                 'upload': metadata,
                 'image_info': image_info,
@@ -3720,7 +4827,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             }
         )
 
-    @app.get('/api/vector/file/status')
     async def uploaded_file_status(upload_id: str) -> JSONResponse:
         validated_upload_id = _validate_upload_id(upload_id)
         metadata, payload = runtime.load_upload(validated_upload_id)
@@ -3731,8 +4837,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             )
         )
 
-    @app.post('/api/draw/file')
-    @app.post('/api/draw/image')
     async def upload_draw_file(file: UploadFile = File(...)) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)

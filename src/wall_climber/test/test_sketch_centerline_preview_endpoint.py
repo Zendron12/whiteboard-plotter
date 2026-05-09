@@ -61,7 +61,7 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
         data={
             'optimization_preset': 'custom',
@@ -130,7 +130,7 @@ def test_sketch_centerline_preview_endpoint_returns_smooth_curve_svg() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
         data={
             'preview_geometry_mode': 'smooth_curves',
@@ -152,7 +152,7 @@ def test_sketch_centerline_preview_endpoint_keeps_polyline_debug() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
         data={'preview_geometry_mode': 'polyline'},
     )
@@ -171,7 +171,7 @@ def test_sketch_centerline_preview_endpoint_rejects_unknown_geometry_mode() -> N
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
         data={'preview_geometry_mode': 'magic'},
     )
@@ -185,7 +185,7 @@ def test_sketch_centerline_preview_endpoint_accepts_optimization_preset() -> Non
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
         data={'optimization_preset': 'fast', 'merge_gap_px': '0', 'simplify_epsilon_px': '0'},
     )
@@ -203,7 +203,7 @@ def test_sketch_centerline_preview_endpoint_rejects_unknown_preset() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
         data={'optimization_preset': 'turbo'},
     )
@@ -217,7 +217,7 @@ def test_sketch_centerline_preview_endpoint_rejects_outside_placement() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('line.png', _simple_sketch_png(), 'image/png')},
         data={'scale_percent': '100', 'center_x_m': '0', 'center_y_m': '1.5'},
     )
@@ -231,7 +231,7 @@ def test_sketch_centerline_preview_endpoint_default_fits_safe_bounds() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
         data={'preview_geometry_mode': 'polyline'},
     )
@@ -253,7 +253,7 @@ def test_sketch_centerline_preview_endpoint_caps_preview_points(monkeypatch) -> 
     client, _runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('curve.png', _curved_sketch_png(), 'image/png')},
         data={'preview_geometry_mode': 'smooth_curves', 'curve_tolerance_px': '3.0'},
     )
@@ -274,12 +274,12 @@ def test_sketch_centerline_preview_endpoint_rejects_invalid_file_type() -> None:
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('notes.txt', b'not an image', 'text/plain')},
     )
 
     assert response.status_code == 415
-    assert 'PNG or JPG' in response.json()['detail']
+    assert 'PNG, JPG, or WebP' in response.json()['detail']
     assert runtime.node.publish_count == 0
 
 
@@ -287,7 +287,7 @@ def test_sketch_centerline_preview_endpoint_rejects_invalid_image_bytes() -> Non
     client, runtime = _client_and_runtime()
 
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('bad.png', b'not an image', 'image/png')},
     )
 

@@ -1,8 +1,9 @@
 # Sketch Centerline Pipeline
 
 Sketch Centerline Mode converts black/white or high-contrast sketch images into
-board-space `DrawingPathPlan` strokes. It is an internal image-pipeline module
-with a preview-only backend endpoint; it is not wired into robot drawing yet.
+board-space `DrawingPathPlan` strokes, then into a cached `CanonicalPathPlan`
+used by both preview and robot drawing. The browser preview is display-only;
+runtime drawing uses the backend-owned cached plan through `preview_id`.
 
 ## Purpose
 
@@ -30,8 +31,8 @@ before path tracing.
 11. Scale and center the result into board coordinates while preserving aspect
    ratio.
 12. Emit a point-stroke `DrawingPathPlan` with metrics and processing metadata.
-13. For preview only, optionally fit smooth canonical curve primitives from the
-   point strokes.
+13. Optionally fit smooth canonical curve primitives from the point strokes.
+14. Cache the canonical plan and return `preview_id` plus `canonical_hash`.
 
 If no skeletonization backend is available, the pipeline raises `RuntimeError`.
 It does not fall back to the unthinned binary mask.
@@ -85,6 +86,8 @@ Response fields:
 
 - `ok`
 - `mode`
+- `preview_id`
+- `canonical_hash`
 - `stroke_count`
 - `point_count`
 - `canonical_command_count`
@@ -244,16 +247,22 @@ continues to use the existing upload/vector pipeline.
 ## Runtime Status
 
 `POST /api/sketch-centerline/preview` is still preview-first. On success it now
-returns a `preview_id` and stores the backend-owned result in a temporary
-process-local cache. The cache is intentionally short-lived: entries expire
-after about 10 minutes, only a small number of previews are retained, and the
-cache is cleared when the backend process restarts.
+returns a `preview_id` and `canonical_hash`, then stores the backend-owned
+canonical result in process-local preview caches. The sketch-specific draw
+endpoint keeps a short-lived entry for about 10 minutes. The generic
+`POST /api/draw` preview cache keeps the same canonical plan for about 30
+minutes. Both caches are cleared when the backend process restarts.
 
 `POST /api/sketch-centerline/draw` accepts only that `preview_id`. It does not
 accept browser-provided SVG, preview points, board-canvas data, or path
 commands. The backend looks up the cached canonical plan, validates it against
 the existing execution transport, converts it to `PrimitivePathPlan`, and
 publishes through the existing ROS/Webots executor path.
+
+`POST /api/draw` can also draw the same cached sketch preview by `preview_id`.
+When no draw-time optimization is requested, the draw response returns the same
+`canonical_hash` as the preview response. This is the parity contract used by
+the backend tests.
 
 The draw source matches the preview geometry mode:
 

@@ -158,11 +158,12 @@ def _preview(
         'preview_geometry_mode': preview_geometry_mode,
         'curve_tolerance_px': curve_tolerance_px,
         'optimization_preset': 'detail',
+        'optimize_stroke_order': 'true',
     }
     if extra_data:
         data.update(extra_data)
     response = client.post(
-        '/api/sketch-centerline/preview',
+        '/api/preview',
         files={'file': ('sketch.png', image or _curved_sketch_png(), 'image/png')},
         data=data,
     )
@@ -172,12 +173,10 @@ def _preview(
     return payload
 
 
-def _draw(client: TestClient, preview_id: str, *, optimize_stroke_order: bool | None = None):
+def _draw(client: TestClient, preview_id: str):
     payload = {'preview_id': preview_id}
-    if optimize_stroke_order is not None:
-        payload['optimize_stroke_order'] = optimize_stroke_order
     return client.post(
-        '/api/sketch-centerline/draw',
+        '/api/draw',
         json=payload,
     )
 
@@ -195,15 +194,15 @@ def test_preview_response_includes_preview_id() -> None:
 def test_draw_rejects_missing_unknown_expired_and_extra_preview_id(monkeypatch) -> None:
     client, runtime = _client_and_runtime()
 
-    missing = client.post('/api/sketch-centerline/draw', json={})
-    assert missing.status_code == 422
+    missing = client.post('/api/draw', json={})
+    assert missing.status_code == 400
 
-    unknown = _draw(client, 'does-not-exist')
+    unknown = _draw(client, 'f' * 32)
     assert unknown.status_code == 404
 
     payload = _preview(client)
     extra = client.post(
-        '/api/sketch-centerline/draw',
+        '/api/draw',
         json={
             'preview_id': payload['preview_id'],
             'svg': '<svg/>',
@@ -214,7 +213,7 @@ def test_draw_rejects_missing_unknown_expired_and_extra_preview_id(monkeypatch) 
     assert extra.status_code == 422
     assert runtime.node.publish_count == 0
 
-    monkeypatch.setattr(web_server, '_SKETCH_PREVIEW_CACHE_TTL_SECONDS', -1)
+    monkeypatch.setattr(web_server, '_PREVIEW_CACHE_TTL_SECONDS', -1)
     expired = _draw(client, payload['preview_id'])
     assert expired.status_code == 410
     assert runtime.node.publish_count == 0
@@ -230,8 +229,8 @@ def test_draw_uses_cached_smooth_canonical_plan() -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['ok'] is True
-    assert body['preview_geometry_mode'] == 'smooth_curves'
-    assert body['used_full_cached_plan'] is True
+    assert body['pipeline_mode'] == 'sketch_centerline'
+    assert body['used_cached_executable_payload'] is True
     assert body['optimized'] is True
     assert body['canonical_command_count'] >= 1
     assert body['primitive_count'] >= 1
@@ -250,8 +249,8 @@ def test_draw_uses_cached_polyline_canonical_plan() -> None:
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body['preview_geometry_mode'] == 'polyline'
-    assert body['used_full_cached_plan'] is True
+    assert body['pipeline_mode'] == 'sketch_centerline'
+    assert body['used_cached_executable_payload'] is True
     primitive_types = [primitive.type for primitive in runtime.node.published_plans[0].primitives]
     assert _FakePathPrimitive.LINE_SEGMENT in primitive_types
     assert _FakePathPrimitive.QUADRATIC_BEZIER not in primitive_types
@@ -297,11 +296,11 @@ def test_draw_uses_full_cached_plan_when_canvas_preview_is_truncated(monkeypatch
     assert payload['preview']['truncated'] is True
     assert payload['preview']['returned_point_count'] <= 2
 
-    response = _draw(client, payload['preview_id'], optimize_stroke_order=False)
+    response = _draw(client, payload['preview_id'])
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body['used_full_cached_plan'] is True
+    assert body['used_cached_executable_payload'] is True
     assert body['cached_canonical_command_count'] == payload['canonical_command_count']
     assert body['primitive_count'] > payload['preview']['returned_point_count']
     assert runtime.node.publish_count == 1

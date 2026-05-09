@@ -204,7 +204,7 @@ def test_raw_draw_plan_endpoint_remains_explicitly_disabled() -> None:
     source = (
         Path(__file__).resolve().parents[1] / 'wall_climber' / 'web_server.py'
     ).read_text(encoding='utf-8')
-    assert "detail='raw /api/draw/plan has been removed; use /api/vector/svg/commit or /api/vector/image/commit'" in source
+    assert "detail='raw /api/draw/plan has been removed; use /api/preview then /api/draw with preview_id'" in source
 
 
 def test_web_server_exposes_debug_endpoints() -> None:
@@ -217,16 +217,17 @@ def test_web_server_exposes_debug_endpoints() -> None:
     assert 'EXECUTION_DIAGNOSTICS_TOPIC' in source
 
 
-def test_web_server_exposes_unified_file_upload_routes() -> None:
+def test_web_server_exposes_unified_preview_draw_routes() -> None:
     source = (
         Path(__file__).resolve().parents[1] / 'wall_climber' / 'web_server.py'
     ).read_text(encoding='utf-8')
-    assert "@app.post('/api/draw/file')" in source
-    assert "@app.get('/api/vector/file/status')" in source
-    assert "@app.post('/api/vector/file/preview')" in source
-    assert "@app.post('/api/vector/file/commit')" in source
+    assert "@app.post('/api/preview')" in source
+    assert "@app.post('/api/draw')" in source
+    assert "@app.delete('/api/preview/{preview_id}')" in source
     assert 'classify_uploaded_vector_file' in source
-    assert "'stored_only': True" in source or '"stored_only": True' in source
+    assert 'execution_preview_svg' in source
+    assert 'primitive_hash' in source
+    assert 'execution_hash' in source
 
 
 def test_web_server_text_font_source_validation_includes_dejavu_sans() -> None:
@@ -248,16 +249,18 @@ def test_index_exposes_curve_overlay_controls() -> None:
     assert 'overlay-color-toggle' in source
     assert 'debug-curve-fit-panel' in source
     assert 'tool-file-panel' in source
-    assert '/api/draw/file' in source
-    assert '/api/vector/file/preview' in source
-    assert '/api/vector/file/commit' in source
+    assert "/api/preview" in source
+    assert "/api/draw" in source
+    assert "/api/vector/file/preview" not in source
+    assert "/api/vector/file/commit" not in source
+    assert "/api/draw/file" not in source
     assert 'image/svg+xml,.svg' in source
     assert 'trace_mode:' in source
     assert 'chunk_count:' in source
     assert '<option value="dejavu_sans">DejaVu Sans (outline)</option>' in source
 
 
-def test_index_disables_text_board_preview_and_supports_preview_dragging() -> None:
+def test_index_uses_clean_preview_draw_contract() -> None:
     source = (
         Path(__file__).resolve().parents[1] / 'web' / 'index.html'
     ).read_text(encoding='utf-8')
@@ -267,10 +270,13 @@ def test_index_disables_text_board_preview_and_supports_preview_dragging() -> No
     assert 'function drawPreviewPlacementControls(layout)' in source
     assert "clearVectorPreview(false);" in source
     assert "new Set(['relief_singleline', 'hershey_sans_1', 'dejavu_sans'])" in source
-    assert 'function applyRasterPreview(' in source
-    assert '/api/vector/file/status?upload_id=' in source
-    assert 'const sentenceGap = Math.max(0.045, 0.38 * lineAdvance);' in source
-    assert 'const wrappedSentenceGap = Math.max(0.020, 0.18 * lineAdvance);' in source
+    assert 'execution_preview_svg' in source
+    assert 'currentPreviewId' in source
+    assert '/api/vector/file/status?upload_id=' not in source
+    assert 'Upload + Preview' not in source
+    assert 'Re-Preview' not in source
+    assert 'Commit File' not in source
+    assert 'Draw Sketch Preview' not in source
 
 
 def test_executor_source_declares_chunked_execution_controls() -> None:

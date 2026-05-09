@@ -519,6 +519,62 @@
       line-height: 1.45;
     }
 
+    .advanced-settings {
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.46);
+      padding: 12px 14px;
+    }
+
+    .advanced-settings summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .advanced-settings .field-grid {
+      margin-top: 12px;
+    }
+
+    .preview-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .preview-metric {
+      min-height: 74px;
+      padding: 11px 12px;
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.68);
+      display: grid;
+      gap: 5px;
+    }
+
+    .preview-metric .label {
+      color: var(--muted);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      font-weight: 700;
+    }
+
+    .preview-metric .value {
+      color: var(--ink);
+      font-size: 0.95rem;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .debug-only {
+      display: none !important;
+    }
+
+    body.debug-mode .debug-only {
+      display: grid !important;
+    }
+
     .live-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -690,7 +746,8 @@
     textarea,
     input[type="number"],
     input[type="text"],
-    input[type="file"] {
+    input[type="file"],
+    select {
       width: 100%;
       border: 1px solid rgba(24, 34, 43, 0.1);
       border-radius: var(--radius-lg);
@@ -709,7 +766,8 @@
     }
 
     textarea:focus,
-    input:focus {
+    input:focus,
+    select:focus {
       border-color: rgba(54, 86, 111, 0.34);
       box-shadow: 0 0 0 4px rgba(54, 86, 111, 0.08);
       background: rgba(255, 255, 255, 0.92);
@@ -726,6 +784,33 @@
       gap: 6px;
     }
 
+    .checkbox-field {
+      align-content: end;
+    }
+
+    .checkbox-field label {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      padding: 10px 12px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(24, 34, 43, 0.08);
+      background: rgba(255, 255, 255, 0.56);
+      cursor: pointer;
+      color: var(--ink);
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 0.9rem;
+    }
+
+    .checkbox-field input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      flex: 0 0 auto;
+    }
+
     .field label,
     .helper-label {
       color: var(--muted);
@@ -733,6 +818,13 @@
       text-transform: uppercase;
       letter-spacing: 0.11em;
       font-weight: 700;
+    }
+
+    .field.checkbox-field label {
+      color: var(--ink);
+      font-size: 0.9rem;
+      text-transform: none;
+      letter-spacing: 0;
     }
 
     .helper-copy {
@@ -934,7 +1026,8 @@
     @media (max-width: 900px) {
       .live-grid,
       .diag-grid,
-      .summary-grid {
+      .summary-grid,
+      .preview-metrics-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
@@ -964,6 +1057,7 @@
       .live-grid,
       .diag-grid,
       .summary-grid,
+      .preview-metrics-grid,
       .segmented,
       .tool-tabs {
         grid-template-columns: 1fr;
@@ -1006,8 +1100,8 @@
         <div class="summary-card">
           <div class="summary-label">Workflow</div>
           <div class="summary-value">
-            <strong>Text</strong> starts from a board-aware writing origin and wraps within the safe width.
-            <strong>SVG</strong> and <strong>Image</strong> stay preview-first, then commit through the same draw-plan path.
+            <strong>Text</strong>, <strong>SVG</strong>, and <strong>Image</strong> now use one preview-first path:
+            Generate Preview, review executable geometry, then Draw by preview id.
           </div>
         </div>
         <div class="summary-grid">
@@ -1062,7 +1156,7 @@
             <div class="legend-chip"><span class="legend-mark" style="background:#1a2026;"></span> Pen / trail</div>
           </div>
 
-          <div class="overlay-controls">
+          <div class="overlay-controls debug-only">
             <div class="overlay-toggle-row">
               <label class="overlay-toggle">
                 <input id="overlay-raw-toggle" type="checkbox">
@@ -1115,7 +1209,7 @@
         <div class="control-head">
           <div>
             <h2>Command Deck</h2>
-            <p>Runtime controls, manual arm tests, placement, and vector tools stay under the board so the drawing surface remains the main focus.</p>
+            <p>Runtime controls, manual arm tests, placement, and canonical preview tools stay under the board so the drawing surface remains the main focus.</p>
           </div>
         </div>
 
@@ -1124,7 +1218,7 @@
             <div class="section-head">
               <div class="section-title">
                 <h3>Runtime Mode</h3>
-                <p>Manual mode buttons stay available, but commit actions can also switch mode automatically when needed.</p>
+                <p>Manual mode buttons stay available, while Draw always publishes the cached preview payload.</p>
               </div>
             </div>
             <div class="section-body mode-switch">
@@ -1193,7 +1287,7 @@
             <div class="section-head">
               <div class="section-title">
                 <h3>Input</h3>
-                <p>Preview first, then send text, uploaded files, or pasted SVG markup through the active cable execution path.</p>
+                <p>Select an input, generate the executable preview, then draw the same cached primitive payload.</p>
               </div>
             </div>
             <div class="section-body">
@@ -1204,7 +1298,7 @@
             </div>
 
               <div id="tool-text-panel" class="tool-panel active">
-                <p class="helper-copy">Text preview uses the board-aware text path. Commit uses <code>/api/text</code> so wrapping, board limits, and carriage-safe start positions are handled by the backend.</p>
+                <p class="helper-copy">Text uses the unified preview contract. Draw is enabled only after a valid preview_id is cached.</p>
                 <textarea id="text-input" placeholder="Write text here. Example: HELLO&#10;WORLD"></textarea>
                 <div class="field-grid">
                   <div class="field">
@@ -1217,120 +1311,141 @@
                   </div>
                 </div>
                 <div class="action-row">
-                  <button id="text-preview-btn" class="secondary-btn" type="button">Preview Text</button>
-                  <button id="text-submit-btn" class="primary-btn" type="button">Write Text</button>
-                  <button id="text-hello-btn" class="quiet-btn" type="button">Send HELLO</button>
+                  <button id="text-preview-btn" class="secondary-btn" type="button">Generate Preview</button>
+                  <button id="text-submit-btn" class="primary-btn" type="button" disabled>Draw</button>
                   <button id="text-clear-btn" class="quiet-btn" type="button">Clear</button>
                 </div>
               </div>
 
               <div id="tool-file-panel" class="tool-panel">
-                <p class="helper-copy">Upload either an SVG file or a raster image. The backend auto-routes SVG files to vector ingestion and PNG/JPG/WebP files to the image tracing pipeline.</p>
+                <p class="helper-copy">Upload SVG or raster input. Raster images currently use Sketch Centerline until the color-to-sketch pipeline lands.</p>
                 <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg">
                 <div class="field-grid">
                   <div class="field">
-                    <label for="sketch-optimization-preset">Optimization Preset</label>
+                    <label for="sketch-optimization-preset">Detail Level</label>
                     <select id="sketch-optimization-preset">
-                      <option value="raw">Raw</option>
-                      <option value="detail" selected>Detail</option>
                       <option value="balanced">Balanced</option>
-                      <option value="fast">Fast / Smooth</option>
+                      <option value="detail" selected>Detailed</option>
+                      <option value="fast">Clean / Fast</option>
+                      <option value="raw">Raw</option>
                       <option value="custom">Custom</option>
                     </select>
                   </div>
                   <div class="field">
-                    <label for="sketch-preview-geometry">Preview Geometry</label>
+                    <label for="sketch-preview-geometry">Path Smoothness</label>
                     <select id="sketch-preview-geometry">
-                      <option value="smooth_curves" selected>Smooth Curves</option>
-                      <option value="polyline">Polyline Debug</option>
+                      <option value="smooth_curves" selected>Normal</option>
+                      <option value="polyline">Off</option>
                     </select>
                   </div>
-                  <div class="field">
-                    <label for="sketch-fit-safe">Fit to Robot-Safe Area</label>
-                    <input id="sketch-fit-safe" type="checkbox" checked>
+                  <div class="field checkbox-field">
+                    <label for="sketch-preserve-tiny">
+                      <input id="sketch-preserve-tiny" type="checkbox" checked>
+                      Preserve Tiny Details
+                    </label>
                   </div>
                   <div class="field">
-                    <label for="sketch-optimize-draw">Optimize Stroke Order Before Draw</label>
-                    <input id="sketch-optimize-draw" type="checkbox" checked>
+                    <label for="sketch-tiny-size-mm">Tiny Detail Size (mm)</label>
+                    <input id="sketch-tiny-size-mm" type="number" min="0.5" max="30" step="0.5" value="4.5">
                   </div>
-                  <div class="field">
-                    <label for="sketch-max-image-dim">Sketch Max Image Dim</label>
-                    <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
+                  <div class="field checkbox-field">
+                    <label for="sketch-fit-safe">
+                      <input id="sketch-fit-safe" type="checkbox" checked>
+                      Fit Robot-Safe Area
+                    </label>
                   </div>
-                  <div class="field">
-                    <label for="sketch-curve-tolerance">Curve Tolerance (px)</label>
-                    <input id="sketch-curve-tolerance" type="number" min="0.05" step="0.05" value="1.0">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-margin">Sketch Margin (m)</label>
-                    <input id="sketch-margin" type="number" min="0" step="0.01" value="0.05">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-min-component">Sketch Noise Area (px)</label>
-                    <input id="sketch-min-component" type="number" min="1" step="1" value="2">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-line-sensitivity">Line Sensitivity</label>
-                    <input id="sketch-line-sensitivity" type="number" min="0" max="0.95" step="0.05" value="0">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-min-stroke">Min Stroke Length (px)</label>
-                    <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="1">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
-                    <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="0">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-simplify-epsilon">Simplify Epsilon (px)</label>
-                    <input id="sketch-simplify-epsilon" type="number" min="0" step="0.05" value="0.25">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-scale-percent">Sketch Scale (%)</label>
-                    <input id="sketch-scale-percent" type="number" min="1" max="500" step="5" value="100">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-center-x">Sketch Center X (m)</label>
-                    <input id="sketch-center-x" type="number" min="0" step="0.01" placeholder="auto">
-                  </div>
-                  <div class="field">
-                    <label for="sketch-center-y">Sketch Center Y (m)</label>
-                    <input id="sketch-center-y" type="number" min="0" step="0.01" placeholder="auto">
+                  <div class="field checkbox-field">
+                    <label for="sketch-optimize-draw">
+                      <input id="sketch-optimize-draw" type="checkbox" checked>
+                      Optimize Stroke Order
+                    </label>
                   </div>
                 </div>
+                <details class="advanced-settings">
+                  <summary>Advanced sketch settings</summary>
+                  <div class="field-grid">
+                    <div class="field">
+                      <label for="sketch-max-image-dim">Max Image Dim</label>
+                      <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-curve-tolerance">Curve Tolerance (px)</label>
+                      <input id="sketch-curve-tolerance" type="number" min="0.05" step="0.05" value="1.0">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-margin">Margin (m)</label>
+                      <input id="sketch-margin" type="number" min="0" step="0.01" value="0.05">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-min-component">Noise Area (px)</label>
+                      <input id="sketch-min-component" type="number" min="1" step="1" value="2">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-line-sensitivity">Line Sensitivity</label>
+                      <input id="sketch-line-sensitivity" type="number" min="0" max="0.95" step="0.05" value="0">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-min-stroke">Min Stroke Length (px)</label>
+                      <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="1">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
+                      <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="0">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-simplify-epsilon">Simplify Epsilon (px)</label>
+                      <input id="sketch-simplify-epsilon" type="number" min="0" step="0.05" value="0.25">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-tiny-candidate-mm">Tiny Detect Max (mm)</label>
+                      <input id="sketch-tiny-candidate-mm" type="number" min="0.1" max="30" step="0.5" value="3.4">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-scale-percent">Sketch Scale (%)</label>
+                      <input id="sketch-scale-percent" type="number" min="1" max="500" step="5" value="100">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-center-x">Sketch Center X (m)</label>
+                      <input id="sketch-center-x" type="number" min="0" step="0.01" placeholder="auto">
+                    </div>
+                    <div class="field">
+                      <label for="sketch-center-y">Sketch Center Y (m)</label>
+                      <input id="sketch-center-y" type="number" min="0" step="0.01" placeholder="auto">
+                    </div>
+                  </div>
+                </details>
                 <div class="action-row">
-                  <button id="file-upload-btn" class="secondary-btn" type="button">Upload + Preview</button>
-                  <button id="file-preview-btn" class="quiet-btn" type="button">Re-Preview</button>
-                  <button id="sketch-preview-btn" class="quiet-btn" type="button">Preview as Sketch Centerline</button>
-                  <button id="sketch-draw-btn" class="secondary-btn" type="button" disabled>Draw Sketch Preview</button>
-                  <button id="file-commit-btn" class="primary-btn" type="button">Commit File</button>
+                  <button id="file-upload-btn" class="secondary-btn" type="button">Generate Preview</button>
+                  <button id="file-draw-btn" class="primary-btn" type="button" disabled>Draw</button>
+                  <button id="sketch-download-metrics-btn" class="quiet-btn" type="button" disabled>Download Metrics</button>
                 </div>
                 <div id="file-meta" class="micro-pill"><strong>Upload</strong> none</div>
-                <p class="helper-copy">Sketch placement is fitted to robot-safe drawable bounds, not only the visual board. Draw uses the backend cached preview only.</p>
-                <p id="sketch-draw-status" class="helper-copy">Draw Sketch Preview is available after a successful Sketch Centerline preview.</p>
+                <p class="helper-copy">Detected/Selected pipeline: <strong id="pipeline-mode-label">Sketch Centerline</strong></p>
+                <p id="sketch-draw-status" class="helper-copy">Draw is available after Generate Preview returns a valid preview_id.</p>
                 <div id="sketch-preview-box" class="sketch-preview-box">
                   <div class="sketch-preview-head">
                     <div>
-                      <div id="sketch-preview-title" class="sketch-preview-title">SVG Preview</div>
-                      <div id="sketch-preview-note" class="sketch-preview-note">Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.</div>
+                      <div id="sketch-preview-title" class="sketch-preview-title">Executable Preview</div>
+                      <div id="sketch-preview-note" class="sketch-preview-note">Generated from runtime-sampled executable geometry.</div>
                     </div>
                     <div class="sketch-preview-actions">
-                      <button id="sketch-open-svg-btn" class="quiet-btn" type="button" disabled>Open SVG Preview in New Tab</button>
-                      <button id="sketch-download-svg-btn" class="quiet-btn" type="button" disabled>Download SVG Preview</button>
+                      <button id="sketch-open-svg-btn" class="quiet-btn" type="button" disabled>Open Preview</button>
+                      <button id="sketch-download-svg-btn" class="quiet-btn" type="button" disabled>Download Preview</button>
                     </div>
                   </div>
                   <div id="sketch-preview-warning" class="sketch-preview-warning"></div>
-                  <img id="sketch-preview-img" alt="Sketch Centerline SVG preview">
-                  <div id="sketch-preview-diag" class="sketch-preview-diag">No sketch preview loaded yet.</div>
+                  <img id="sketch-preview-img" alt="Executable drawing preview">
+                  <div id="preview-metrics-grid" class="preview-metrics-grid"></div>
+                  <div id="sketch-preview-diag" class="sketch-preview-diag">No executable preview loaded yet.</div>
                 </div>
               </div>
 
               <div id="tool-svg-panel" class="tool-panel">
-                <p class="helper-copy">Paste raw SVG markup here when you want direct control over the vector source instead of uploading a file.</p>
+                <p class="helper-copy">Paste raw SVG markup. Preview builds the executable primitive payload before Draw is enabled.</p>
                 <textarea id="svg-input" spellcheck="false" placeholder='&lt;svg viewBox="0 0 100 50"&gt;&lt;path d="M10 25 C25 5 75 45 90 25"/&gt;&lt;/svg&gt;'></textarea>
                 <div class="action-row">
-                  <button id="svg-preview-btn" class="secondary-btn" type="button">Preview SVG</button>
-                  <button id="svg-submit-btn" class="primary-btn" type="button">Commit SVG</button>
+                  <button id="svg-preview-btn" class="secondary-btn" type="button">Generate Preview</button>
+                  <button id="svg-submit-btn" class="primary-btn" type="button" disabled>Draw</button>
                   <button id="svg-clear-btn" class="quiet-btn" type="button">Clear</button>
                 </div>
               </div>
@@ -1349,7 +1464,7 @@
             </div>
           </section>
 
-          <section class="section">
+          <section class="section debug-only">
             <div class="section-head">
               <div class="section-title">
                 <h3>Diagnostics</h3>
@@ -1431,12 +1546,16 @@
     </div>
   </div>
 
-  <script src="/assets/vendor/roslib.min.js"></script>
+  <script src="vendor/roslib.min.js"></script>
   <script>
     (() => {
       'use strict';
 
-      const WS_URL = `ws://${location.hostname}:9090`;
+      const WS_HOST = location.hostname || '127.0.0.1';
+      const WS_URL = `ws://${WS_HOST}:9090`;
+      const DEBUG_MODE = new URLSearchParams(window.location.search).get('debug') === '1'
+        || window.localStorage.getItem('debugMode') === 'true';
+      document.body.classList.toggle('debug-mode', DEBUG_MODE);
       const RUNTIME_POLL_MS = 1500;
       const DEFAULT_BOARD = {
         width: 6.3,
@@ -1529,17 +1648,18 @@
         textFontSource: document.getElementById('text-font-source'),
         textPreviewBtn: document.getElementById('text-preview-btn'),
         textSubmitBtn: document.getElementById('text-submit-btn'),
-        textHelloBtn: document.getElementById('text-hello-btn'),
         textClearBtn: document.getElementById('text-clear-btn'),
         fileInput: document.getElementById('file-input'),
         fileUploadBtn: document.getElementById('file-upload-btn'),
-        filePreviewBtn: document.getElementById('file-preview-btn'),
-        fileCommitBtn: document.getElementById('file-commit-btn'),
+        fileDrawBtn: document.getElementById('file-draw-btn'),
         fileMeta: document.getElementById('file-meta'),
         sketchOptimizationPreset: document.getElementById('sketch-optimization-preset'),
         sketchPreviewGeometry: document.getElementById('sketch-preview-geometry'),
         sketchFitSafe: document.getElementById('sketch-fit-safe'),
         sketchOptimizeDraw: document.getElementById('sketch-optimize-draw'),
+        sketchPreserveTiny: document.getElementById('sketch-preserve-tiny'),
+        sketchTinySizeMm: document.getElementById('sketch-tiny-size-mm'),
+        sketchTinyCandidateMm: document.getElementById('sketch-tiny-candidate-mm'),
         sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
         sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
         sketchMargin: document.getElementById('sketch-margin'),
@@ -1551,17 +1671,18 @@
         sketchScalePercent: document.getElementById('sketch-scale-percent'),
         sketchCenterX: document.getElementById('sketch-center-x'),
         sketchCenterY: document.getElementById('sketch-center-y'),
-        sketchPreviewBtn: document.getElementById('sketch-preview-btn'),
-        sketchDrawBtn: document.getElementById('sketch-draw-btn'),
         sketchDrawStatus: document.getElementById('sketch-draw-status'),
+        pipelineModeLabel: document.getElementById('pipeline-mode-label'),
         sketchPreviewBox: document.getElementById('sketch-preview-box'),
         sketchPreviewTitle: document.getElementById('sketch-preview-title'),
         sketchPreviewNote: document.getElementById('sketch-preview-note'),
         sketchPreviewWarning: document.getElementById('sketch-preview-warning'),
         sketchPreviewImg: document.getElementById('sketch-preview-img'),
+        previewMetricsGrid: document.getElementById('preview-metrics-grid'),
         sketchPreviewDiag: document.getElementById('sketch-preview-diag'),
         sketchOpenSvgBtn: document.getElementById('sketch-open-svg-btn'),
         sketchDownloadSvgBtn: document.getElementById('sketch-download-svg-btn'),
+        sketchDownloadMetricsBtn: document.getElementById('sketch-download-metrics-btn'),
         svgInput: document.getElementById('svg-input'),
         svgPreviewBtn: document.getElementById('svg-preview-btn'),
         svgSubmitBtn: document.getElementById('svg-submit-btn'),
@@ -1602,7 +1723,7 @@
         placementTouched: false,
         vectorPreview: null,
         latestUploadId: null,
-        uploadCommitDefaults: null,
+        uploadDrawDefaults: null,
         latestUploadSourceType: null,
         latestUploadStatus: null,
         trailSegments: [],
@@ -1627,6 +1748,17 @@
         sketchBoardOverlayToken: 0,
         sketchPreviewBusy: false,
         sketchDrawBusy: false,
+        currentPreviewId: null,
+        currentCanonicalHash: null,
+        currentPrimitiveHash: null,
+        currentExecutionHash: null,
+        currentSettingsHash: null,
+        currentExecutionPreviewSvg: '',
+        currentMetrics: null,
+        currentInput: null,
+        currentProcessingSettings: null,
+        currentPipelineMode: null,
+        previewDirty: false,
       };
 
       function escapeHtml(text) {
@@ -1762,12 +1894,12 @@
           dom.placementXLabel.textContent = 'Start X (m)';
           dom.placementYLabel.textContent = 'Start Y (m)';
           dom.placementCopy.textContent = 'For text, X and Y define the top-left writing origin inside the carriage-safe writing region.';
-          dom.placementHelper.textContent = 'Text preview and commit validate against the writable region that also keeps the carriage body inside the board.';
+          dom.placementHelper.textContent = 'Text preview and draw validate against the writable region that also keeps the carriage body inside the board.';
         } else {
           dom.placementXLabel.textContent = 'Center X (m)';
           dom.placementYLabel.textContent = 'Center Y (m)';
           dom.placementCopy.textContent = 'For file uploads and SVG markup, X and Y define the board-space center used for fitted vector placement.';
-          dom.placementHelper.textContent = 'Draw-mode previews show whether geometry leaves the writable area or exits the safe cable workspace before you commit.';
+          dom.placementHelper.textContent = 'Executable previews show whether geometry leaves the writable area or exits the safe cable workspace before drawing.';
         }
       }
 
@@ -1881,7 +2013,6 @@
           const routeMetadata = planDebug.route_metadata || null;
           dom.debugPlanPanel.textContent = prettyJson({
             source_type: planDebug.source_type,
-            committed: planDebug.committed,
             route: routeMetadata && routeMetadata.route ? routeMetadata.route : null,
             trace_mode: routeMetadata && routeMetadata.mode ? routeMetadata.mode : null,
             primitive_counts: planDebug.plan ? planDebug.plan.primitive_counts : null,
@@ -2000,11 +2131,14 @@
         if (!bounds) {
           return null;
         }
+        const valueOrFallback = (value, fallback) => (
+          value === null || value === undefined ? fallback : value
+        );
         return {
-          xMin: Number(bounds.x_min ?? bounds.xMin),
-          xMax: Number(bounds.x_max ?? bounds.xMax),
-          yMin: Number(bounds.y_min ?? bounds.yMin),
-          yMax: Number(bounds.y_max ?? bounds.yMax),
+          xMin: Number(valueOrFallback(bounds.x_min, bounds.xMin)),
+          xMax: Number(valueOrFallback(bounds.x_max, bounds.xMax)),
+          yMin: Number(valueOrFallback(bounds.y_min, bounds.yMin)),
+          yMax: Number(valueOrFallback(bounds.y_max, bounds.yMax)),
         };
       }
 
@@ -2021,7 +2155,7 @@
       function sketchBoardOverlayActive() {
         return Boolean(
           state.vectorPreview &&
-          state.vectorPreview.sourceType === 'sketch_centerline' &&
+          state.currentExecutionPreviewSvg &&
           state.sketchPreviewUrl &&
           state.sketchBoardOverlayImage &&
           state.sketchBoardOverlayLoaded
@@ -2085,7 +2219,7 @@
         }
       }
 
-      function resetSketchDrawState(message = 'Draw Sketch Preview is available after a successful Sketch Centerline preview.') {
+      function resetSketchDrawState(message = 'Draw is available after Generate Preview returns a valid preview_id.') {
         state.sketchPreviewId = null;
         state.sketchDrawBusy = false;
         setSketchDrawStatus(message);
@@ -2185,9 +2319,9 @@
         }
         const cloned = clonePlacement(nextPlacement);
         state.vectorPreview.displayPlacement = cloned;
-        if (state.vectorPreview.commitRequest) {
-          state.vectorPreview.commitRequest = {
-            ...state.vectorPreview.commitRequest,
+        if (state.vectorPreview.drawRequest) {
+          state.vectorPreview.drawRequest = {
+            ...state.vectorPreview.drawRequest,
             placement: clonePlacement(nextPlacement),
           };
         }
@@ -2201,37 +2335,25 @@
       }
 
       function schedulePreviewRefresh() {
-        const previewState = state.vectorPreview;
-        if (!previewIsBoardVisible(previewState) || !previewState || !previewState.preview) {
-          return;
-        }
-        const origin = previewRequestOrigin(previewState);
-        if (!origin || origin === 'text' || origin === 'sketch_centerline') {
-          return;
-        }
-        if (state.previewRefreshTimer) {
-          clearTimeout(state.previewRefreshTimer);
-        }
-        state.previewRefreshTimer = window.setTimeout(async () => {
-          state.previewRefreshTimer = null;
-          try {
-            if (origin === 'svg') {
-              await previewSvg();
-            } else if (origin === 'file') {
-              await previewUploadedFile();
-            }
-            clearNotice();
-          } catch (error) {
-            handleError('Preview placement refresh failed', error);
-          }
-        }, 150);
+        markPreviewSettingsChanged();
       }
 
       function clearVectorPreview(pushMessage = false) {
         revokePreviewResources(state.vectorPreview);
         state.vectorPreview = null;
         state.previewInteraction = null;
-        resetSketchDrawState();
+        state.currentPreviewId = null;
+        state.currentCanonicalHash = null;
+        state.currentPrimitiveHash = null;
+        state.currentExecutionHash = null;
+        state.currentSettingsHash = null;
+        state.currentExecutionPreviewSvg = '';
+        state.currentMetrics = null;
+        state.currentInput = null;
+        state.currentProcessingSettings = null;
+        state.currentPipelineMode = null;
+        state.previewDirty = false;
+        resetSketchDrawState('Draw is available after Generate Preview returns a valid preview_id.');
         if (state.previewRefreshTimer) {
           clearTimeout(state.previewRefreshTimer);
           state.previewRefreshTimer = null;
@@ -2243,7 +2365,13 @@
           dom.sketchPreviewImg.removeAttribute('src');
         }
         if (dom.sketchPreviewDiag) {
-          dom.sketchPreviewDiag.textContent = 'No sketch preview loaded yet.';
+          dom.sketchPreviewDiag.textContent = 'No executable preview loaded yet.';
+        }
+        if (dom.previewMetricsGrid) {
+          dom.previewMetricsGrid.innerHTML = '';
+        }
+        if (dom.pipelineModeLabel) {
+          dom.pipelineModeLabel.textContent = 'Sketch Centerline';
         }
         dom.previewChip.innerHTML = '<strong>Preview</strong> none';
         dom.summaryPreview.textContent = 'No preview loaded yet.';
@@ -2251,6 +2379,36 @@
         if (pushMessage) {
           pushFeed('Preview cleared.', 'info');
         }
+      }
+
+      function markPreviewSettingsChanged() {
+        if (!state.currentPreviewId || state.previewDirty) {
+          return;
+        }
+        state.previewDirty = true;
+        setSketchDrawStatus('Settings changed. Generate Preview again before drawing.');
+        setNotice('warning', 'Preview out of date', 'Settings changed. Generate Preview again before drawing.');
+        refreshUiState({ redrawBoard: true });
+      }
+
+      function hideBoardPreviewAfterDraw(statusMessage) {
+        if (state.vectorPreview) {
+          state.vectorPreview.boardVisible = false;
+        }
+        dom.previewChip.innerHTML = '<strong>Preview</strong> hidden while drawing';
+        dom.summaryPreview.textContent = statusMessage || 'Draw published. Board Workspace is now showing live robot/trail output only.';
+        setSketchDrawStatus(statusMessage || 'Draw published. Board preview hidden so you can evaluate the robot trail.');
+        refreshUiState({ redrawBoard: true });
+      }
+
+      async function clearCurrentPreview() {
+        const previewId = state.currentPreviewId;
+        if (previewId) {
+          await apiRequest(`/api/preview/${encodeURIComponent(previewId)}`, {
+            method: 'DELETE',
+          });
+        }
+        clearVectorPreview(true);
       }
 
       function buildRasterOverlay(imageUrl, overlayPayload) {
@@ -2274,9 +2432,9 @@
       }
 
       function applyRasterPreview(sourceType, payload, imageUrl, { origin = null } = {}) {
-        const commitRequest = payload.commit_request || null;
-        const placement = commitRequest && commitRequest.placement
-          ? clonePlacement(commitRequest.placement)
+        const drawRequest = payload.draw_request || null;
+        const placement = drawRequest && drawRequest.placement
+          ? clonePlacement(drawRequest.placement)
           : (() => {
             try {
               return readPlacement();
@@ -2287,7 +2445,7 @@
         const nextState = {
           sourceType,
           preview: null,
-          commitRequest,
+          drawRequest,
           origin: origin || sourceType,
           boardVisible: true,
           basePlacement: placement,
@@ -2295,10 +2453,10 @@
           rasterOverlay: buildRasterOverlay(imageUrl, payload.raster_overlay),
         };
         revokePreviewResources(state.vectorPreview);
-        resetSketchDrawState('Draw Sketch Preview is unavailable during normal file upload preview.');
+        resetSketchDrawState('Draw is unavailable until Generate Preview succeeds.');
         state.vectorPreview = nextState;
-        if (commitRequest && commitRequest.placement) {
-          setPlacementInputs(commitRequest.placement);
+        if (drawRequest && drawRequest.placement) {
+          setPlacementInputs(drawRequest.placement);
         }
         const imageInfo = payload.image_info || {};
         const processing = payload.status || {};
@@ -2310,9 +2468,9 @@
       }
 
       function applyVectorPreview(sourceType, payload, { origin = null, boardVisible = null } = {}) {
-        const commitRequest = payload.commit_request || null;
-        const placement = commitRequest && commitRequest.placement
-          ? clonePlacement(commitRequest.placement)
+        const drawRequest = payload.draw_request || null;
+        const placement = drawRequest && drawRequest.placement
+          ? clonePlacement(drawRequest.placement)
           : (() => {
             try {
               return readPlacement();
@@ -2321,7 +2479,7 @@
             }
           })();
         revokePreviewResources(state.vectorPreview);
-        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal file preview flow.');
+        resetSketchDrawState('Draw is available after Generate Preview returns a valid preview_id.');
         if (dom.sketchPreviewBox) {
           dom.sketchPreviewBox.classList.remove('active');
         }
@@ -2334,32 +2492,47 @@
         state.vectorPreview = {
           sourceType,
           preview: payload.preview,
-          commitRequest,
+          drawRequest,
           origin: origin || sourceType,
-          boardVisible: boardVisible === null ? sourceType !== 'text' : Boolean(boardVisible),
+          boardVisible: boardVisible === null ? true : Boolean(boardVisible),
           basePlacement: placement,
           displayPlacement: placement,
           rasterOverlay: null,
         };
+        state.currentPreviewId = payload.preview_id || null;
+        state.currentCanonicalHash = payload.canonical_hash || null;
+        state.currentPrimitiveHash = payload.primitive_hash || null;
+        state.currentExecutionHash = payload.execution_hash || null;
+        state.currentSettingsHash = payload.settings_hash || null;
+        state.currentExecutionPreviewSvg = String(payload.execution_preview_svg || '');
+        state.currentMetrics = payload.metrics || null;
+        state.currentInput = sourceType;
+        state.currentProcessingSettings = drawRequest || {};
+        state.currentPipelineMode = payload.pipeline_mode || sourceType;
+        state.previewDirty = false;
+        if (dom.pipelineModeLabel) {
+          dom.pipelineModeLabel.textContent = state.currentPipelineMode === 'sketch_centerline'
+            ? 'Sketch Centerline'
+            : String(state.currentPipelineMode || sourceType);
+        }
+        renderSketchPreviewSvg(payload);
 
         const preview = payload.preview || {};
-        const strokeCount = Number(preview.stroke_count || 0);
-        const pointCount = Number(preview.point_count || 0);
-        const canCommit = Boolean(preview.can_commit);
-        dom.previewChip.innerHTML = `<strong>Preview</strong> ${escapeHtml(sourceType)} · ${strokeCount} strokes`;
-        dom.summaryPreview.textContent = canCommit
-          ? `${sourceType} preview is ready with ${strokeCount} strokes and ${pointCount} points.`
-          : `${sourceType} preview is invalid: ${preview.validation_error || 'unknown validation issue'}.`;
+        const metrics = payload.metrics || {};
+        const strokeCount = Number(metrics.draw_path_count || preview.stroke_count || 0);
+        const pointCount = Number(metrics.draw_sample_count || preview.point_count || 0);
+        dom.previewChip.innerHTML = `<strong>Preview</strong> ${escapeHtml(sourceType)} · ${strokeCount} paths`;
+        dom.summaryPreview.textContent = `${sourceType} executable preview ready · ${strokeCount} drawable paths · ${pointCount} samples · pipeline ${state.currentPipelineMode || sourceType}.`;
 
-        if (commitRequest && commitRequest.placement) {
-          setPlacementInputs(commitRequest.placement);
+        if (drawRequest && drawRequest.placement) {
+          setPlacementInputs(drawRequest.placement);
         }
         if (
           sourceType === 'text'
-          && commitRequest
-          && Object.prototype.hasOwnProperty.call(commitRequest, 'font_source')
+          && drawRequest
+          && Object.prototype.hasOwnProperty.call(drawRequest, 'font_source')
         ) {
-          setTextFontSource(commitRequest.font_source);
+          setTextFontSource(drawRequest.font_source);
         }
 
         if (preview.validation_error) {
@@ -2367,8 +2540,9 @@
           pushFeed(`Preview warning: ${preview.validation_error}`, 'error');
         } else {
           clearNotice();
-          pushFeed(`Preview ready for ${sourceType}.`, 'success');
+          pushFeed(`Executable preview ready for ${sourceType}.`, 'success');
         }
+        setSketchDrawStatus(state.currentPreviewId ? 'Draw is ready and will publish the cached primitive payload.' : 'Draw is disabled because no preview_id was returned.');
         refreshUiState({ redrawBoard: true });
         refreshDebugPanels().catch(() => {});
       }
@@ -2484,23 +2658,7 @@
       function syncControls() {
         const runtimeReady = Boolean(state.runtime && state.runtime.ready);
         const backendHealthy = state.backend !== 'error';
-        const fileUploaded = Boolean(state.latestUploadId);
-        const fileReady = Boolean(
-          fileUploaded &&
-          state.latestUploadStatus &&
-          state.latestUploadStatus.state === 'ready'
-        );
-        const sketchPreviewActive = Boolean(
-          state.vectorPreview &&
-          state.vectorPreview.sourceType === 'sketch_centerline'
-        );
-        const sketchDrawReady = Boolean(
-          runtimeReady &&
-          sketchPreviewActive &&
-          state.sketchPreviewId &&
-          !state.sketchPreviewBusy &&
-          !state.sketchDrawBusy
-        );
+        const drawReady = Boolean(runtimeReady && state.currentPreviewId && !state.previewDirty);
 
         dom.modeButtons.forEach((button) => {
           const active = state.runtime && state.runtime.active_mode === button.dataset.mode;
@@ -2515,18 +2673,15 @@
           button.disabled = !runtimeReady || executorBusy || active;
         });
 
-        dom.textPreviewBtn.disabled = !backendHealthy;
-        dom.textSubmitBtn.disabled = !runtimeReady;
-        dom.textHelloBtn.disabled = !runtimeReady;
-        dom.svgPreviewBtn.disabled = !backendHealthy;
-        dom.svgSubmitBtn.disabled = !runtimeReady;
-        dom.fileUploadBtn.disabled = !backendHealthy;
-        dom.filePreviewBtn.disabled = !(backendHealthy && fileReady);
-        dom.sketchPreviewBtn.disabled = !backendHealthy || state.sketchPreviewBusy;
-        dom.sketchDrawBtn.disabled = !backendHealthy || !sketchDrawReady;
-        dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
-        dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
-        dom.fileCommitBtn.disabled = !(runtimeReady && fileReady && !sketchPreviewActive);
+        if (dom.textPreviewBtn) dom.textPreviewBtn.disabled = !backendHealthy;
+        if (dom.textSubmitBtn) dom.textSubmitBtn.disabled = !drawReady || state.activeTool !== 'text';
+        if (dom.svgPreviewBtn) dom.svgPreviewBtn.disabled = !backendHealthy;
+        if (dom.svgSubmitBtn) dom.svgSubmitBtn.disabled = !drawReady || state.activeTool !== 'svg';
+        if (dom.fileUploadBtn) dom.fileUploadBtn.disabled = !backendHealthy;
+        if (dom.sketchOpenSvgBtn) dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
+        if (dom.sketchDownloadSvgBtn) dom.sketchDownloadSvgBtn.disabled = !state.sketchPreviewUrl;
+        if (dom.sketchDownloadMetricsBtn) dom.sketchDownloadMetricsBtn.disabled = !state.currentMetrics;
+        if (dom.fileDrawBtn) dom.fileDrawBtn.disabled = !drawReady || state.activeTool !== 'file';
       }
 
       function setOverlay(title, copy, visible) {
@@ -3124,7 +3279,8 @@
         if (!previewIsBoardVisible(previewState)) {
           return;
         }
-        if (previewState.sourceType === 'sketch_centerline' && drawSketchSvgBoardOverlay(layout)) {
+        if (state.currentExecutionPreviewSvg) {
+          drawSketchSvgBoardOverlay(layout);
           return;
         }
         const preview = previewState && previewState.preview ? previewState.preview : null;
@@ -3152,7 +3308,7 @@
           ctx.restore();
           return;
         }
-        const invalid = preview.can_commit === false && previewState.sourceType !== 'sketch_centerline';
+        const invalid = preview.can_draw === false && previewState.sourceType !== 'sketch_centerline';
         transformedPreviewStrokes(previewState).forEach((stroke) => {
           drawStrokePath(layout, stroke, {
             strokeStyle: previewStrokeColor(),
@@ -3164,73 +3320,10 @@
       }
 
       function drawPreviewPlacementControls(layout) {
-        const previewState = state.vectorPreview;
-        if (!previewIsBoardVisible(previewState)) {
-          return;
-        }
-        if (previewState.sourceType === 'sketch_centerline') {
-          return;
-        }
-        const bounds = transformedPreviewBounds(previewState);
-        if (!bounds) {
-          return;
-        }
-        const topLeft = boardToCanvas(layout, bounds.xMin, bounds.yMin);
-        const bottomRight = boardToCanvas(layout, bounds.xMax, bounds.yMax);
-        const width = Math.max(4, bottomRight.x - topLeft.x);
-        const height = Math.max(4, bottomRight.y - topLeft.y);
-        const handleRadius = Math.max(7, Math.min(14, layout.scale * 0.022));
-
-        ctx.save();
-        ctx.strokeStyle = 'rgba(54, 86, 111, 0.38)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([7, 5]);
-        ctx.strokeRect(topLeft.x, topLeft.y, width, height);
-        ctx.setLineDash([]);
-        ctx.fillStyle = 'rgba(255, 253, 249, 0.96)';
-        ctx.strokeStyle = 'rgba(54, 86, 111, 0.88)';
-        ctx.lineWidth = 2.1;
-        ctx.beginPath();
-        ctx.arc(bottomRight.x, bottomRight.y, handleRadius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(54, 86, 111, 0.94)';
-        ctx.font = '600 11px var(--sans)';
-        ctx.fillText('drag', topLeft.x + 10, Math.max(14, topLeft.y - 10));
-        ctx.fillText('scale', bottomRight.x - 16, Math.max(14, bottomRight.y - 12));
-        ctx.restore();
+        return;
       }
 
       function previewHandleHit(layout, canvasX, canvasY) {
-        if (state.vectorPreview && state.vectorPreview.sourceType === 'sketch_centerline') {
-          return null;
-        }
-        const bounds = transformedPreviewBounds();
-        if (!bounds) {
-          return null;
-        }
-        const topLeft = boardToCanvas(layout, bounds.xMin, bounds.yMin);
-        const bottomRight = boardToCanvas(layout, bounds.xMax, bounds.yMax);
-        const handleRadius = Math.max(9, Math.min(18, layout.scale * 0.025));
-        const dx = canvasX - bottomRight.x;
-        const dy = canvasY - bottomRight.y;
-        if ((dx * dx) + (dy * dy) <= (handleRadius * handleRadius)) {
-          return {
-            mode: 'scale',
-            bounds,
-          };
-        }
-        if (
-          canvasX >= topLeft.x &&
-          canvasX <= bottomRight.x &&
-          canvasY >= topLeft.y &&
-          canvasY <= bottomRight.y
-        ) {
-          return {
-            mode: 'drag',
-            bounds,
-          };
-        }
         return null;
       }
 
@@ -3409,81 +3502,36 @@
           throw new Error('Enter text before preview.');
         }
         const textOptions = readTextOptions();
-        const payload = await apiRequest('/api/vector/text/preview', {
+        const payload = await apiRequest('/api/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            input_type: 'text',
             text,
-            placement: readPlacement(),
-            ...textOptions,
+            settings: {
+              placement: readPlacement(),
+              ...textOptions,
+            },
           }),
         });
         applyVectorPreview('text', payload, { origin: 'text', boardVisible: false });
       }
 
-      function computeNextTextPlacement(payload, currentPlacement) {
-        const preview = payload && payload.preview;
-        const bounds = preview && preview.bounds;
-        if (!bounds) {
-          return null;
+      async function drawText() {
+        if (!state.currentPreviewId || state.previewDirty) {
+          throw new Error('Generate Preview again before drawing.');
         }
-        const endX = Number(bounds.x_max);
-        const textSafe = textSafeBounds();
-        const commitRequest = payload && payload.commit_request ? payload.commit_request : {};
-        const glyphHeightM = Number(commitRequest.glyph_height_m);
-        const lineHeightScale = Number(commitRequest.line_height);
-        const fallbackLineHeight = currentBoard().line_height || 0.14;
-        const lineAdvance = (
-          Number.isFinite(glyphHeightM) && glyphHeightM > 0 && Number.isFinite(lineHeightScale) && lineHeightScale > 0
-        ) ? glyphHeightM * lineHeightScale : fallbackLineHeight;
-        const sentenceGap = Math.max(0.045, 0.38 * lineAdvance);
-        const wrappedSentenceGap = Math.max(0.020, 0.18 * lineAdvance);
-
-        const startX = textSafe.xMin + 0.02;
-        const maxX = textSafe.xMax - 0.02;
-        const startY = textSafe.yMin + 0.02;
-        const maxY = textSafe.yMax - 0.02;
-        const minRemainingWidth = Math.max(0.025, 0.3 * lineAdvance);
-
-        let nextX = endX + sentenceGap;
-        let nextY = Number(currentPlacement.y);
-        if (!Number.isFinite(nextY)) {
-          nextY = startY;
-        }
-        if (nextX + minRemainingWidth > maxX) {
-          nextX = startX;
-          nextY += lineAdvance + wrappedSentenceGap;
-        }
-
-        return {
-          x: Math.max(startX, Math.min(nextX, maxX)),
-          y: Math.max(startY, Math.min(nextY, maxY)),
-          scale: Number(currentPlacement.scale) > 0 ? Number(currentPlacement.scale) : 1,
-        };
-      }
-
-      async function commitText(text) {
-        const currentPlacement = readPlacement();
-        const textOptions = readTextOptions();
         await ensureMode('text');
-        const payload = await apiRequest('/api/text', {
+        const payload = await apiRequest('/api/draw', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            text,
-            placement: currentPlacement,
-            ...textOptions,
+            preview_id: state.currentPreviewId,
           }),
         });
-        applyVectorPreview('text', payload, { origin: 'text', boardVisible: false });
-        const nextPlacement = computeNextTextPlacement(payload, currentPlacement);
-        if (nextPlacement) {
-          setPlacementInputs(nextPlacement);
-          state.placementTouched = true;
-        }
-        clearVectorPreview(false);
         clearNotice();
-        pushFeed('Text plan committed through /api/text.', 'success');
+        hideBoardPreviewAfterDraw(`Text draw published from cached preview ${payload.preview_id}. Board preview hidden so the robot trail is visible.`);
+        pushFeed('Text draw published from cached preview.', 'success');
       }
 
       async function previewSvg() {
@@ -3491,35 +3539,35 @@
         if (!svg) {
           throw new Error('Paste SVG markup before preview.');
         }
-        const payload = await apiRequest('/api/vector/svg/preview', {
+        const payload = await apiRequest('/api/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            input_type: 'svg',
             svg,
-            placement: readPlacement(),
+            settings: {
+              placement: readPlacement(),
+            },
           }),
         });
         applyVectorPreview('svg', payload, { origin: 'svg', boardVisible: true });
       }
 
-      async function commitSvg() {
-        const svg = dom.svgInput.value.trim();
-        if (!svg) {
-          throw new Error('Paste SVG markup before commit.');
+      async function drawSvg() {
+        if (!state.currentPreviewId || state.previewDirty) {
+          throw new Error('Generate Preview again before drawing.');
         }
         await ensureMode('draw');
-        const payload = await apiRequest('/api/vector/svg/commit', {
+        const payload = await apiRequest('/api/draw', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            svg,
-            placement: readPlacement(),
+            preview_id: state.currentPreviewId,
           }),
         });
-        applyVectorPreview('svg', payload, { origin: 'svg', boardVisible: true });
-        clearVectorPreview(false);
         clearNotice();
-        pushFeed('SVG plan committed through draw mode.', 'success');
+        hideBoardPreviewAfterDraw(`SVG draw published from cached preview ${payload.preview_id}. Board preview hidden so the robot trail is visible.`);
+        pushFeed('SVG draw published from cached preview.', 'success');
       }
 
       function stopUploadStatusPolling() {
@@ -3534,24 +3582,25 @@
         const status = payload && payload.status ? payload.status : null;
         const sourceType = payload && payload.source_type ? payload.source_type : 'file';
         const imageInfo = payload && payload.image_info ? payload.image_info : null;
-        if (!uploadId) {
-          dom.fileMeta.innerHTML = '<strong>Upload</strong> none';
-          return;
-        }
         const originalName = payload.upload && payload.upload.original_filename
           ? ` · ${escapeHtml(payload.upload.original_filename)}`
           : '';
-        const stateLabel = status && status.state ? escapeHtml(status.state) : 'uploaded';
-        if (imageInfo && Number(imageInfo.width_px) > 0 && Number(imageInfo.height_px) > 0) {
-          dom.fileMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(uploadId)} · ${escapeHtml(sourceType)} · ${imageInfo.width_px}×${imageInfo.height_px}${originalName} · ${stateLabel}`;
+        if (!uploadId && !originalName) {
+          dom.fileMeta.innerHTML = '<strong>Upload</strong> none';
           return;
         }
-        dom.fileMeta.innerHTML = `<strong>Upload</strong> ${escapeHtml(uploadId)} · ${escapeHtml(sourceType)}${originalName} · ${stateLabel}`;
+        const stateLabel = status && status.state ? escapeHtml(status.state) : 'uploaded';
+        const uploadLabel = uploadId ? escapeHtml(uploadId) : 'selected file';
+        if (imageInfo && Number(imageInfo.width_px) > 0 && Number(imageInfo.height_px) > 0) {
+          dom.fileMeta.innerHTML = `<strong>Upload</strong> ${uploadLabel} · ${escapeHtml(sourceType)} · ${imageInfo.width_px}×${imageInfo.height_px}${originalName} · ${stateLabel}`;
+          return;
+        }
+        dom.fileMeta.innerHTML = `<strong>Upload</strong> ${uploadLabel} · ${escapeHtml(sourceType)}${originalName} · ${stateLabel}`;
       }
 
       function recordUploadState(payload) {
         state.latestUploadId = payload.upload && payload.upload.upload_id;
-        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults || null;
+        state.uploadDrawDefaults = payload.draw_request || state.uploadDrawDefaults || null;
         state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType || null;
         state.latestUploadStatus = payload.status || state.latestUploadStatus || null;
         updateUploadMeta(payload);
@@ -3597,22 +3646,22 @@
 
       function sketchTruncationWarning(payload) {
         const preview = payload && payload.preview ? payload.preview : {};
-        const hasSvg = Boolean(payload && payload.preview_svg);
+        const hasSvg = Boolean(payload && (payload.execution_preview_svg || payload.preview_svg));
         const overlayActive = sketchBoardOverlayActive();
         const ratio = sketchPreviewPointRatio(preview);
         const pointText = ratio.original > 0
           ? `Sampled points ${ratio.returned}/${ratio.original} (${ratio.percent.toFixed(1)}%)${preview.truncated ? ' · truncated' : ''}.`
           : 'Sampled point counts unavailable.';
         if (hasSvg && overlayActive) {
-          return `Board workspace is showing the full SVG preview. ${pointText} Sampled points are fallback/debug only.`;
+          return `Board Workspace is showing the full executable preview path. ${pointText} Sampled points are debug only and are not drawn as a separate board layer.`;
         }
         if (hasSvg) {
-          return `Board workspace is showing a sampled preview only while the SVG overlay loads. Full result is available in the SVG preview. ${pointText}`;
+          return `Executable preview is loading on the Board Workspace. ${pointText} Sampled points are debug only and are not drawn as a separate board layer.`;
         }
         if (preview.truncated) {
-          return `Board workspace is showing a sampled preview only. Full result is available in the SVG preview when one is returned. ${pointText}`;
+          return `Executable preview SVG is unavailable. ${pointText}`;
         }
-        return `Board workspace is showing a sampled preview only. ${pointText}`;
+        return `Executable preview SVG is unavailable. ${pointText}`;
       }
 
       function formatSketchTiming(timing) {
@@ -3646,7 +3695,7 @@
         } else if (slowStage === 'merge') {
           hint = ' · hint use Raw/Detail or lower merge gap';
         } else if (slowStage === 'curve_fit') {
-          hint = ' · hint increase tolerance or use Polyline Debug';
+          hint = ' · hint increase tolerance or turn smoothness off';
         }
         const slowText = slowStage
           ? `slowest ${slowStage} ${Number.isFinite(slowMs) ? slowMs.toFixed(0) : '--'} ms${hint}`
@@ -3654,50 +3703,130 @@
         return `${slowText}\n${rendered.join(' · ')}`;
       }
 
+      function formatCount(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return Math.round(numeric).toLocaleString();
+      }
+
+      function formatMeters(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return `${numeric.toFixed(2)} m`;
+      }
+
+      function formatMillis(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return `${numeric.toFixed(0)} ms`;
+      }
+
+      function shortHash(value) {
+        const text = String(value || '');
+        return text ? text.slice(0, 10) : '--';
+      }
+
+      function metricTile(label, value) {
+        return (
+          '<div class="preview-metric">' +
+            `<div class="label">${escapeHtml(label)}</div>` +
+            `<div class="value">${escapeHtml(value)}</div>` +
+          '</div>'
+        );
+      }
+
+      function renderPreviewMetrics(payload) {
+        if (!dom.previewMetricsGrid) {
+          return;
+        }
+        if (!payload) {
+          dom.previewMetricsGrid.innerHTML = '';
+          return;
+        }
+        const metadata = payload.metadata || {};
+        const metrics = payload.metrics || {};
+        const preview = payload.preview || {};
+        const timing = metadata.timing || {};
+        const tinyDetected = Number(metrics.tiny_details_detected || 0);
+        const tinyExpanded = Number(metrics.tiny_details_expanded || 0);
+        const tinySizeMm = Number(metrics.minimum_drawable_feature_m || 0) * 1000;
+        const tiles = [
+          metricTile('Paths', `${formatCount(metrics.draw_path_count || payload.stroke_count)} draw`),
+          metricTile('Samples', `${formatCount(metrics.draw_sample_count || payload.point_count)} points`),
+          metricTile('Tiny Details', `${formatCount(tinyExpanded)}/${formatCount(tinyDetected)} expanded${Number.isFinite(tinySizeMm) && tinySizeMm > 0 ? ` · ${tinySizeMm.toFixed(1)} mm` : ''}`),
+          metricTile('Geometry', `${formatCount(metadata.curve_primitive_count || 0)} curves · ${formatCount(metadata.line_primitive_count || 0)} lines`),
+          metricTile('Draw Length', formatMeters(metrics.draw_length_m)),
+          metricTile('Travel', formatMeters(metrics.travel_length_m)),
+          metricTile('Total Time', formatMillis(timing.preview_total_time_ms)),
+          metricTile('Primitive Hash', shortHash(payload.primitive_hash)),
+        ];
+        if (preview.truncated) {
+          tiles.push(metricTile('Debug Preview', `${formatCount(preview.returned_point_count)}/${formatCount(preview.original_point_count)} sampled`));
+        }
+        dom.previewMetricsGrid.innerHTML = tiles.join('');
+      }
+
+      function downloadCurrentMetrics() {
+        if (!state.currentMetrics) {
+          handleError('Download metrics failed', new Error('No preview metrics are available.'));
+          return;
+        }
+        const payload = {
+          preview_id: state.currentPreviewId,
+          canonical_hash: state.currentCanonicalHash,
+          primitive_hash: state.currentPrimitiveHash,
+          execution_hash: state.currentExecutionHash,
+          settings_hash: state.currentSettingsHash,
+          pipeline_mode: state.currentPipelineMode,
+          metrics: state.currentMetrics,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `preview-metrics-${state.currentPreviewId || 'current'}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+      }
+
       function sketchDiagnosticsText(payload) {
         const metadata = payload.metadata || {};
         const preview = payload.preview || {};
-        const threshold = Number(metadata.effective_threshold_value ?? metadata.threshold_value);
+        const valueOrFallback = (value, fallback) => (
+          value === null || value === undefined ? fallback : value
+        );
+        const threshold = Number(valueOrFallback(metadata.effective_threshold_value, metadata.threshold_value));
         const lineSensitivity = Number(metadata.line_sensitivity);
         const scalePercent = Number(metadata.scale_percent);
         const centerX = Number(metadata.center_x_m);
         const centerY = Number(metadata.center_y_m);
-        const simplify = Number(metadata.effective_simplify_epsilon_px ?? metadata.simplify_epsilon_px);
-        const mergeGap = Number(metadata.effective_merge_gap_px ?? metadata.merge_gap_px);
-        const mergeAngle = Number(metadata.effective_merge_max_angle_deg ?? metadata.merge_max_angle_deg);
-        const minStroke = Number(metadata.effective_min_stroke_length_px ?? metadata.min_stroke_length_px);
+        const simplify = Number(valueOrFallback(metadata.effective_simplify_epsilon_px, metadata.simplify_epsilon_px));
+        const mergeGap = Number(valueOrFallback(metadata.effective_merge_gap_px, metadata.merge_gap_px));
+        const mergeAngle = Number(valueOrFallback(metadata.effective_merge_max_angle_deg, metadata.merge_max_angle_deg));
+        const minStroke = Number(valueOrFallback(metadata.effective_min_stroke_length_px, metadata.min_stroke_length_px));
         const curveTolerancePx = Number(metadata.curve_tolerance_px);
         const curveToleranceM = Number(metadata.curve_tolerance_m);
         const curveCount = Number(metadata.curve_primitive_count || 0);
         const lineCount = Number(metadata.line_primitive_count || 0);
-        const lineDominance = lineCount > Math.max(50, curveCount * 4)
-          ? 'Many strokes are too short or too sharp to fit safely as curves; they remain line segments.'
-          : '';
-        const truncation = sketchTruncationWarning(payload);
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
         const lines = [
-          `${Number(payload.stroke_count || 0)} strokes · ${Number(payload.point_count || 0)} points · ${Number(payload.canonical_command_count || 0)} canonical commands`,
-          `geometry ${metadata.preview_geometry_mode || '--'} · curves ${curveCount} · Q ${Number(metadata.quadratic_primitive_count || 0)} · C ${Number(metadata.cubic_primitive_count || 0)} · lines ${lineCount}`,
-          `safe fit ${metadata.fit_to_safe_area === false ? 'off' : 'on'} · robot-safe ${formatSketchSafeBounds(metadata)}`,
-          `curve tol ${Number.isFinite(curveTolerancePx) ? curveTolerancePx.toFixed(2) : '--'} px · ${Number.isFinite(curveToleranceM) ? curveToleranceM.toFixed(5) : '--'} m · max dim ${Number(metadata.max_image_dim || 0) || '--'}`,
-          `preset ${metadata.optimization_preset || '--'} · simplify ${Number.isFinite(simplify) ? simplify.toFixed(2) : '--'} · min stroke ${Number.isFinite(minStroke) ? minStroke.toFixed(1) : '--'} px`,
-          `merge ${metadata.merge_enabled ? 'on' : 'off'} · gap ${Number.isFinite(mergeGap) ? mergeGap.toFixed(1) : '--'} px · angle ${Number.isFinite(mergeAngle) ? mergeAngle.toFixed(0) : '--'}°`,
-          `raw ${Number(metadata.raw_stroke_count || 0)} · final ${Number(metadata.final_stroke_count || payload.stroke_count || 0)} · merged ${Number(metadata.merge_count || 0)} · removed short ${Number(metadata.removed_short_stroke_count || 0)}`,
-          `bounds ${formatSketchBounds(payload.bounds)}`,
-          `preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''} · draw uses full cached backend plan`,
-          `sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · threshold ${metadata.threshold_method || '--'} ${Number.isFinite(threshold) ? threshold.toFixed(1) : '--'}`,
-          `scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}% · center ${Number.isFinite(centerX) && Number.isFinite(centerY) ? `${centerX.toFixed(2)}, ${centerY.toFixed(2)}` : 'auto'}`,
-          `skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
-          formatSketchTiming(metadata.timing),
+          `Executable preview is generated from the same cached primitive payload Draw publishes.`,
+          `Pipeline ${payload.pipeline_mode || 'sketch_centerline'} · safe fit ${metadata.fit_to_safe_area === false ? 'off' : 'on'} · bounds ${formatSketchBounds(payload.bounds)}`,
+          `Detail ${metadata.optimization_preset || '--'} · smoothness ${metadata.preview_geometry_mode || '--'} · sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}%`,
+          `Debug sampled preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}; Draw uses the full cached backend plan.`,
+          `Robot-safe ${formatSketchSafeBounds(metadata)} · skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
+          formatSketchTiming(metadata.timing).split('\n')[0],
         ];
-        if (truncation) {
-          lines.splice(7, 0, truncation);
-        }
-        if (lineDominance) {
-          lines.splice(3, 0, lineDominance);
-        }
         return lines.join('\n');
       }
 
@@ -3705,35 +3834,19 @@
         if (!payload) {
           return;
         }
-        const workspaceStatus = sketchTruncationWarning(payload);
-        const warning = [
-          workspaceStatus,
-          'Draw Sketch Preview will use the full backend cached plan, not the sampled board canvas preview.',
-        ].filter(Boolean).join(' ');
+        const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+        const hasSvg = Boolean(payload.execution_preview_svg || payload.preview_svg);
+        const warning = !hasSvg
+          ? 'Executable preview SVG is unavailable. Draw still requires a valid cached preview.'
+          : (warnings.length ? `${warnings.length} backend warning${warnings.length === 1 ? '' : 's'} available in diagnostics.` : '');
         if (dom.sketchPreviewWarning) {
           dom.sketchPreviewWarning.textContent = warning;
           dom.sketchPreviewWarning.classList.toggle('active', Boolean(warning));
         }
+        renderPreviewMetrics(payload);
         if (dom.sketchPreviewDiag) {
           dom.sketchPreviewDiag.textContent = sketchDiagnosticsText(payload);
         }
-      }
-
-      function clearSketchBoardWorkspacePreviewAfterDraw(message) {
-        if (state.vectorPreview && state.vectorPreview.sourceType === 'sketch_centerline') {
-          state.vectorPreview = null;
-          state.previewInteraction = null;
-        }
-        clearSketchBoardOverlay();
-        state.sketchPreviewId = null;
-        setSketchDrawStatus(message);
-        if (dom.sketchPreviewWarning) {
-          dom.sketchPreviewWarning.textContent = 'Sketch preview remains in the File tab for reference. Board workspace preview was cleared after publish; live robot drawing/trail is shown there.';
-          dom.sketchPreviewWarning.classList.add('active');
-        }
-        dom.previewChip.innerHTML = '<strong>Preview</strong> live drawing';
-        dom.summaryPreview.textContent = 'Sketch preview cleared; showing live robot drawing/trail.';
-        refreshUiState({ redrawBoard: true });
       }
 
       function setSketchPreviewInlineStatus(kind, message) {
@@ -3743,7 +3856,7 @@
         resetSketchDrawState(
           kind === 'loading'
             ? 'Preparing backend-owned Sketch preview. Drawing is disabled until preview succeeds.'
-            : 'Draw Sketch Preview is unavailable until a Sketch Centerline preview succeeds.'
+            : 'Draw is unavailable until Generate Preview succeeds.'
         );
         if (state.sketchPreviewUrl) {
           URL.revokeObjectURL(state.sketchPreviewUrl);
@@ -3758,11 +3871,14 @@
           dom.sketchPreviewWarning.textContent = '';
           dom.sketchPreviewWarning.classList.remove('active');
         }
+        if (dom.previewMetricsGrid) {
+          dom.previewMetricsGrid.innerHTML = '';
+        }
         if (dom.sketchPreviewTitle) {
-          dom.sketchPreviewTitle.textContent = 'SVG Preview';
+          dom.sketchPreviewTitle.textContent = 'Executable Preview';
         }
         if (dom.sketchPreviewNote) {
-          dom.sketchPreviewNote.textContent = 'Full SVG output. Board Workspace uses this as an overlay when available; sampled points are fallback/debug.';
+          dom.sketchPreviewNote.textContent = 'Generated from runtime-sampled executable geometry.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = true;
@@ -3786,7 +3902,7 @@
           URL.revokeObjectURL(state.sketchPreviewUrl);
           state.sketchPreviewUrl = null;
         }
-        const svgText = String(payload.preview_svg || '');
+        const svgText = String(payload.execution_preview_svg || payload.preview_svg || '');
         state.sketchPreviewSvgText = svgText;
         state.sketchPreviewPayload = payload;
         if (svgText) {
@@ -3800,17 +3916,14 @@
           dom.sketchPreviewImg.style.display = 'none';
           clearSketchBoardOverlay();
         }
-        const metadata = payload.metadata || {};
-        const modeLabel = metadata.preview_geometry_mode === 'polyline'
-          ? 'Polyline Debug'
-          : 'Smooth Curves';
+        const modeLabel = payload.pipeline_mode === 'sketch_centerline'
+          ? 'Sketch Centerline'
+          : (payload.pipeline_mode || payload.source_type || 'Executable');
         if (dom.sketchPreviewTitle) {
-          dom.sketchPreviewTitle.textContent = `SVG Preview · ${modeLabel}`;
+          dom.sketchPreviewTitle.textContent = `Executable Preview · ${modeLabel}`;
         }
         if (dom.sketchPreviewNote) {
-          dom.sketchPreviewNote.textContent = modeLabel === 'Smooth Curves'
-            ? 'Full Smooth Curves SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.'
-            : 'Full Polyline Debug SVG output. Board Workspace uses this SVG as the full preview overlay; sampled points are fallback/debug.';
+          dom.sketchPreviewNote.textContent = 'This SVG is generated from the executable sampled geometry that Draw will publish.';
         }
         if (dom.sketchOpenSvgBtn) {
           dom.sketchOpenSvgBtn.disabled = !state.sketchPreviewUrl;
@@ -3825,14 +3938,24 @@
       function applySketchCenterlinePreview(payload) {
         const preview = payload.preview || {};
         state.sketchPreviewId = payload.preview_id || null;
-        state.sketchDrawBusy = false;
+        state.currentPreviewId = payload.preview_id || null;
+        state.currentCanonicalHash = payload.canonical_hash || null;
+        state.currentPrimitiveHash = payload.primitive_hash || null;
+        state.currentExecutionHash = payload.execution_hash || null;
+        state.currentSettingsHash = payload.settings_hash || null;
+        state.currentExecutionPreviewSvg = String(payload.execution_preview_svg || '');
+        state.currentMetrics = payload.metrics || null;
+        state.currentInput = 'sketch_centerline';
+        state.currentProcessingSettings = payload.draw_request || {};
+        state.currentPipelineMode = payload.pipeline_mode || 'sketch_centerline';
+        state.previewDirty = false;
         const wrappedPreview = {
           strokes: Array.isArray(preview.strokes) ? preview.strokes : [],
           stroke_count: Number(payload.stroke_count || 0),
           point_count: Number(payload.point_count || 0),
           bounds: payload.bounds || null,
-          can_commit: false,
-          validation_error: 'Use Draw Sketch Preview for the backend cached sketch plan; normal Commit File is separate.',
+          can_draw: true,
+          validation_error: 'Use Draw for the backend cached executable payload.',
           diagnostics: {
             sketch_centerline: {
               canonical_command_count: Number(payload.canonical_command_count || 0),
@@ -3847,7 +3970,7 @@
         state.vectorPreview = {
           sourceType: 'sketch_centerline',
           preview: wrappedPreview,
-          commitRequest: null,
+          drawRequest: null,
           origin: 'sketch_centerline',
           boardVisible: true,
           basePlacement: { x: 0, y: 0, scale: 1 },
@@ -3855,229 +3978,111 @@
           rasterOverlay: null,
         };
         renderSketchPreviewSvg(payload);
-        dom.previewChip.innerHTML = `<strong>Preview</strong> sketch · ${Number(payload.stroke_count || 0)} strokes`;
+        if (dom.pipelineModeLabel) {
+          dom.pipelineModeLabel.textContent = 'Sketch Centerline';
+        }
+        const metrics = payload.metrics || {};
+        const drawPathCount = Number(metrics.draw_path_count || payload.stroke_count || 0);
+        const drawSampleCount = Number(metrics.draw_sample_count || payload.point_count || 0);
+        dom.previewChip.innerHTML = `<strong>Preview</strong> sketch_centerline · ${drawPathCount} paths`;
         const drawAvailability = state.sketchPreviewId
-          ? 'Draw Sketch Preview is available and will use the backend cached canonical plan.'
-          : 'Draw Sketch Preview is unavailable because the backend did not return a preview_id.';
-        dom.summaryPreview.textContent = `Sketch Centerline preview loaded with ${Number(payload.stroke_count || 0)} strokes and ${Number(payload.point_count || 0)} points. Board Workspace uses the full SVG overlay when available; sampled points are fallback/debug. Placement is validated against robot-safe drawable bounds. ${drawAvailability}`;
+          ? 'Draw is available and will publish the same cached primitive payload shown in the board preview.'
+          : 'Draw is unavailable because the backend did not return a preview_id.';
+        dom.summaryPreview.textContent = `Sketch Centerline executable preview loaded with ${drawPathCount} drawable paths and ${drawSampleCount} sampled points. Board Workspace shows the full execution_preview_svg path the robot will follow. ${drawAvailability}`;
         setSketchDrawStatus(drawAvailability);
-        setNotice('warning', 'Sketch preview ready', 'Use Draw Sketch Preview to publish the backend cached plan. Normal Commit File remains separate.');
+        setNotice('success', 'Sketch preview ready', 'Board Workspace shows the executable path. Draw will publish the cached primitive payload.');
         pushFeed('Sketch Centerline preview generated without robot publishing.', 'success');
         refreshUiState({ redrawBoard: true });
       }
 
-      function scheduleUploadStatusPoll(delayMs = 650) {
-        stopUploadStatusPolling();
-        if (!state.latestUploadId) {
-          return;
-        }
-        state.uploadStatusTimer = window.setTimeout(() => {
-          state.uploadStatusTimer = null;
-          refreshUploadedFileStatus().catch((error) => {
-            handleError('File status refresh failed', error);
-          });
-        }, delayMs);
-      }
-
-      async function refreshUploadedFileStatus({ autoPreview = true } = {}) {
-        if (!state.latestUploadId) {
-          return null;
-        }
-        const payload = await apiRequest(`/api/vector/file/status?upload_id=${encodeURIComponent(state.latestUploadId)}`);
-        recordUploadState(payload);
-        const status = payload.status || {};
-        if (
-          payload.source_type === 'image' &&
-          payload.raster_overlay &&
-          state.vectorPreview &&
-          !state.vectorPreview.preview &&
-          previewRequestOrigin(state.vectorPreview) === 'file'
-        ) {
-          state.vectorPreview.commitRequest = payload.commit_request || state.vectorPreview.commitRequest;
-          state.vectorPreview.basePlacement = clonePlacement(
-            (payload.commit_request && payload.commit_request.placement) || state.vectorPreview.basePlacement
-          );
-          if (state.vectorPreview.rasterOverlay) {
-            state.vectorPreview.rasterOverlay.bounds = payload.raster_overlay.bounds;
-            state.vectorPreview.rasterOverlay.imageSize = payload.raster_overlay.image_size || state.vectorPreview.rasterOverlay.imageSize;
-          } else {
-            state.vectorPreview.rasterOverlay = buildRasterOverlay(
-              null,
-              payload.raster_overlay
-            );
-          }
-        }
-        refreshUiState({ redrawBoard: true });
-        if (status.state === 'ready') {
-          stopUploadStatusPolling();
-          if (
-            autoPreview &&
-            (!state.vectorPreview || !state.vectorPreview.preview || previewRequestOrigin(state.vectorPreview) === 'file')
-          ) {
-            await previewUploadedFile();
-          }
-          return payload;
-        }
-        if (status.state === 'error') {
-          stopUploadStatusPolling();
-          throw new Error(status.message || 'Background preprocessing failed.');
-        }
-        scheduleUploadStatusPoll();
-        return payload;
-      }
-
       async function uploadAndPreviewFile(file) {
-        stopUploadStatusPolling();
-        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal Upload + Preview flow.');
-        const form = new FormData();
-        form.append('file', file);
-        const payload = await apiRequest('/api/draw/file', {
-          method: 'POST',
-          body: form,
-        });
-        if (dom.sketchPreviewBox) {
-          dom.sketchPreviewBox.classList.remove('active');
+        await previewSketchCenterlineFile(file);
+      }
+
+      function readFilePreviewSettings() {
+        const settings = {
+          optimization_preset: String(dom.sketchOptimizationPreset.value || 'detail'),
+          preview_geometry_mode: String(dom.sketchPreviewGeometry.value || 'smooth_curves'),
+          fit_to_safe_area: Boolean(dom.sketchFitSafe.checked),
+          optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
+          max_image_dim: Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000)))),
+          curve_tolerance_px: Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0)),
+          margin_m: Number(dom.sketchMargin.value || 0.05),
+          min_component_area_px: Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2))),
+          line_sensitivity: Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0))),
+          min_stroke_length_px: Math.max(0, Number(dom.sketchMinStroke.value || 1)),
+          merge_gap_px: Math.max(0, Number(dom.sketchMergeGap.value || 0)),
+          simplify_epsilon_px: Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25)),
+          scale_percent: Math.max(1, Number(dom.sketchScalePercent.value || 100)),
+          preserve_tiny_details: Boolean(dom.sketchPreserveTiny && dom.sketchPreserveTiny.checked),
+          minimum_drawable_feature_m: Math.max(0.0005, Number(dom.sketchTinySizeMm.value || 4.5) / 1000),
+          tiny_detail_candidate_max_feature_m: Math.max(0.0001, Number(dom.sketchTinyCandidateMm.value || 3.4) / 1000),
+          tiny_detail_expand_mode: 'micro_cross',
+        };
+        if (dom.sketchCenterX.value.trim() !== '') {
+          settings.center_x_m = Number(dom.sketchCenterX.value);
         }
-        recordUploadState(payload);
-        if (payload.source_type === 'image' && payload.raster_overlay) {
-          const imageUrl = URL.createObjectURL(file);
-          applyRasterPreview(payload.source_type || 'image', payload, imageUrl, { origin: 'file' });
+        if (dom.sketchCenterY.value.trim() !== '') {
+          settings.center_y_m = Number(dom.sketchCenterY.value);
         }
-        const status = payload.status || {};
-        if (status.state === 'ready') {
-          await previewUploadedFile();
-          return;
-        }
-        setNotice('warning', 'File uploaded', status.message || 'Preview is being prepared in the background.');
-        pushFeed('File uploaded and queued for background preprocessing.', 'info');
-        scheduleUploadStatusPoll();
-        refreshUiState({ redrawBoard: true });
+        return settings;
       }
 
       async function previewSketchCenterlineFile(file) {
         if (!file) {
-          setSketchPreviewInlineStatus('error', 'Choose a PNG or JPG sketch first.');
-          throw new Error('Choose a PNG or JPG sketch first.');
-        }
-        const name = String(file.name || '').toLowerCase();
-        const type = String(file.type || '').toLowerCase();
-        const isSketchImage = type === 'image/png' || type === 'image/jpeg' || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg');
-        if (!isSketchImage) {
-          setSketchPreviewInlineStatus('error', 'Sketch Centerline preview accepts PNG or JPG files.');
-          throw new Error('Sketch Centerline preview accepts PNG or JPG files.');
+          setSketchPreviewInlineStatus('error', 'Choose an SVG or raster image first.');
+          throw new Error('Choose an SVG or raster image first.');
         }
         stopUploadStatusPolling();
-        setSketchPreviewInlineStatus('loading', 'Vectorizing sketch...');
+        setSketchPreviewInlineStatus('loading', 'Generating executable preview...');
         const form = new FormData();
         form.append('file', file);
-        form.append('optimization_preset', String(dom.sketchOptimizationPreset.value || 'detail'));
-        form.append('preview_geometry_mode', String(dom.sketchPreviewGeometry.value || 'smooth_curves'));
-        form.append('fit_to_safe_area', dom.sketchFitSafe.checked ? 'true' : 'false');
-        form.append('max_image_dim', String(Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000))))));
-        form.append('curve_tolerance_px', String(Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0))));
-        form.append('margin_m', String(Number(dom.sketchMargin.value || 0.05)));
-        form.append('min_component_area_px', String(Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2)))));
-        form.append('line_sensitivity', String(Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0)))));
-        form.append('min_stroke_length_px', String(Math.max(0, Number(dom.sketchMinStroke.value || 1))));
-        form.append('merge_gap_px', String(Math.max(0, Number(dom.sketchMergeGap.value || 0))));
-        form.append('simplify_epsilon_px', String(Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25))));
-        form.append('scale_percent', String(Math.max(1, Number(dom.sketchScalePercent.value || 100))));
-        if (dom.sketchCenterX.value.trim() !== '') {
-          form.append('center_x_m', String(Number(dom.sketchCenterX.value)));
-        }
-        if (dom.sketchCenterY.value.trim() !== '') {
-          form.append('center_y_m', String(Number(dom.sketchCenterY.value)));
-        }
-        const payload = await apiRequest('/api/sketch-centerline/preview', {
+        form.append('input_type', 'auto');
+        form.append('settings_json', JSON.stringify(readFilePreviewSettings()));
+        const payload = await apiRequest('/api/preview', {
           method: 'POST',
           body: form,
         });
-        applySketchCenterlinePreview(payload);
-      }
-
-      async function drawSketchCenterlinePreview() {
-        if (!state.sketchPreviewId) {
-          throw new Error('No Sketch Centerline preview_id is available. Run Preview as Sketch Centerline first.');
-        }
-        await ensureMode('draw');
-        const payload = await apiRequest('/api/sketch-centerline/draw', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            preview_id: state.sketchPreviewId,
-            optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
-          }),
+        recordUploadState({
+          ok: true,
+          source_type: payload.source_type || payload.input_type || 'file',
+          upload: { original_filename: file.name },
+          status: { state: 'ready', message: 'Executable preview ready.' },
         });
-        const primitiveCount = Number(payload.primitive_count || 0);
-        const commandCount = Number(payload.canonical_command_count || 0);
-        const optimization = payload.optimization || {};
-        const travelReduction = Number(optimization.travel_reduction_m);
-        const geometryMode = payload.preview_geometry_mode === 'polyline'
-          ? 'Polyline Debug'
-          : 'Smooth Curves';
-        const optimizedText = payload.optimized
-          ? `optimized · travel reduction ${Number.isFinite(travelReduction) ? travelReduction.toFixed(3) : '--'} m`
-          : 'not optimized';
-        const publishStatus = `Sketch draw published from full cached ${geometryMode} canonical plan · ${commandCount} commands · ${primitiveCount} primitives · ${optimizedText} · preview ${payload.preview_id || state.sketchPreviewId}.`;
-        clearSketchBoardWorkspacePreviewAfterDraw(`${publishStatus} Sketch preview cleared; showing live robot drawing/trail.`);
-        setNotice('success', 'Sketch draw started', `Published cached ${geometryMode} plan through the existing draw executor.`);
-        pushFeed(`Sketch Centerline draw published (${geometryMode}).`, 'success');
-        refreshRuntime().catch(() => {});
-        return payload;
-      }
-
-      function buildUploadPayload() {
-        if (!state.latestUploadId) {
-          throw new Error('No uploaded file is available yet.');
+        if (payload.pipeline_mode === 'sketch_centerline') {
+          applySketchCenterlinePreview(payload);
+        } else {
+          applyVectorPreview(payload.source_type || payload.input_type || 'file', payload, { origin: 'file', boardVisible: true });
         }
-        return Object.assign({}, state.uploadCommitDefaults || {}, {
-          upload_id: state.latestUploadId,
-          placement: readPlacement(),
-        });
       }
 
       async function previewUploadedFile() {
-        stopUploadStatusPolling();
-        resetSketchDrawState('Draw Sketch Preview is unavailable for the normal file preview flow.');
-        const payload = await apiRequest('/api/vector/file/preview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildUploadPayload()),
-        });
-        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults;
-        state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType;
-        state.latestUploadStatus = {
-          state: 'ready',
-          stage: 'ready',
-          progress: 1,
-          message: 'Vector preview is ready.',
-        };
-        if (dom.sketchPreviewBox) {
-          dom.sketchPreviewBox.classList.remove('active');
-        }
-        applyVectorPreview(payload.source_type || 'image', payload, { origin: 'file', boardVisible: true });
+        const file = dom.fileInput.files && dom.fileInput.files[0];
+        await uploadAndPreviewFile(file);
       }
 
-      async function commitUploadedFile() {
-        stopUploadStatusPolling();
+      async function drawUploadedFile() {
+        if (!state.currentPreviewId || state.previewDirty) {
+          throw new Error('Generate Preview again before drawing.');
+        }
         await ensureMode('draw');
-        const payload = await apiRequest('/api/vector/file/commit', {
+        const payload = await apiRequest('/api/draw', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildUploadPayload()),
+          body: JSON.stringify({
+            preview_id: state.currentPreviewId,
+          }),
         });
-        state.uploadCommitDefaults = payload.commit_request || state.uploadCommitDefaults;
         state.latestUploadSourceType = payload.source_type || state.latestUploadSourceType;
         state.latestUploadStatus = {
           state: 'ready',
-          stage: 'committed',
+          stage: 'drawing',
           progress: 1,
           message: 'Drawing started.',
         };
-        applyVectorPreview(payload.source_type || 'image', payload, { origin: 'file', boardVisible: true });
-        clearVectorPreview(false);
         clearNotice();
-        pushFeed('Uploaded file committed through draw mode.', 'success');
+        hideBoardPreviewAfterDraw(`Draw published from cached preview ${payload.preview_id}. Board preview hidden so the robot trail is visible.`);
+        pushFeed('Uploaded file draw published from cached preview.', 'success');
       }
 
       function handleError(prefix, error) {
@@ -4132,10 +4137,10 @@
       [dom.placementX, dom.placementY, dom.placementScale].forEach((input) => {
         input.addEventListener('input', () => {
           state.placementTouched = true;
+          markPreviewSettingsChanged();
           if (previewIsBoardVisible()) {
             try {
               updatePreviewPlacement(readPlacement(), { syncInputs: false });
-              schedulePreviewRefresh();
             } catch (_error) {
               // Ignore partial numeric edits until inputs become valid again.
             }
@@ -4143,8 +4148,53 @@
         });
       });
 
+      dom.textInput.addEventListener('input', () => {
+        if (state.currentInput === 'text') {
+          markPreviewSettingsChanged();
+        }
+      });
+
+      dom.svgInput.addEventListener('input', () => {
+        if (state.currentInput === 'svg') {
+          markPreviewSettingsChanged();
+        }
+      });
+
+      [
+        dom.sketchOptimizationPreset,
+        dom.sketchPreviewGeometry,
+        dom.sketchFitSafe,
+        dom.sketchOptimizeDraw,
+        dom.sketchPreserveTiny,
+        dom.sketchTinySizeMm,
+        dom.sketchTinyCandidateMm,
+        dom.sketchMaxImageDim,
+        dom.sketchCurveTolerance,
+        dom.sketchMargin,
+        dom.sketchMinComponent,
+        dom.sketchLineSensitivity,
+        dom.sketchMinStroke,
+        dom.sketchMergeGap,
+        dom.sketchSimplifyEpsilon,
+        dom.sketchScalePercent,
+        dom.sketchCenterX,
+        dom.sketchCenterY,
+      ].forEach((input) => {
+        input.addEventListener('input', () => {
+          if (state.currentPipelineMode === 'sketch_centerline' || state.activeTool === 'file') {
+            markPreviewSettingsChanged();
+          }
+        });
+        input.addEventListener('change', () => {
+          if (state.currentPipelineMode === 'sketch_centerline' || state.activeTool === 'file') {
+            markPreviewSettingsChanged();
+          }
+        });
+      });
+
       dom.fileInput.addEventListener('change', () => {
-        resetSketchDrawState('Draw Sketch Preview is unavailable until this file is previewed as Sketch Centerline.');
+        markPreviewSettingsChanged();
+        resetSketchDrawState('Draw is unavailable until Generate Preview runs for this file.');
         refreshUiState();
       });
 
@@ -4161,9 +4211,13 @@
         pushFeed('Placement reset for the active tool.', 'info');
       });
 
-      dom.clearPreviewBtn.addEventListener('click', () => {
-        clearVectorPreview(true);
-        clearNotice();
+      dom.clearPreviewBtn.addEventListener('click', async () => {
+        try {
+          await clearCurrentPreview();
+          clearNotice();
+        } catch (error) {
+          handleError('Clear preview failed', error);
+        }
       });
 
       dom.clearTrailBtn.addEventListener('click', clearTrail);
@@ -4177,29 +4231,18 @@
       });
 
       dom.textSubmitBtn.addEventListener('click', async () => {
-        const text = dom.textInput.value.trim();
-        if (!text) {
-          handleError('Text commit failed', new Error('Enter text before sending.'));
-          return;
-        }
         try {
-          await commitText(text);
+          await drawText();
         } catch (error) {
-          handleError('Text commit failed', error);
-        }
-      });
-
-      dom.textHelloBtn.addEventListener('click', async () => {
-        dom.textInput.value = 'HELLO';
-        try {
-          await commitText('HELLO');
-        } catch (error) {
-          handleError('Quick HELLO failed', error);
+          handleError('Text draw failed', error);
         }
       });
 
       dom.textClearBtn.addEventListener('click', () => {
         dom.textInput.value = '';
+        if (state.currentInput === 'text') {
+          markPreviewSettingsChanged();
+        }
       });
 
       dom.svgPreviewBtn.addEventListener('click', async () => {
@@ -4212,14 +4255,17 @@
 
       dom.svgSubmitBtn.addEventListener('click', async () => {
         try {
-          await commitSvg();
+          await drawSvg();
         } catch (error) {
-          handleError('SVG commit failed', error);
+          handleError('SVG draw failed', error);
         }
       });
 
       dom.svgClearBtn.addEventListener('click', () => {
         dom.svgInput.value = '';
+        if (state.currentInput === 'svg') {
+          markPreviewSettingsChanged();
+        }
       });
 
       dom.fileUploadBtn.addEventListener('click', async () => {
@@ -4229,63 +4275,15 @@
           return;
         }
         try {
-          await uploadAndPreviewFile(file);
-        } catch (error) {
-          handleError('File upload failed', error);
-        }
-      });
-
-      dom.filePreviewBtn.addEventListener('click', async () => {
-        try {
-          await previewUploadedFile();
-        } catch (error) {
-          handleError('File preview failed', error);
-        }
-      });
-
-      dom.sketchPreviewBtn.addEventListener('click', async () => {
-        const file = dom.fileInput.files && dom.fileInput.files[0];
-        state.sketchPreviewBusy = true;
-        dom.sketchPreviewBtn.textContent = 'Previewing...';
-        refreshUiState();
-        try {
           await previewSketchCenterlineFile(file);
         } catch (error) {
-          const message = error && error.message ? error.message : 'Unknown sketch preview error';
-          setSketchPreviewInlineStatus('error', message);
-          handleError('Sketch Centerline preview failed', error);
-        } finally {
-          state.sketchPreviewBusy = false;
-          dom.sketchPreviewBtn.textContent = 'Preview as Sketch Centerline';
-          refreshUiState();
-        }
-      });
-
-      dom.sketchDrawBtn.addEventListener('click', async () => {
-        state.sketchDrawBusy = true;
-        dom.sketchDrawBtn.textContent = 'Drawing...';
-        setSketchDrawStatus('Publishing cached Sketch Centerline preview through the existing draw executor...');
-        refreshUiState();
-        try {
-          await drawSketchCenterlinePreview();
-        } catch (error) {
-          const message = error && error.message ? error.message : 'Unknown sketch draw error';
-          if (/expired|unknown|preview_id/i.test(message)) {
-            resetSketchDrawState('Sketch preview expired or is no longer available. Preview the sketch again before drawing.');
-          } else {
-            setSketchDrawStatus(`Sketch draw failed: ${message}`);
-          }
-          handleError('Draw Sketch Preview failed', error);
-        } finally {
-          state.sketchDrawBusy = false;
-          dom.sketchDrawBtn.textContent = 'Draw Sketch Preview';
-          refreshUiState();
+          handleError('Generate preview failed', error);
         }
       });
 
       dom.sketchOpenSvgBtn.addEventListener('click', () => {
         if (!state.sketchPreviewUrl) {
-          handleError('Open SVG preview failed', new Error('No Sketch Centerline SVG preview is available.'));
+          handleError('Open preview failed', new Error('No executable preview is available.'));
           return;
         }
         window.open(state.sketchPreviewUrl, '_blank', 'noopener,noreferrer');
@@ -4293,22 +4291,24 @@
 
       dom.sketchDownloadSvgBtn.addEventListener('click', () => {
         if (!state.sketchPreviewUrl) {
-          handleError('Download SVG preview failed', new Error('No Sketch Centerline SVG preview is available.'));
+          handleError('Download preview failed', new Error('No executable preview is available.'));
           return;
         }
         const anchor = document.createElement('a');
         anchor.href = state.sketchPreviewUrl;
-        anchor.download = 'sketch-centerline-preview.svg';
+        anchor.download = 'execution-preview.svg';
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
       });
 
-      dom.fileCommitBtn.addEventListener('click', async () => {
+      dom.sketchDownloadMetricsBtn.addEventListener('click', downloadCurrentMetrics);
+
+      dom.fileDrawBtn.addEventListener('click', async () => {
         try {
-          await commitUploadedFile();
+          await drawUploadedFile();
         } catch (error) {
-          handleError('File commit failed', error);
+          handleError('Draw failed', error);
         }
       });
 
@@ -4369,97 +4369,108 @@
         schedulePreviewRefresh();
       }, { passive: false });
 
-      const ros = new ROSLIB.Ros({ url: WS_URL });
-
-      ros.on('connection', () => {
-        state.rosbridge = 'connected';
-        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connected', 'Rosbridge · connected');
-        if (state.reconnectTimer) {
-          clearTimeout(state.reconnectTimer);
-          state.reconnectTimer = null;
-        }
-      });
-
-      ros.on('error', () => {
+      if (typeof ROSLIB === 'undefined') {
         state.rosbridge = 'error';
-        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'error', 'Rosbridge · error');
-      });
+        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'error', 'Rosbridge · library missing');
+      } else {
+        try {
+          const ros = new ROSLIB.Ros({ url: WS_URL });
 
-      ros.on('close', () => {
-        state.rosbridge = 'disconnected';
-        setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'disconnected', 'Rosbridge · disconnected');
-        if (!state.reconnectTimer) {
-          state.reconnectTimer = window.setTimeout(() => {
-            state.reconnectTimer = null;
-            state.rosbridge = 'connecting';
-            setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connecting', 'Rosbridge · reconnecting');
-            ros.connect(WS_URL);
-          }, 3000);
-        }
-      });
+          ros.on('connection', () => {
+            state.rosbridge = 'connected';
+            setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connected', 'Rosbridge · connected');
+            if (state.reconnectTimer) {
+              clearTimeout(state.reconnectTimer);
+              state.reconnectTimer = null;
+            }
+          });
 
-      const boardInfoTopic = new ROSLIB.Topic({
-        ros,
-        name: TOPICS.boardInfo,
-        messageType: 'std_msgs/String',
-      });
-      boardInfoTopic.subscribe((msg) => {
-        const parsed = parseBoardInfo(msg.data);
-        if (parsed) {
-          state.board = parsed;
-          if (!state.placementTouched) {
-            syncPlacementDefaults(false);
-          }
-        }
-      });
+          ros.on('error', () => {
+            state.rosbridge = 'error';
+            setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'error', 'Rosbridge · error');
+          });
 
-      const robotPoseTopic = new ROSLIB.Topic({
-        ros,
-        name: TOPICS.robotPose,
-        messageType: 'geometry_msgs/Pose2D',
-      });
-      robotPoseTopic.subscribe((msg) => {
-        const x = safeNumber(msg.x);
-        const y = safeNumber(msg.y);
-        const theta = safeNumber(msg.theta);
-        if (x === null || y === null || theta === null) {
-          return;
-        }
-        state.robotPose = { x, y, theta };
-      });
+          ros.on('close', () => {
+            state.rosbridge = 'disconnected';
+            setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'disconnected', 'Rosbridge · disconnected');
+            if (!state.reconnectTimer) {
+              state.reconnectTimer = window.setTimeout(() => {
+                state.reconnectTimer = null;
+                state.rosbridge = 'connecting';
+                setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'connecting', 'Rosbridge · reconnecting');
+                ros.connect(WS_URL);
+              }, 3000);
+            }
+          });
 
-      const penPoseTopic = new ROSLIB.Topic({
-        ros,
-        name: TOPICS.penPose,
-        messageType: 'geometry_msgs/PointStamped',
-      });
-      penPoseTopic.subscribe((msg) => {
-        const x = safeNumber(msg.point && msg.point.x);
-        const y = safeNumber(msg.point && msg.point.y);
-        if (x === null || y === null) {
-          return;
-        }
-        state.penPose = { x, y };
-        if (state.penContact) {
-          appendTrailPoint({ x, y });
-        }
-      });
+          const boardInfoTopic = new ROSLIB.Topic({
+            ros,
+            name: TOPICS.boardInfo,
+            messageType: 'std_msgs/String',
+          });
+          boardInfoTopic.subscribe((msg) => {
+            const parsed = parseBoardInfo(msg.data);
+            if (parsed) {
+              state.board = parsed;
+              if (!state.placementTouched) {
+                syncPlacementDefaults(false);
+              }
+            }
+          });
 
-      const penContactTopic = new ROSLIB.Topic({
-        ros,
-        name: TOPICS.penContact,
-        messageType: 'std_msgs/Bool',
-      });
-      penContactTopic.subscribe((msg) => {
-        const nextContact = Boolean(msg.data);
-        if (state.penContact && !nextContact) {
-          endTrailSegment();
+          const robotPoseTopic = new ROSLIB.Topic({
+            ros,
+            name: TOPICS.robotPose,
+            messageType: 'geometry_msgs/Pose2D',
+          });
+          robotPoseTopic.subscribe((msg) => {
+            const x = safeNumber(msg.x);
+            const y = safeNumber(msg.y);
+            const theta = safeNumber(msg.theta);
+            if (x === null || y === null || theta === null) {
+              return;
+            }
+            state.robotPose = { x, y, theta };
+          });
+
+          const penPoseTopic = new ROSLIB.Topic({
+            ros,
+            name: TOPICS.penPose,
+            messageType: 'geometry_msgs/PointStamped',
+          });
+          penPoseTopic.subscribe((msg) => {
+            const x = safeNumber(msg.point && msg.point.x);
+            const y = safeNumber(msg.point && msg.point.y);
+            if (x === null || y === null) {
+              return;
+            }
+            state.penPose = { x, y };
+            if (state.penContact) {
+              appendTrailPoint({ x, y });
+            }
+          });
+
+          const penContactTopic = new ROSLIB.Topic({
+            ros,
+            name: TOPICS.penContact,
+            messageType: 'std_msgs/Bool',
+          });
+          penContactTopic.subscribe((msg) => {
+            const nextContact = Boolean(msg.data);
+            if (state.penContact && !nextContact) {
+              endTrailSegment();
+            }
+            state.penContact = nextContact;
+            if (nextContact && state.penPose && !state.activeTrailSegment) {
+              appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
+            }
+          });
+        } catch (error) {
+          state.rosbridge = 'error';
+          setStatusPill(dom.rosbridgePill, dom.rosbridgeText, 'error', 'Rosbridge · unavailable');
+          pushFeed(`Rosbridge setup failed: ${error.message || error}`, 'error');
         }
-        state.penContact = nextContact;
-        if (nextContact && state.penPose && !state.activeTrailSegment) {
-          appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
-        }
-      });
+      }
 
       function startRuntimePolling() {
         const poll = async () => {

@@ -50,10 +50,18 @@ The runtime path is:
 
 1. Browser/API input creates text, SVG, or image drawing requests.
 2. Python builds a `CanonicalPathPlan`.
-3. The backend exports a `PrimitivePathPlan` and publishes `/wall_climber/primitive_path_plan`.
-4. `wall_climber_draw_body/cable_draw_executor` samples the primitives, validates board and cable safety bounds, converts pen points to carriage center and legacy top-cable lengths, then publishes `/wall_climber/cable_setpoint`.
-5. `CableSupervisorPlugin` receives cable setpoints, uses `CableSetpoint.carriage_pose.x/y` as the board-space carriage center, computes four kinematic cable lengths, and applies the resulting pose to the Webots robot.
-6. `CableRobotPlugin` receives the same setpoint and controls the pen slide up/down state.
+3. Preview endpoints store that plan in a process-local preview cache and return
+   `preview_id` plus a stable `canonical_hash`.
+4. Draw-by-preview endpoints load the same cached plan, export a
+   `PrimitivePathPlan`, and publish `/wall_climber/primitive_path_plan`.
+5. `wall_climber_draw_body/cable_draw_executor` samples the primitives, validates board and cable safety bounds, converts pen points to carriage center and legacy top-cable lengths, then publishes `/wall_climber/cable_setpoint`.
+6. `CableSupervisorPlugin` receives cable setpoints, uses `CableSetpoint.carriage_pose.x/y` as the board-space carriage center, computes four kinematic cable lengths, and applies the resulting pose to the Webots robot.
+7. `CableRobotPlugin` receives the same setpoint and controls the pen slide up/down state.
+
+The current UI still exposes some compatibility commit actions while the
+interface is being migrated, but the backend preview contract is canonical-first:
+when a draw request includes `preview_id`, drawing does not rebuild from the
+original text, SVG, or image source.
 
 The supervisor plugin intentionally drives the simulation through a plugin-level cable model and pose application. This avoids implementing full cable physics or dynamics in this task.
 
