@@ -2528,6 +2528,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         simplify_epsilon_px: Optional[float] = Form(None),
         line_sensitivity: Optional[float] = Form(None),
         sketch_extraction_method: Optional[str] = Form(None),
+        skeleton_prune_px: Optional[float] = Form(None),
         vectorization_engine: Optional[str] = Form(None),
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
@@ -2601,6 +2602,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 field_name='line_sensitivity',
                 minimum=0.0,
                 maximum=0.95,
+            )
+            sketch_skeleton_prune_px = _coerce_float(
+                4.0 if skeleton_prune_px is None else skeleton_prune_px,
+                field_name='skeleton_prune_px',
+                minimum=0.0,
+                maximum=100.0,
             )
             sketch_extraction = str(sketch_extraction_method or 'adaptive').strip().lower()
             if sketch_extraction not in {'hysteresis_ink', 'otsu', 'adaptive'}:
@@ -2703,6 +2710,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'min_stroke_length_px': sketch_min_stroke_length_px,
                 'simplify_epsilon_px': sketch_simplify_epsilon_px,
                 'line_sensitivity': sketch_line_sensitivity,
+                'skeleton_prune_px': sketch_skeleton_prune_px,
                 'sketch_extraction_method': sketch_extraction,
                 'vectorization_engine': sketch_vectorization_engine,
                 'merge_gap_px': sketch_merge_gap_px,
@@ -2804,6 +2812,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     simplify_epsilon_px=sketch_simplify_epsilon_px,
                     line_sensitivity=sketch_line_sensitivity,
                     sketch_extraction_method=sketch_extraction,
+                    skeleton_prune_px=sketch_skeleton_prune_px,
                     merge_gap_px=sketch_merge_gap_px,
                     merge_max_angle_deg=sketch_merge_max_angle_deg,
                     optimization_preset=sketch_optimization_preset,
@@ -3364,6 +3373,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 simplify_epsilon_px=settings.get('simplify_epsilon_px'),
                 line_sensitivity=settings.get('line_sensitivity'),
                 sketch_extraction_method=settings.get('sketch_extraction_method'),
+                skeleton_prune_px=settings.get('skeleton_prune_px'),
                 vectorization_engine=settings.get('vectorization_engine'),
                 merge_gap_px=settings.get('merge_gap_px'),
                 merge_max_angle_deg=settings.get('merge_max_angle_deg'),
@@ -3451,6 +3461,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                         simplify_epsilon_px=settings.get('simplify_epsilon_px'),
                         line_sensitivity=settings.get('line_sensitivity'),
                         sketch_extraction_method=settings.get('sketch_extraction_method'),
+                        skeleton_prune_px=settings.get('skeleton_prune_px'),
                         vectorization_engine='internal_centerline',
                         merge_gap_px=settings.get('merge_gap_px'),
                         merge_max_angle_deg=settings.get('merge_max_angle_deg'),

@@ -1462,6 +1462,10 @@
                       <input id="sketch-min-stroke" type="number" min="0" step="0.5" value="1">
                     </div>
                     <div class="field">
+                      <label for="sketch-skeleton-prune">Skeleton Prune (px)</label>
+                      <input id="sketch-skeleton-prune" type="number" min="0" max="100" step="1" value="4">
+                    </div>
+                    <div class="field">
                       <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
                       <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="0">
                     </div>
@@ -1748,6 +1752,7 @@
         sketchMinComponent: document.getElementById('sketch-min-component'),
         sketchLineSensitivity: document.getElementById('sketch-line-sensitivity'),
         sketchMinStroke: document.getElementById('sketch-min-stroke'),
+        sketchSkeletonPrune: document.getElementById('sketch-skeleton-prune'),
         sketchMergeGap: document.getElementById('sketch-merge-gap'),
         sketchSimplifyEpsilon: document.getElementById('sketch-simplify-epsilon'),
         sketchScalePercent: document.getElementById('sketch-scale-percent'),
@@ -4223,6 +4228,9 @@
           settings.curve_tolerance_px = Math.max(0.05, Number(dom.sketchCurveTolerance.value || 1.0));
           settings.min_component_area_px = Math.max(1, Math.round(Number(dom.sketchMinComponent.value || 2)));
           settings.min_stroke_length_px = Math.max(0, Number(dom.sketchMinStroke.value || 1));
+          settings.skeleton_prune_px = String(dom.sketchOptimizationPreset.value || 'detail') === 'raw'
+            ? 0
+            : Math.max(0, Number(dom.sketchSkeletonPrune.value || 0));
           settings.merge_gap_px = Math.max(0, Number(dom.sketchMergeGap.value || 0));
           settings.simplify_epsilon_px = Math.max(0, Number(dom.sketchSimplifyEpsilon.value || 0.25));
           settings.tiny_detail_candidate_max_feature_m = Math.max(0.0001, Number(dom.sketchTinyCandidateMm.value || 3.4) / 1000);

@@ -67,6 +67,20 @@ def _gray_connected_line_image() -> numpy.ndarray:
     return gray
 
 
+def _skeleton_with_short_spur() -> numpy.ndarray:
+    skeleton = numpy.zeros((24, 32), dtype=numpy.uint8)
+    skeleton[12, 5:26] = 255
+    skeleton[9:12, 14] = 255
+    return skeleton
+
+
+def _skeleton_with_independent_short_stroke() -> numpy.ndarray:
+    skeleton = numpy.zeros((24, 32), dtype=numpy.uint8)
+    skeleton[12, 5:26] = 255
+    skeleton[4, 4:7] = 255
+    return skeleton
+
+
 def _perpendicular_nearby_image() -> bytes:
     image = numpy.full((110, 160, 3), 255, dtype=numpy.uint8)
     cv2.line(image, (20, 55), (78, 55), (0, 0, 0), 3, lineType=cv2.LINE_8)
@@ -146,6 +160,45 @@ def test_otsu_and_adaptive_extraction_methods_remain_available() -> None:
     assert int(numpy.count_nonzero(adaptive)) > 0
 
 
+def test_skeleton_pruning_removes_short_connected_spur() -> None:
+    skeleton = _skeleton_with_short_spur()
+
+    pruned, metadata = sketch_centerline._prune_skeleton_spurs(
+        skeleton,
+        max_branch_length_px=4.0,
+    )
+
+    assert metadata['skeleton_spurs_pruned'] >= 1
+    assert int(numpy.count_nonzero(pruned > 0)) < int(numpy.count_nonzero(skeleton > 0))
+    assert pruned[10, 14] == 0
+    assert pruned[12, 14] > 0
+
+
+def test_skeleton_pruning_preserves_independent_short_stroke() -> None:
+    skeleton = _skeleton_with_independent_short_stroke()
+
+    pruned, metadata = sketch_centerline._prune_skeleton_spurs(
+        skeleton,
+        max_branch_length_px=4.0,
+    )
+
+    assert metadata['skeleton_spurs_pruned'] == 0
+    assert int(numpy.count_nonzero(pruned > 0)) == int(numpy.count_nonzero(skeleton > 0))
+    assert pruned[4, 5] > 0
+
+
+def test_skeleton_prune_zero_preserves_original_skeleton() -> None:
+    skeleton = _skeleton_with_short_spur()
+
+    pruned, metadata = sketch_centerline._prune_skeleton_spurs(
+        skeleton,
+        max_branch_length_px=0.0,
+    )
+
+    assert metadata['skeleton_spurs_pruned'] == 0
+    assert numpy.array_equal(pruned, skeleton)
+
+
 def test_timing_metadata_exists_and_is_non_negative() -> None:
     plan = vectorize_sketch_image_to_plan(
         _line_image(),
@@ -161,6 +214,7 @@ def test_timing_metadata_exists_and_is_non_negative() -> None:
         'threshold_time_ms',
         'cleanup_time_ms',
         'skeleton_time_ms',
+        'skeleton_prune_time_ms',
         'trace_time_ms',
         'simplify_time_ms',
         'merge_time_ms',
@@ -171,6 +225,30 @@ def test_timing_metadata_exists_and_is_non_negative() -> None:
     assert expected.issubset(timing.keys())
     for key in expected:
         assert timing[key] >= 0.0
+
+
+def test_skeleton_pruning_metadata_exists_in_vectorized_plan() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+    )
+
+    assert plan.metadata['skeleton_prune_px'] == pytest.approx(4.0)
+    assert plan.metadata['skeleton_pixels_before_prune'] >= plan.metadata['skeleton_pixels_after_prune']
+    assert plan.metadata['skeleton_spurs_pruned'] >= 0
+
+
+def test_raw_preset_disables_skeleton_pruning_by_default() -> None:
+    plan = vectorize_sketch_image_to_plan(
+        _line_image(),
+        board_width_m=2.0,
+        board_height_m=1.0,
+        optimization_preset='raw',
+    )
+
+    assert plan.metadata['skeleton_prune_px'] == pytest.approx(0.0)
+    assert plan.metadata['skeleton_spurs_pruned'] == 0
 
 
 def test_max_image_dim_affects_processed_image_size() -> None:

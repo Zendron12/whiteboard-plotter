@@ -67,6 +67,7 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
             'optimization_preset': 'custom',
             'margin_m': '0.1',
             'line_sensitivity': '0.35',
+            'skeleton_prune_px': '3',
             'min_stroke_length_px': '1.5',
             'merge_gap_px': '5.0',
             'merge_max_angle_deg': '75',
@@ -89,6 +90,8 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['metrics']['stroke_count'] == payload['stroke_count']
     assert payload['metadata']['optimization_preset'] == 'custom'
     assert payload['metadata']['line_sensitivity'] == 0.35
+    assert payload['metadata']['skeleton_prune_px'] == 3.0
+    assert payload['metadata']['skeleton_pixels_before_prune'] >= payload['metadata']['skeleton_pixels_after_prune']
     assert payload['metadata']['min_stroke_length_px'] == 1.5
     assert payload['metadata']['merge_gap_px'] == 5.0
     assert payload['metadata']['merge_max_angle_deg'] == 75.0

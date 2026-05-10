@@ -26,6 +26,11 @@ _NEIGHBORS = (
     (-1, 0),            (1, 0),
     (-1, 1),  (0, 1),   (1, 1),
 )
+_ORTHOGONAL_NEIGHBORS = (
+    (0, -1),
+    (-1, 0), (1, 0),
+    (0, 1),
+)
 
 
 Pixel = tuple[int, int]
@@ -336,13 +341,99 @@ def _skeletonize_foreground(binary: numpy.ndarray) -> tuple[numpy.ndarray, str]:
     )
 
 
-def _pixel_neighbors(pixel: Pixel, pixels: set[Pixel]) -> tuple[Pixel, ...]:
+def _pixel_neighbors_with_offsets(pixel: Pixel, pixels: set[Pixel], offsets: tuple[tuple[int, int], ...]) -> tuple[Pixel, ...]:
     x, y = pixel
     return tuple(
         (x + dx, y + dy)
-        for dx, dy in _NEIGHBORS
+        for dx, dy in offsets
         if (x + dx, y + dy) in pixels
     )
+
+
+def _pixel_neighbors(pixel: Pixel, pixels: set[Pixel]) -> tuple[Pixel, ...]:
+    return _pixel_neighbors_with_offsets(pixel, pixels, _NEIGHBORS)
+
+
+def _prune_skeleton_spurs(
+    skeleton: numpy.ndarray,
+    *,
+    max_branch_length_px: float,
+    max_passes: int = 8,
+) -> tuple[numpy.ndarray, dict[str, int | float]]:
+    before_pixels = int(numpy.count_nonzero(skeleton > 0))
+    threshold = max(0.0, float(max_branch_length_px))
+    if before_pixels == 0 or threshold <= 0.0:
+        return skeleton.astype(numpy.uint8), {
+            'skeleton_prune_px': threshold,
+            'skeleton_pixels_before_prune': before_pixels,
+            'skeleton_pixels_after_prune': before_pixels,
+            'skeleton_spurs_pruned': 0,
+            'skeleton_prune_passes': 0,
+        }
+
+    ys, xs = numpy.nonzero(skeleton > 0)
+    pixels = {(int(x), int(y)) for y, x in zip(ys.tolist(), xs.tolist())}
+    spurs_pruned = 0
+    passes = 0
+
+    for _pass_index in range(max(1, int(max_passes))):
+        neighbor_map = {
+            pixel: _pixel_neighbors_with_offsets(pixel, pixels, _ORTHOGONAL_NEIGHBORS)
+            for pixel in pixels
+        }
+        endpoints = [pixel for pixel, neighbors in neighbor_map.items() if len(neighbors) == 1]
+        to_remove: set[Pixel] = set()
+
+        for endpoint in sorted(endpoints, key=lambda pixel: (pixel[1], pixel[0])):
+            if endpoint in to_remove or endpoint not in pixels:
+                continue
+            path: list[Pixel] = [endpoint]
+            previous: Pixel | None = None
+            current = endpoint
+            branch_length = 0.0
+            ended_at_junction = False
+
+            while True:
+                current_neighbors = neighbor_map.get(current, ())
+                degree = len(current_neighbors)
+                if current != endpoint and degree != 2:
+                    ended_at_junction = degree >= 3
+                    break
+                candidates = tuple(neighbor for neighbor in current_neighbors if neighbor != previous)
+                if len(candidates) != 1:
+                    break
+                next_pixel = candidates[0]
+                branch_length += math.hypot(
+                    float(next_pixel[0] - current[0]),
+                    float(next_pixel[1] - current[1]),
+                )
+                path.append(next_pixel)
+                previous, current = current, next_pixel
+                if branch_length > threshold:
+                    break
+
+            if ended_at_junction and branch_length <= threshold and len(path) > 1:
+                to_remove.update(path[:-1])
+                spurs_pruned += 1
+
+        if not to_remove:
+            break
+        pixels.difference_update(to_remove)
+        passes += 1
+        if not pixels:
+            break
+
+    pruned = numpy.zeros_like(skeleton, dtype=numpy.uint8)
+    for x, y in pixels:
+        pruned[y, x] = 255
+    after_pixels = int(numpy.count_nonzero(pruned > 0))
+    return pruned, {
+        'skeleton_prune_px': threshold,
+        'skeleton_pixels_before_prune': before_pixels,
+        'skeleton_pixels_after_prune': after_pixels,
+        'skeleton_spurs_pruned': int(spurs_pruned),
+        'skeleton_prune_passes': int(passes),
+    }
 
 
 def _edge_key(first: Pixel, second: Pixel) -> tuple[Pixel, Pixel]:
@@ -902,6 +993,7 @@ def vectorize_sketch_image_to_plan(
     simplify_epsilon_px: float = 0.25,
     line_sensitivity: float = 0.0,
     sketch_extraction_method: str = 'adaptive',
+    skeleton_prune_px: float | None = None,
     merge_gap_px: float = 0.0,
     merge_max_angle_deg: float = 20.0,
     optimization_preset: str = 'detail',
@@ -933,6 +1025,10 @@ def vectorize_sketch_image_to_plan(
     effective_merge_max_angle_deg = float(optimization_settings['merge_max_angle_deg'])
     merge_enabled = bool(optimization_settings['merge_enabled'])
     resolved_preset = str(optimization_settings['optimization_preset'])
+    if skeleton_prune_px is None:
+        effective_skeleton_prune_px = 0.0 if resolved_preset == 'raw' else 4.0
+    else:
+        effective_skeleton_prune_px = max(0.0, float(skeleton_prune_px))
 
     stage_started = time.perf_counter()
     gray, original_size, source_path = _decode_grayscale(image_bytes_or_path)
@@ -964,6 +1060,13 @@ def vectorize_sketch_image_to_plan(
     stage_started = time.perf_counter()
     skeleton, skeleton_backend = _skeletonize_foreground(cleaned_binary)
     mark(stage_started, 'skeleton_time_ms')
+
+    stage_started = time.perf_counter()
+    skeleton, skeleton_prune_metadata = _prune_skeleton_spurs(
+        skeleton,
+        max_branch_length_px=effective_skeleton_prune_px,
+    )
+    mark(stage_started, 'skeleton_prune_time_ms')
 
     stage_started = time.perf_counter()
     raw_strokes = _trace_skeleton_pixels(
@@ -1044,6 +1147,7 @@ def vectorize_sketch_image_to_plan(
         'effective_simplify_epsilon_px': effective_simplify_epsilon_px,
         'effective_merge_gap_px': effective_merge_gap_px,
         'effective_merge_max_angle_deg': effective_merge_max_angle_deg,
+        'skeleton_prune_px': effective_skeleton_prune_px,
         'foreground_pixel_count': int(numpy.count_nonzero(binary)),
         'cleaned_foreground_pixel_count': int(numpy.count_nonzero(cleaned_binary)),
         'skeleton_pixel_count': int(numpy.count_nonzero(skeleton)),
@@ -1062,6 +1166,7 @@ def vectorize_sketch_image_to_plan(
         'warnings': tuple(warnings),
         **threshold_metadata,
         **component_metadata,
+        **skeleton_prune_metadata,
         **placement_metadata,
     }
     return DrawingPathPlan(

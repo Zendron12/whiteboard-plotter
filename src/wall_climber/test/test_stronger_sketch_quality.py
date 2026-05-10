@@ -39,6 +39,7 @@ def test_advanced_numeric_fields_hidden_until_custom_or_debug() -> None:
     for field_id in (
         'sketch-min-component',
         'sketch-min-stroke',
+        'sketch-skeleton-prune',
         'sketch-merge-gap',
         'sketch-simplify-epsilon',
         'sketch-curve-tolerance',
@@ -67,6 +68,8 @@ def test_line_art_default_uses_adaptive_extraction_and_moderate_sensitivity() ->
     assert 'value="hysteresis_ink"' not in primary_select
     assert "option.textContent = 'Hysteresis Ink (Experimental)';" in html
     assert 'id="sketch-line-sensitivity" type="number" min="0" max="0.95" step="0.05" value="0.35"' in html
+    assert 'id="sketch-skeleton-prune" type="number" min="0" max="100" step="1" value="4"' in html
+    assert 'settings.skeleton_prune_px' in html
 
 
 def test_color_line_art_method_replaces_opencv_main_flow() -> None:
