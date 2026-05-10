@@ -35,6 +35,7 @@ def test_tiny_detail_expands_to_micro_cross_geometry() -> None:
         minimum_drawable_feature_m=0.004,
         candidate_max_feature_m=0.002,
         expand_mode='micro_cross',
+        context_radius_m=None,
         bounds={'x_min': 0.0, 'x_max': 6.3, 'y_min': 0.0, 'y_max': 3.0},
     )
 
@@ -69,3 +70,34 @@ def test_tiny_detail_preservation_can_be_disabled() -> None:
     assert result.plan is plan
     assert result.metrics['preserve_tiny_details'] is False
     assert result.metrics['tiny_details_expanded'] == 0
+
+
+def test_isolated_tiny_noise_can_be_skipped_by_context_radius() -> None:
+    tiny_start = (0.2, 0.2)
+    tiny_end = (0.2003, 0.2002)
+    plan = CanonicalPathPlan(
+        frame='board',
+        theta_ref=0.0,
+        commands=(
+            TravelMove(start=(0.1, 0.1), end=tiny_start),
+            PenDown(),
+            LineSegment(start=tiny_start, end=tiny_end),
+            PenUp(),
+            TravelMove(start=tiny_end, end=(2.0, 2.0)),
+            PenDown(),
+            LineSegment(start=(2.0, 2.0), end=(2.4, 2.0)),
+            PenUp(),
+        ),
+    )
+
+    result = expand_tiny_details_in_canonical_plan(
+        plan,
+        minimum_drawable_feature_m=0.004,
+        candidate_max_feature_m=0.002,
+        context_radius_m=0.08,
+    )
+
+    assert result.plan is plan
+    assert result.metrics['tiny_details_detected'] == 1
+    assert result.metrics['tiny_details_expanded'] == 0
+    assert result.metrics['tiny_details_skipped_as_isolated'] == 1

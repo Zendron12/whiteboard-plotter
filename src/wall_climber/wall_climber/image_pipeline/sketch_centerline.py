@@ -144,7 +144,7 @@ def _border_pixels(gray: numpy.ndarray) -> numpy.ndarray:
     return numpy.concatenate((gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]))
 
 
-def _threshold_foreground(gray: numpy.ndarray, *, line_sensitivity: float) -> tuple[numpy.ndarray, dict[str, object]]:
+def _otsu_foreground(gray: numpy.ndarray, *, line_sensitivity: float) -> tuple[numpy.ndarray, dict[str, object]]:
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     threshold, _unused = cv2.threshold(
         blurred,
@@ -171,6 +171,121 @@ def _threshold_foreground(gray: numpy.ndarray, *, line_sensitivity: float) -> tu
         'foreground_polarity': 'dark_on_light' if dark_foreground else 'light_on_dark',
         'border_median': border_median,
     }
+
+
+def _background_flattened_grayscale(gray: numpy.ndarray) -> numpy.ndarray:
+    height, width = gray.shape[:2]
+    max_kernel = max(3, min(61, min(height, width) // 8))
+    kernel_size = max_kernel if max_kernel % 2 == 1 else max_kernel - 1
+    if kernel_size < 3:
+        return gray.copy()
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    flattened = gray.astype(numpy.int16) + (255 - background.astype(numpy.int16))
+    return numpy.clip(flattened, 0, 255).astype(numpy.uint8)
+
+
+def _hysteresis_ink_foreground(
+    gray: numpy.ndarray,
+    *,
+    line_sensitivity: float,
+) -> tuple[numpy.ndarray, dict[str, object]]:
+    flattened = _background_flattened_grayscale(gray)
+    normalized = _normalize_grayscale(flattened)
+    blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
+    border_median = float(numpy.median(_border_pixels(blurred)))
+    dark_on_light = border_median >= 128.0
+    inkness = (255 - blurred) if dark_on_light else blurred
+    nonzero = inkness[inkness > 0]
+    if nonzero.size == 0:
+        fallback, metadata = _otsu_foreground(gray, line_sensitivity=line_sensitivity)
+        metadata['threshold_method'] = 'hysteresis_ink_fallback_otsu'
+        metadata['hysteresis_fallback_reason'] = 'empty_inkness'
+        return fallback, metadata
+
+    sensitivity = max(0.0, min(0.95, float(line_sensitivity)))
+    strong_percentile = float(numpy.percentile(nonzero, 88.0))
+    weak_percentile = float(numpy.percentile(nonzero, 62.0))
+    strong_threshold = max(24.0, strong_percentile) * (1.0 - 0.32 * sensitivity)
+    weak_threshold = max(8.0, min(weak_percentile, strong_threshold * 0.55)) * (1.0 - 0.42 * sensitivity)
+    strong_threshold = max(10.0, min(255.0, float(strong_threshold)))
+    weak_threshold = max(4.0, min(strong_threshold, float(weak_threshold)))
+
+    strong = (inkness >= strong_threshold).astype(numpy.uint8)
+    weak = (inkness >= weak_threshold).astype(numpy.uint8)
+    strong_count = int(numpy.count_nonzero(strong))
+    if strong_count == 0:
+        fallback, metadata = _otsu_foreground(gray, line_sensitivity=line_sensitivity)
+        metadata['threshold_method'] = 'hysteresis_ink_fallback_otsu'
+        metadata['hysteresis_fallback_reason'] = 'no_strong_ink'
+        metadata['strong_ink_threshold'] = float(strong_threshold)
+        metadata['weak_ink_threshold'] = float(weak_threshold)
+        return fallback, metadata
+
+    kernel = numpy.ones((3, 3), dtype=numpy.uint8)
+    keep = strong.copy()
+    for _iteration in range(64):
+        expanded = cv2.dilate(keep, kernel, iterations=1)
+        expanded = numpy.logical_and(expanded > 0, weak > 0).astype(numpy.uint8)
+        if numpy.array_equal(expanded, keep):
+            break
+        keep = expanded
+    closed = cv2.morphologyEx((keep * 255).astype(numpy.uint8), cv2.MORPH_CLOSE, kernel, iterations=1)
+    return closed.astype(numpy.uint8), {
+        'threshold_method': 'hysteresis_ink',
+        'threshold_value': float(weak_threshold),
+        'effective_threshold_value': float(weak_threshold),
+        'strong_ink_threshold': float(strong_threshold),
+        'weak_ink_threshold': float(weak_threshold),
+        'line_sensitivity': sensitivity,
+        'foreground_polarity': 'dark_on_light' if dark_on_light else 'light_on_dark',
+        'border_median': border_median,
+        'strong_ink_pixel_count': strong_count,
+        'weak_ink_pixel_count': int(numpy.count_nonzero(weak)),
+        'connected_ink_pixel_count': int(numpy.count_nonzero(closed)),
+    }
+
+
+def _adaptive_foreground(gray: numpy.ndarray, *, line_sensitivity: float) -> tuple[numpy.ndarray, dict[str, object]]:
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    border_median = float(numpy.median(_border_pixels(blurred)))
+    dark_foreground = border_median >= 128.0
+    block_size = max(15, min(61, (min(gray.shape[:2]) // 16) | 1))
+    sensitivity = max(0.0, min(0.95, float(line_sensitivity)))
+    c_value = max(1.0, 9.0 - (6.0 * sensitivity))
+    threshold_type = cv2.THRESH_BINARY_INV if dark_foreground else cv2.THRESH_BINARY
+    binary = cv2.adaptiveThreshold(
+        blurred,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        threshold_type,
+        int(block_size),
+        float(c_value),
+    )
+    return binary.astype(numpy.uint8), {
+        'threshold_method': 'adaptive',
+        'adaptive_block_size': int(block_size),
+        'adaptive_c_value': float(c_value),
+        'line_sensitivity': sensitivity,
+        'foreground_polarity': 'dark_on_light' if dark_foreground else 'light_on_dark',
+        'border_median': border_median,
+    }
+
+
+def _threshold_foreground(
+    gray: numpy.ndarray,
+    *,
+    line_sensitivity: float,
+    sketch_extraction_method: str = 'adaptive',
+) -> tuple[numpy.ndarray, dict[str, object]]:
+    method = str(sketch_extraction_method or 'adaptive').strip().lower()
+    if method == 'hysteresis_ink':
+        return _hysteresis_ink_foreground(gray, line_sensitivity=line_sensitivity)
+    if method == 'otsu':
+        return _otsu_foreground(gray, line_sensitivity=line_sensitivity)
+    if method == 'adaptive':
+        return _adaptive_foreground(gray, line_sensitivity=line_sensitivity)
+    raise ValueError("sketch_extraction_method must be one of: hysteresis_ink, otsu, adaptive.")
 
 
 def _remove_small_components(binary: numpy.ndarray, *, min_component_area_px: int) -> tuple[numpy.ndarray, dict[str, int]]:
@@ -786,6 +901,7 @@ def vectorize_sketch_image_to_plan(
     min_stroke_length_px: float = 1.0,
     simplify_epsilon_px: float = 0.25,
     line_sensitivity: float = 0.0,
+    sketch_extraction_method: str = 'adaptive',
     merge_gap_px: float = 0.0,
     merge_max_angle_deg: float = 20.0,
     optimization_preset: str = 'detail',
@@ -834,6 +950,7 @@ def vectorize_sketch_image_to_plan(
     binary, threshold_metadata = _threshold_foreground(
         normalized_gray,
         line_sensitivity=float(line_sensitivity),
+        sketch_extraction_method=sketch_extraction_method,
     )
     mark(stage_started, 'threshold_time_ms')
 
@@ -916,6 +1033,7 @@ def vectorize_sketch_image_to_plan(
         'resize_scale': float(resize_scale),
         'max_image_dim': int(max_image_dim),
         'min_component_area_px': int(min_component_area_px),
+        'sketch_extraction_method': str(sketch_extraction_method or 'adaptive').strip().lower(),
         'optimization_preset': resolved_preset,
         'merge_enabled': merge_enabled,
         'min_stroke_length_px': effective_min_stroke_length_px,

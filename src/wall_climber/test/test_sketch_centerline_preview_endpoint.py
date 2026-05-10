@@ -106,7 +106,10 @@ def test_sketch_centerline_preview_endpoint_accepts_png_upload() -> None:
     assert payload['metadata']['max_image_dim'] == 1000
     assert payload['metadata']['timing']['curve_fit_time_ms'] >= 0.0
     assert payload['metadata']['line_primitive_count'] >= 1
-    assert 'effective_threshold_value' in payload['metadata']
+    assert payload['metadata']['sketch_extraction_method'] == 'adaptive'
+    assert payload['metadata']['threshold_method'] == 'adaptive'
+    assert 'adaptive_block_size' in payload['metadata']
+    assert 'adaptive_c_value' in payload['metadata']
     assert 'timing' in payload['metadata']
     assert 'merge_count' in payload['metadata']
     assert 'removed_short_stroke_count' in payload['metadata']
@@ -291,6 +294,6 @@ def test_sketch_centerline_preview_endpoint_rejects_invalid_image_bytes() -> Non
         files={'file': ('bad.png', b'not an image', 'image/png')},
     )
 
-    assert response.status_code == 422
-    assert 'decode' in response.json()['detail']
+    assert response.status_code == 400
+    assert 'Unable to decode uploaded image' in response.json()['detail']
     assert runtime.node.publish_count == 0

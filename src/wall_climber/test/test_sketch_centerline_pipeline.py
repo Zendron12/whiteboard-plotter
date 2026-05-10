@@ -59,6 +59,14 @@ def _short_detail_image() -> bytes:
     return _encode_png(image)
 
 
+def _gray_connected_line_image() -> numpy.ndarray:
+    gray = numpy.full((80, 140), 255, dtype=numpy.uint8)
+    cv2.line(gray, (15, 40), (70, 40), 0, 3, lineType=cv2.LINE_8)
+    cv2.line(gray, (70, 40), (120, 40), 185, 3, lineType=cv2.LINE_8)
+    cv2.rectangle(gray, (10, 10), (12, 12), 185, -1)
+    return gray
+
+
 def _perpendicular_nearby_image() -> bytes:
     image = numpy.full((110, 160, 3), 255, dtype=numpy.uint8)
     cv2.line(image, (20, 55), (78, 55), (0, 0, 0), 3, lineType=cv2.LINE_8)
@@ -103,6 +111,39 @@ def test_black_line_image_produces_board_drawing_path_plan() -> None:
         'skimage.morphology.skeletonize',
         'cv2.ximgproc.thinning',
     }
+    assert plan.metadata['sketch_extraction_method'] == 'adaptive'
+    assert plan.metadata['threshold_method'] == 'adaptive'
+
+
+def test_hysteresis_ink_preserves_connected_faint_lines_and_rejects_isolated_noise() -> None:
+    binary, metadata = sketch_centerline._threshold_foreground(
+        _gray_connected_line_image(),
+        line_sensitivity=0.2,
+        sketch_extraction_method='hysteresis_ink',
+    )
+
+    assert metadata['threshold_method'] == 'hysteresis_ink'
+    assert binary[40, 95] > 0
+    assert binary[11, 11] == 0
+
+
+def test_otsu_and_adaptive_extraction_methods_remain_available() -> None:
+    gray = _gray_connected_line_image()
+    otsu, otsu_metadata = sketch_centerline._threshold_foreground(
+        gray,
+        line_sensitivity=0.0,
+        sketch_extraction_method='otsu',
+    )
+    adaptive, adaptive_metadata = sketch_centerline._threshold_foreground(
+        gray,
+        line_sensitivity=0.0,
+        sketch_extraction_method='adaptive',
+    )
+
+    assert otsu_metadata['threshold_method'] == 'otsu'
+    assert adaptive_metadata['threshold_method'] == 'adaptive'
+    assert int(numpy.count_nonzero(otsu)) > 0
+    assert int(numpy.count_nonzero(adaptive)) > 0
 
 
 def test_timing_metadata_exists_and_is_non_negative() -> None:
@@ -216,6 +257,7 @@ def test_line_sensitivity_preserves_faint_gray_lines() -> None:
         board_height_m=1.0,
         margin_m=0.1,
         line_sensitivity=0.0,
+        sketch_extraction_method='otsu',
         merge_gap_px=0.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
@@ -226,6 +268,7 @@ def test_line_sensitivity_preserves_faint_gray_lines() -> None:
         board_height_m=1.0,
         margin_m=0.1,
         line_sensitivity=0.6,
+        sketch_extraction_method='otsu',
         merge_gap_px=0.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
@@ -258,6 +301,7 @@ def test_detail_preset_does_not_merge_nearby_broken_strokes() -> None:
         board_width_m=2.0,
         board_height_m=1.0,
         optimization_preset='detail',
+        sketch_extraction_method='otsu',
     )
 
     assert len(unmerged.strokes) == 2
@@ -275,6 +319,7 @@ def test_custom_preset_can_merge_broken_line_segments() -> None:
         merge_gap_px=20.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
+        sketch_extraction_method='otsu',
     )
 
     assert len(plan.strokes) == 1
@@ -296,6 +341,7 @@ def test_merge_cap_returns_warning(monkeypatch) -> None:
         merge_gap_px=20.0,
         min_stroke_length_px=1.0,
         simplify_epsilon_px=0.0,
+        sketch_extraction_method='otsu',
     )
 
     assert plan.metadata['merge_count'] == 0
@@ -309,18 +355,21 @@ def test_fast_preset_reduces_strokes_compared_to_detail() -> None:
         board_width_m=2.0,
         board_height_m=1.0,
         optimization_preset='detail',
+        sketch_extraction_method='otsu',
     )
     balanced = vectorize_sketch_image_to_plan(
         _short_detail_image(),
         board_width_m=2.0,
         board_height_m=1.0,
         optimization_preset='balanced',
+        sketch_extraction_method='otsu',
     )
     fast = vectorize_sketch_image_to_plan(
         _short_detail_image(),
         board_width_m=2.0,
         board_height_m=1.0,
         optimization_preset='fast',
+        sketch_extraction_method='otsu',
     )
 
     assert len(detail.strokes) >= len(balanced.strokes)

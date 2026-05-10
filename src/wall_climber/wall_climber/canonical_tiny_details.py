@@ -53,6 +53,17 @@ def _distance(a: Point2D, b: Point2D) -> float:
     return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
 
 
+def _bounds_gap_m(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    first_x_min, first_x_max, first_y_min, first_y_max = first
+    second_x_min, second_x_max, second_y_min, second_y_max = second
+    dx = max(0.0, max(second_x_min - first_x_max, first_x_min - second_x_max))
+    dy = max(0.0, max(second_y_min - first_y_max, first_y_min - second_y_max))
+    return math.hypot(dx, dy)
+
+
 def _arc_point(segment: ArcSegment, ratio: float) -> Point2D:
     angle = float(segment.start_angle_rad) + float(segment.sweep_angle_rad) * float(ratio)
     return (
@@ -245,6 +256,7 @@ def expand_tiny_details_in_canonical_plan(
     candidate_max_feature_m: float | None = None,
     expand_mode: str = 'micro_cross',
     max_expansions: int = 512,
+    context_radius_m: float | None = 0.08,
     bounds: dict[str, float] | None = None,
 ) -> TinyDetailExpansion:
     """Expand very small drawable units into geometry the robot can physically draw."""
@@ -256,6 +268,11 @@ def expand_tiny_details_in_canonical_plan(
         else min_feature * 0.75
     )
     expansion_limit = max(0, int(max_expansions))
+    context_radius = (
+        None
+        if context_radius_m is None
+        else max(0.0, float(context_radius_m))
+    )
     normalized_mode = str(expand_mode or 'micro_cross').strip().lower()
     if normalized_mode not in {'micro_cross', 'micro_loop'}:
         raise ValueError("expand_mode must be 'micro_cross' or 'micro_loop'.")
@@ -266,32 +283,54 @@ def expand_tiny_details_in_canonical_plan(
         'minimum_drawable_feature_m': float(min_feature),
         'tiny_detail_candidate_max_feature_m': float(candidate_limit),
         'tiny_detail_max_expansions': int(expansion_limit),
+        'tiny_detail_context_radius_m': None if context_radius is None else float(context_radius),
         'tiny_details_detected': 0,
         'tiny_details_preserved': 0,
         'tiny_details_expanded': 0,
         'tiny_details_skipped_by_limit': 0,
+        'tiny_details_skipped_as_isolated': 0,
         'tiny_details_expansion_added_commands': 0,
     }
     if not preserve:
         return TinyDetailExpansion(plan=plan, metrics=metrics)
 
     chunks = _split_units(tuple(plan.commands))
+    unit_geometries = {
+        index: _unit_geometry(chunk)
+        for index, chunk in enumerate(chunks)
+        if isinstance(chunk, _DrawUnit)
+    }
+    context_geometries = tuple(
+        geometry
+        for geometry in unit_geometries.values()
+        if geometry is not None and geometry.max_span_m > candidate_limit
+    )
     rebuilt: list[CanonicalCommand] = []
     expanded_count = 0
     detected_count = 0
+    isolated_count = 0
 
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         if isinstance(chunk, _PassthroughChunk):
             rebuilt.extend(chunk.commands)
             continue
 
-        geometry = _unit_geometry(chunk)
+        geometry = unit_geometries.get(index)
         is_tiny = geometry is not None and geometry.max_span_m <= candidate_limit
         if not is_tiny or geometry is None:
             rebuilt.extend(chunk.commands)
             continue
 
         detected_count += 1
+        if context_radius is not None and context_geometries:
+            nearest_context_gap = min(
+                _bounds_gap_m(geometry.bounds, context_geometry.bounds)
+                for context_geometry in context_geometries
+            )
+            if nearest_context_gap > context_radius:
+                isolated_count += 1
+                rebuilt.extend(chunk.commands)
+                continue
         if expanded_count >= expansion_limit:
             rebuilt.extend(chunk.commands)
             continue
@@ -308,13 +347,15 @@ def expand_tiny_details_in_canonical_plan(
 
     if expanded_count == 0:
         metrics['tiny_details_detected'] = int(detected_count)
-        metrics['tiny_details_skipped_by_limit'] = max(0, detected_count - expanded_count)
+        metrics['tiny_details_skipped_as_isolated'] = int(isolated_count)
+        metrics['tiny_details_skipped_by_limit'] = max(0, detected_count - isolated_count - expanded_count)
         return TinyDetailExpansion(plan=plan, metrics=metrics)
 
     metrics['tiny_details_detected'] = int(detected_count)
     metrics['tiny_details_preserved'] = int(expanded_count)
     metrics['tiny_details_expanded'] = int(expanded_count)
-    metrics['tiny_details_skipped_by_limit'] = max(0, detected_count - expanded_count)
+    metrics['tiny_details_skipped_as_isolated'] = int(isolated_count)
+    metrics['tiny_details_skipped_by_limit'] = max(0, detected_count - isolated_count - expanded_count)
     return TinyDetailExpansion(
         plan=CanonicalPathPlan(
             frame=plan.frame,

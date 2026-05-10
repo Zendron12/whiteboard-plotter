@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+import base64
 import hashlib
+import io
 import json
 import threading
 import time
@@ -123,9 +125,17 @@ from wall_climber.ingestion.upload_routing import (
     infer_uploaded_source_type,
 )
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
+from wall_climber.image_pipeline.color_to_lineart import convert_color_image_to_lineart
 from wall_climber.image_pipeline.curve_fit import drawing_path_plan_to_smooth_canonical
+from wall_climber.image_pipeline.input_detection import detect_raster_input_type
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.image_pipeline.types import DrawingPathPlan
+from wall_climber.image_pipeline.vectorizers.autotrace_centerline import (
+    vectorize_autotrace_centerline,
+)
+from wall_climber.image_pipeline.vectorizers.base import VectorizationEngineResult
+from wall_climber.image_pipeline.vectorizers.potrace_backend import vectorize_potrace_bw
+from wall_climber.image_pipeline.vectorizers.vtracer_backend import vectorize_vtracer_svg
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
@@ -1560,6 +1570,21 @@ def _validate_sketch_upload(upload: UploadFile, content: bytes) -> None:
         raise HTTPException(status_code=415, detail='sketch preview accepts PNG, JPG, or WebP uploads only')
 
 
+def _image_value_error_to_http(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    lowered = detail.lower()
+    if (
+        'could not be decoded' in lowered
+        or 'failed to decode' in lowered
+        or 'image payload is empty' in lowered
+    ):
+        return HTTPException(
+            status_code=400,
+            detail='Unable to decode uploaded image. Please upload a valid PNG, JPG, or WebP image.',
+        )
+    return HTTPException(status_code=422, detail=detail)
+
+
 def _drawing_plan_bounds(plan) -> dict[str, float]:
     points = [point for stroke in plan.strokes for point in stroke.points]
     if not points:
@@ -1798,11 +1823,35 @@ def _canonical_primitive_counts(plan: CanonicalPathPlan) -> dict[str, int]:
     line_count = sum(isinstance(command, LineSegment) for command in plan.commands)
     quadratic_count = sum(isinstance(command, QuadraticBezier) for command in plan.commands)
     cubic_count = sum(isinstance(command, CubicBezier) for command in plan.commands)
+    arc_count = sum(isinstance(command, ArcSegment) for command in plan.commands)
     return {
         'line_primitive_count': int(line_count),
         'quadratic_primitive_count': int(quadratic_count),
         'cubic_primitive_count': int(cubic_count),
-        'curve_primitive_count': int(quadratic_count + cubic_count),
+        'arc_primitive_count': int(arc_count),
+        'curve_primitive_count': int(quadratic_count + cubic_count + arc_count),
+    }
+
+
+def _canonical_geometry_metrics(plan: CanonicalPathPlan) -> dict[str, int]:
+    counts = _canonical_primitive_counts(plan)
+    return {
+        'line_count': int(counts['line_primitive_count']),
+        'quadratic_count': int(counts['quadratic_primitive_count']),
+        'cubic_count': int(counts['cubic_primitive_count']),
+        'arc_count': int(counts['arc_primitive_count']),
+        'total_curve_count': int(counts['curve_primitive_count']),
+    }
+
+
+def _executable_geometry_metrics(sampled_paths) -> dict[str, int]:
+    draw_paths = [sampled for sampled in sampled_paths if sampled.draw]
+    sampled_point_count = sum(len(sampled.points) for sampled in draw_paths)
+    sampled_segment_count = sum(max(0, len(sampled.points) - 1) for sampled in draw_paths)
+    return {
+        'draw_path_count': int(len(draw_paths)),
+        'sampled_point_count': int(sampled_point_count),
+        'sampled_segment_count': int(sampled_segment_count),
     }
 
 
@@ -2060,6 +2109,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             minimum=0,
             maximum=10_000,
         )
+        context_radius = _coerce_float(
+            setting_value('tiny_detail_context_radius_m', 0.08),
+            field_name='tiny_detail_context_radius_m',
+            minimum=0.0,
+            maximum=0.5,
+        )
         return {
             'eligible': bool(eligible),
             'preserve_tiny_details': bool(preserve),
@@ -2067,6 +2122,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             'tiny_detail_candidate_max_feature_m': float(candidate_max),
             'tiny_detail_expand_mode': expand_mode,
             'tiny_detail_max_expansions': int(max_expansions),
+            'tiny_detail_context_radius_m': float(context_radius),
         }
 
     def _build_executable_preview_payload(
@@ -2090,10 +2146,12 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 tiny_detail_policy['tiny_detail_candidate_max_feature_m']
             ),
             'tiny_detail_max_expansions': int(tiny_detail_policy['tiny_detail_max_expansions']),
+            'tiny_detail_context_radius_m': float(tiny_detail_policy['tiny_detail_context_radius_m']),
             'tiny_details_detected': 0,
             'tiny_details_preserved': 0,
             'tiny_details_expanded': 0,
             'tiny_details_skipped_by_limit': 0,
+            'tiny_details_skipped_as_isolated': 0,
             'tiny_details_expansion_added_commands': 0,
         }
         if bool(tiny_detail_policy['preserve_tiny_details']):
@@ -2107,6 +2165,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     ),
                     expand_mode=str(tiny_detail_policy['tiny_detail_expand_mode']),
                     max_expansions=int(tiny_detail_policy['tiny_detail_max_expansions']),
+                    context_radius_m=float(tiny_detail_policy['tiny_detail_context_radius_m']),
                     bounds=writable_bounds,
                 )
             except ValueError as exc:
@@ -2141,6 +2200,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         travel_path_count = sum(1 for sampled in sampled_paths if not sampled.draw)
         draw_sample_count = sum(len(sampled.points) for sampled in sampled_paths if sampled.draw)
         travel_sample_count = sum(len(sampled.points) for sampled in sampled_paths if not sampled.draw)
+        canonical_geometry = _canonical_geometry_metrics(executable_plan)
+        executable_geometry = _executable_geometry_metrics(sampled_paths)
         return {
             'executable_canonical_plan': executable_plan,
             'executable_canonical_hash': canonical_plan_hash(executable_plan),
@@ -2163,6 +2224,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'optimization_ms': float(optimization_ms),
                 'canonical_command_count': int(len(canonical_plan.commands)),
                 'executable_canonical_command_count': int(len(executable_plan.commands)),
+                'canonical_geometry': canonical_geometry,
+                'executable_geometry': executable_geometry,
                 'primitive_count': int(len(primitive_descriptor.get('primitives') or ())),
                 'draw_path_count': int(draw_path_count),
                 'travel_path_count': int(travel_path_count),
@@ -2443,6 +2506,19 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         payload = runtime.last_curve_fit_debug_snapshot()
         return JSONResponse(payload or {'available': False})
 
+    def _run_raster_vectorization_engine(engine_name: str, content: bytes) -> VectorizationEngineResult:
+        if engine_name == 'autotrace_centerline':
+            return vectorize_autotrace_centerline(content)
+        if engine_name == 'potrace_bw':
+            return vectorize_potrace_bw(content)
+        if engine_name == 'vtracer_svg':
+            return vectorize_vtracer_svg(content)
+        return VectorizationEngineResult(
+            engine_name=engine_name,
+            available=engine_name == 'internal_centerline',
+            warnings=(f'{engine_name} is handled by the internal preview path.' if engine_name == 'internal_centerline' else f'Unknown vectorization engine {engine_name}.',),
+        )
+
     async def preview_sketch_centerline(
         file: UploadFile = File(...),
         margin_m: Optional[float] = Form(None),
@@ -2451,6 +2527,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         min_stroke_length_px: Optional[float] = Form(None),
         simplify_epsilon_px: Optional[float] = Form(None),
         line_sensitivity: Optional[float] = Form(None),
+        sketch_extraction_method: Optional[str] = Form(None),
+        vectorization_engine: Optional[str] = Form(None),
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
         optimization_preset: Optional[str] = Form(None),
@@ -2467,10 +2545,19 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         tiny_detail_candidate_max_feature_m: Optional[float] = Form(None),
         tiny_detail_expand_mode: Optional[str] = Form(None),
         tiny_detail_max_expansions: Optional[int] = Form(None),
+        requested_input_type: Optional[str] = None,
+        color_lineart_method: Optional[str] = None,
+        color_to_sketch_method: Optional[str] = None,
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
             _validate_sketch_upload(file, content)
+            normalized_requested_input_type = str(requested_input_type or 'auto').strip().lower()
+            if normalized_requested_input_type not in {'auto', 'sketch_image', 'colored_image', 'image'}:
+                raise HTTPException(
+                    status_code=422,
+                    detail='input_type must be one of: auto, sketch_image, colored_image, image',
+                )
             sketch_fit_to_safe_area = _coerce_bool(
                 True if fit_to_safe_area is None else fit_to_safe_area,
                 field_name='fit_to_safe_area',
@@ -2510,11 +2597,42 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=10000.0,
             )
             sketch_line_sensitivity = _coerce_float(
-                0.0 if line_sensitivity is None else line_sensitivity,
+                0.35 if line_sensitivity is None else line_sensitivity,
                 field_name='line_sensitivity',
                 minimum=0.0,
                 maximum=0.95,
             )
+            sketch_extraction = str(sketch_extraction_method or 'adaptive').strip().lower()
+            if sketch_extraction not in {'hysteresis_ink', 'otsu', 'adaptive'}:
+                raise HTTPException(
+                    status_code=422,
+                    detail='sketch_extraction_method must be one of: hysteresis_ink, otsu, adaptive',
+                )
+            sketch_vectorization_engine = str(vectorization_engine or 'internal_centerline').strip().lower()
+            if sketch_vectorization_engine not in {
+                'internal_centerline',
+                'autotrace_centerline',
+                'potrace_bw',
+                'vtracer_svg',
+                'direct_svg',
+            }:
+                raise HTTPException(
+                    status_code=422,
+                    detail='vectorization_engine must be one of: internal_centerline, autotrace_centerline, potrace_bw, vtracer_svg, direct_svg',
+                )
+            if sketch_vectorization_engine == 'direct_svg':
+                raise HTTPException(
+                    status_code=422,
+                    detail='direct_svg is only valid for SVG input; raster uploads use internal_centerline or optional raster vectorizers',
+                )
+            sketch_color_method = str(color_lineart_method or color_to_sketch_method or 'auto_outline').strip().lower()
+            if sketch_color_method in {'opencv_pencil', 'opencv_edge'}:
+                sketch_color_method = 'opencv_edge_diagnostic'
+            if sketch_color_method not in {'auto_outline', 'simple_cartoon', 'opencv_edge_diagnostic'}:
+                raise HTTPException(
+                    status_code=422,
+                    detail='color_lineart_method must be one of: auto_outline, simple_cartoon, opencv_edge_diagnostic',
+                )
             sketch_merge_gap_px = _coerce_float(
                 0.0 if merge_gap_px is None else merge_gap_px,
                 field_name='merge_gap_px',
@@ -2585,6 +2703,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'min_stroke_length_px': sketch_min_stroke_length_px,
                 'simplify_epsilon_px': sketch_simplify_epsilon_px,
                 'line_sensitivity': sketch_line_sensitivity,
+                'sketch_extraction_method': sketch_extraction,
+                'vectorization_engine': sketch_vectorization_engine,
                 'merge_gap_px': sketch_merge_gap_px,
                 'merge_max_angle_deg': sketch_merge_max_angle_deg,
                 'optimization_preset': sketch_optimization_preset,
@@ -2596,6 +2716,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'center_y_m': sketch_center_y_m,
                 'fit_to_safe_area': sketch_fit_to_safe_area,
                 'optimize_stroke_order': sketch_optimize_stroke_order,
+                'requested_input_type': normalized_requested_input_type,
+                'color_lineart_method': sketch_color_method,
                 'preserve_tiny_details': preserve_tiny_details,
                 'minimum_drawable_feature_m': minimum_drawable_feature_m,
                 'tiny_detail_candidate_max_feature_m': tiny_detail_candidate_max_feature_m,
@@ -2603,9 +2725,76 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'tiny_detail_max_expansions': tiny_detail_max_expansions,
             }
             try:
+                detection = detect_raster_input_type(
+                    content,
+                    filename=str(file.filename or ''),
+                    content_type=str(file.content_type or ''),
+                    requested_input_type=normalized_requested_input_type,
+                )
+                effective_input_type = detection.input_type
+                pipeline_mode = (
+                    'local_outline_adaptive_centerline'
+                    if effective_input_type == 'colored_image'
+                    else 'sketch_centerline'
+                )
+                vectorization_content = content
+                color_lineart_metadata: dict[str, Any] = {}
+                color_lineart_preview: dict[str, Any] | None = None
+                color_lineart_warnings: tuple[str, ...] = ()
+                if effective_input_type == 'colored_image' and sketch_vectorization_engine == 'internal_centerline':
+                    color_lineart_result = convert_color_image_to_lineart(
+                        content,
+                        method=sketch_color_method,
+                        max_image_dim=sketch_max_image_dim,
+                    )
+                    vectorization_content = color_lineart_result.line_art_png
+                    color_lineart_metadata = dict(color_lineart_result.metadata)
+                    color_lineart_warnings = tuple(color_lineart_result.warnings)
+                    encoded_preview = base64.b64encode(color_lineart_result.line_art_png).decode('ascii')
+                    color_lineart_preview = {
+                        'mime_type': 'image/png',
+                        'data_url': f'data:image/png;base64,{encoded_preview}',
+                        'quality': color_lineart_metadata.get('color_lineart_quality'),
+                        'profile': color_lineart_metadata.get('color_lineart_profile'),
+                        'foreground_ratio': color_lineart_metadata.get('foreground_ratio'),
+                        'method': color_lineart_metadata.get('color_lineart_method'),
+                    }
+                sketch_parameters['input_type'] = effective_input_type
+                sketch_parameters['pipeline_mode'] = pipeline_mode
+                sketch_parameters['input_detection'] = detection.to_dict()
+                if sketch_vectorization_engine != 'internal_centerline':
+                    engine_result = _run_raster_vectorization_engine(sketch_vectorization_engine, content)
+                    if not engine_result.available:
+                        raise HTTPException(
+                            status_code=422,
+                            detail={
+                                'engine_name': engine_result.engine_name,
+                                'available': False,
+                                'warnings': list(engine_result.warnings),
+                            },
+                        )
+                    if engine_result.canonical_plan is None:
+                        raise HTTPException(
+                            status_code=422,
+                            detail={
+                                'engine_name': engine_result.engine_name,
+                                'available': True,
+                                'warnings': list(engine_result.warnings) or ['Vectorization engine did not return a CanonicalPathPlan.'],
+                            },
+                        )
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            'engine_name': engine_result.engine_name,
+                            'available': True,
+                            'warnings': list(engine_result.warnings) or [
+                                'External raster vectorizer is available, but board placement is not active for this engine yet.'
+                            ],
+                        },
+                    )
                 preview_started = time.perf_counter()
                 plan = vectorize_sketch_image_to_plan(
-                    content,
+                    vectorization_content,
                     board_width_m=float(shared.board.width),
                     board_height_m=float(shared.board.height),
                     margin_m=sketch_margin_m,
@@ -2614,6 +2803,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     min_stroke_length_px=sketch_min_stroke_length_px,
                     simplify_epsilon_px=sketch_simplify_epsilon_px,
                     line_sensitivity=sketch_line_sensitivity,
+                    sketch_extraction_method=sketch_extraction,
                     merge_gap_px=sketch_merge_gap_px,
                     merge_max_angle_deg=sketch_merge_max_angle_deg,
                     optimization_preset=sketch_optimization_preset,
@@ -2623,6 +2813,22 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     fit_bounds_m=sketch_fit_bounds,
                     validation_bounds_m=sketch_safe_bounds,
                 )
+                plan.metadata.update(
+                    {
+                        'requested_input_type': normalized_requested_input_type,
+                        'detected_input_type': effective_input_type,
+                        'input_detection_confidence': float(detection.confidence),
+                        'input_detection_reason': str(detection.reason),
+                        'input_detection': detection.to_dict(),
+                        'pipeline_mode': pipeline_mode,
+                    }
+                )
+                if color_lineart_metadata:
+                    plan.metadata['color_lineart'] = color_lineart_metadata
+                    plan.metadata.update(color_lineart_metadata)
+                    if color_lineart_warnings:
+                        existing_warnings = tuple(str(item) for item in plan.metadata.get('warnings') or ())
+                        plan.metadata['warnings'] = existing_warnings + color_lineart_warnings
                 curve_metadata: dict[str, Any] = {
                     'preview_geometry_mode': sketch_preview_geometry_mode,
                     'curve_tolerance_px': float(sketch_curve_tolerance_px),
@@ -2673,7 +2879,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             except RuntimeError as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
             except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc))
+                raise _image_value_error_to_http(exc)
 
             preview_id = uuid.uuid4().hex
             response_payload = _sketch_preview_response(
@@ -2686,15 +2892,25 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 use_smooth_svg=sketch_preview_geometry_mode == 'smooth_curves',
                 curve_metadata=curve_metadata,
             )
+            response_payload['detected_input_type'] = effective_input_type
+            response_payload['input_detection'] = detection.to_dict()
+            if color_lineart_preview:
+                response_payload['converted_lineart_preview'] = color_lineart_preview
             generic_entry = _store_preview(
                 preview_id=preview_id,
                 source_type='sketch_centerline',
                 canonical_plan=canonical_plan,
                 preview_payload=dict(response_payload.get('preview') or {}),
                 commit_request={'preview_id': preview_id},
-                input_type='sketch_image',
-                pipeline_mode='sketch_centerline',
-                source_hash=_content_hash(content),
+                input_type=effective_input_type,
+                pipeline_mode=pipeline_mode,
+                source_hash=_content_hash(
+                    {
+                        'original': _content_hash(content),
+                        'vectorized': _content_hash(vectorization_content),
+                        'input_type': effective_input_type,
+                    }
+                ),
                 settings=sketch_parameters,
                 metadata=dict(response_payload.get('metadata') or {}),
                 warnings=tuple(str(item) for item in response_payload.get('warnings') or ()),
@@ -3102,8 +3318,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             if upload is None or not hasattr(upload, 'read'):
                 raise HTTPException(status_code=422, detail='preview file upload requires a file field')
             requested_input_type = str(form.get('input_type') or 'auto').strip().lower()
-            if requested_input_type not in {'auto', 'sketch_image', 'image', 'svg'}:
-                raise HTTPException(status_code=422, detail='input_type must be one of: auto, sketch_image, image, svg')
+            if requested_input_type not in {'auto', 'sketch_image', 'colored_image', 'image', 'svg'}:
+                raise HTTPException(status_code=422, detail='input_type must be one of: auto, sketch_image, colored_image, image, svg')
             settings_json = form.get('settings_json')
             if settings_json in (None, ''):
                 settings = {}
@@ -3147,6 +3363,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 min_stroke_length_px=settings.get('min_stroke_length_px'),
                 simplify_epsilon_px=settings.get('simplify_epsilon_px'),
                 line_sensitivity=settings.get('line_sensitivity'),
+                sketch_extraction_method=settings.get('sketch_extraction_method'),
+                vectorization_engine=settings.get('vectorization_engine'),
                 merge_gap_px=settings.get('merge_gap_px'),
                 merge_max_angle_deg=settings.get('merge_max_angle_deg'),
                 optimization_preset=settings.get('optimization_preset'),
@@ -3163,6 +3381,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),
                 tiny_detail_expand_mode=settings.get('tiny_detail_expand_mode'),
                 tiny_detail_max_expansions=settings.get('tiny_detail_max_expansions'),
+                requested_input_type=requested_input_type,
+                color_lineart_method=settings.get('color_lineart_method'),
+                color_to_sketch_method=settings.get('color_to_sketch_method'),
             )
 
         raw = await _load_json_request(
@@ -3177,6 +3398,123 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         if input_type == 'svg':
             return _json_svg_preview_response(raw)
         raise HTTPException(status_code=422, detail='JSON preview input_type must be text or svg')
+
+    @app.post('/api/preview/compare')
+    async def compare_preview_methods(request: Request) -> JSONResponse:
+        content_type = str(request.headers.get('content-type') or '').lower()
+        if 'multipart/form-data' not in content_type:
+            raise HTTPException(status_code=415, detail='compare methods requires multipart/form-data')
+        form = await request.form()
+        upload = form.get('file')
+        if upload is None or not hasattr(upload, 'read'):
+            raise HTTPException(status_code=422, detail='compare methods requires a file field')
+        settings_json = form.get('settings_json')
+        settings: dict[str, Any] = {}
+        if settings_json not in (None, ''):
+            try:
+                settings = json.loads(str(settings_json))
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail=f'settings_json is invalid JSON: {exc}')
+            settings = _preview_settings(settings, name='compare methods request')
+        engines_raw = form.get('engines_json') or form.get('engines')
+        if engines_raw in (None, ''):
+            engines = ['internal_centerline', 'autotrace_centerline', 'potrace_bw', 'vtracer_svg']
+        else:
+            try:
+                parsed_engines = json.loads(str(engines_raw))
+            except json.JSONDecodeError:
+                parsed_engines = [item.strip() for item in str(engines_raw).split(',') if item.strip()]
+            if not isinstance(parsed_engines, list):
+                raise HTTPException(status_code=422, detail='engines must be a JSON list or comma-separated string')
+            engines = [str(item).strip().lower() for item in parsed_engines if str(item).strip()]
+        allowed_engines = {'internal_centerline', 'autotrace_centerline', 'potrace_bw', 'vtracer_svg'}
+        unknown = [engine for engine in engines if engine not in allowed_engines]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f'unknown vectorization engines: {", ".join(unknown)}')
+        content = await upload.read(_MAX_UPLOAD_BYTES + 1)
+        _validate_sketch_upload(upload, content)
+        results: list[dict[str, Any]] = []
+        for engine in engines:
+            if engine == 'internal_centerline':
+                upload_copy = UploadFile(
+                    filename=str(getattr(upload, 'filename', '') or 'compare.png'),
+                    file=io.BytesIO(content),
+                    content_type=str(getattr(upload, 'content_type', '') or 'image/png'),
+                )
+                try:
+                    response = await preview_sketch_centerline(
+                        file=upload_copy,
+                        margin_m=settings.get('margin_m'),
+                        max_image_dim=settings.get('max_image_dim'),
+                        min_component_area_px=settings.get('min_component_area_px'),
+                        min_stroke_length_px=settings.get('min_stroke_length_px'),
+                        simplify_epsilon_px=settings.get('simplify_epsilon_px'),
+                        line_sensitivity=settings.get('line_sensitivity'),
+                        sketch_extraction_method=settings.get('sketch_extraction_method'),
+                        vectorization_engine='internal_centerline',
+                        merge_gap_px=settings.get('merge_gap_px'),
+                        merge_max_angle_deg=settings.get('merge_max_angle_deg'),
+                        optimization_preset=settings.get('optimization_preset'),
+                        preview_geometry_mode=settings.get('preview_geometry_mode'),
+                        curve_tolerance_px=settings.get('curve_tolerance_px'),
+                        curve_tolerance_m=settings.get('curve_tolerance_m'),
+                        scale_percent=settings.get('scale_percent'),
+                        center_x_m=settings.get('center_x_m'),
+                        center_y_m=settings.get('center_y_m'),
+                        fit_to_safe_area=settings.get('fit_to_safe_area'),
+                        optimize_stroke_order=settings.get('optimize_stroke_order'),
+                        preserve_tiny_details=settings.get('preserve_tiny_details'),
+                        minimum_drawable_feature_m=settings.get('minimum_drawable_feature_m'),
+                        tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),
+                        tiny_detail_expand_mode=settings.get('tiny_detail_expand_mode'),
+                        tiny_detail_max_expansions=settings.get('tiny_detail_max_expansions'),
+                        requested_input_type=settings.get('input_type', 'auto'),
+                        color_lineart_method=settings.get('color_lineart_method'),
+                        color_to_sketch_method=settings.get('color_to_sketch_method'),
+                    )
+                except HTTPException as exc:
+                    results.append(
+                        {
+                            'engine_name': engine,
+                            'available': True,
+                            'warnings': [str(exc.detail)],
+                            'error': exc.detail,
+                        }
+                    )
+                    continue
+                payload = json.loads(response.body.decode('utf-8'))
+                metrics = dict(payload.get('metrics') or {})
+                results.append(
+                    {
+                        'engine_name': engine,
+                        'available': True,
+                        'warnings': list(payload.get('warnings') or ()),
+                        'preview_id': payload.get('preview_id'),
+                        'execution_preview_svg': payload.get('execution_preview_svg'),
+                        'primitive_hash': payload.get('primitive_hash'),
+                        'execution_hash': payload.get('execution_hash'),
+                        'canonical_geometry': metrics.get('canonical_geometry') or {},
+                        'executable_geometry': metrics.get('executable_geometry') or {},
+                        'draw_length_m': metrics.get('draw_length_m'),
+                        'travel_length_m': metrics.get('travel_length_m'),
+                        'estimated_draw_time_ms': metrics.get('estimated_draw_time_ms'),
+                        'metrics': metrics,
+                        'payload': payload,
+                    }
+                )
+                continue
+            engine_result = _run_raster_vectorization_engine(engine, content)
+            results.append(
+                {
+                    'engine_name': engine_result.engine_name,
+                    'available': bool(engine_result.available),
+                    'warnings': list(engine_result.warnings),
+                    'metrics': dict(engine_result.metrics),
+                    'has_canonical_plan': engine_result.canonical_plan is not None,
+                    'has_svg_output': bool(engine_result.svg_output),
+                }
+            )
+        return JSONResponse({'ok': True, 'results': results, 'active_preview_mutated': False})
 
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:

@@ -145,6 +145,18 @@ def _simple_line_art_png() -> bytes:
     return _encode_png(image)
 
 
+def _simple_colored_diagram_png() -> bytes:
+    image = numpy.full((160, 220, 3), (225, 245, 250), dtype=numpy.uint8)
+    cv2.rectangle(image, (16, 104), (110, 150), (215, 190, 130), -1)
+    cv2.rectangle(image, (16, 104), (110, 150), (0, 0, 0), 3, lineType=cv2.LINE_AA)
+    cv2.circle(image, (44, 42), 24, (0, 220, 255), -1)
+    cv2.circle(image, (44, 42), 24, (0, 0, 0), 3, lineType=cv2.LINE_AA)
+    cv2.ellipse(image, (150, 55), (42, 20), 0, 0, 360, (245, 245, 245), -1, lineType=cv2.LINE_AA)
+    cv2.ellipse(image, (150, 55), (42, 20), 0, 0, 360, (0, 0, 0), 3, lineType=cv2.LINE_AA)
+    cv2.line(image, (134, 95), (194, 138), (0, 0, 0), 3, lineType=cv2.LINE_AA)
+    return _encode_png(image)
+
+
 def _preview_svg(client: TestClient) -> dict:
     response = client.post(
         '/api/preview',
@@ -198,9 +210,51 @@ def _preview_image(client: TestClient, runtime: _FakeRuntime) -> dict:
     assert body['preview_id']
     assert body['canonical_hash']
     assert body['pipeline_mode'] == 'sketch_centerline'
+    assert body['metadata']['sketch_extraction_method'] == 'adaptive'
     assert body['primitive_hash']
     assert body['execution_hash']
     return body
+
+
+def _preview_colored_image(client: TestClient) -> dict:
+    payload = _simple_colored_diagram_png()
+    response = client.post(
+        '/api/preview',
+        files={'file': ('diagram.png', payload, 'image/png')},
+        data={
+            'input_type': 'colored_image',
+            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600,"color_lineart_method":"auto_outline"}',
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['preview_id']
+    assert body['pipeline_mode'] == 'local_outline_adaptive_centerline'
+    assert body['input_type'] == 'colored_image'
+    assert body['metadata']['color_lineart_method'] == 'auto_outline'
+    assert body['converted_lineart_preview']['data_url'].startswith('data:image/png;base64,')
+    assert body['primitive_hash']
+    assert body['execution_hash']
+    return body
+
+
+def test_auto_colored_raster_uses_local_outline_pipeline() -> None:
+    client, _runtime = _client_and_runtime()
+    response = client.post(
+        '/api/preview',
+        files={'file': ('diagram.png', _simple_colored_diagram_png(), 'image/png')},
+        data={
+            'input_type': 'auto',
+            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600,"color_lineart_method":"auto_outline"}',
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['input_type'] == 'colored_image'
+    assert body['pipeline_mode'] == 'local_outline_adaptive_centerline'
+    assert body['metadata']['input_detection']['input_type'] == 'colored_image'
+    assert body['converted_lineart_preview']['quality'] in {'good', 'noisy', 'complex'}
 
 
 def _preview_sketch(client: TestClient) -> dict:
@@ -219,6 +273,7 @@ def _preview_sketch(client: TestClient) -> dict:
     assert body['preview_id']
     assert body['canonical_hash']
     assert body['pipeline_mode'] == 'sketch_centerline'
+    assert body['metadata']['sketch_extraction_method'] == 'adaptive'
     assert body['primitive_hash']
     assert body['execution_hash']
     return body
@@ -300,6 +355,108 @@ def test_sketch_preview_draw_uses_same_cached_canonical_hash(monkeypatch) -> Non
     assert body['canonical_hash'] == preview['canonical_hash']
     assert body['preview_draw_hash_match'] is True
     assert runtime.node.publish_count == 1
+
+
+def test_colored_preview_uses_local_outline_and_draw_uses_cached_payload(monkeypatch) -> None:
+    client, runtime = _client_and_runtime()
+    preview = _preview_colored_image(client)
+
+    def _reject_color_conversion(*_args, **_kwargs):
+        raise AssertionError('draw must not rerun local outline conversion')
+
+    def _reject_vectorize(*_args, **_kwargs):
+        raise AssertionError('draw must not rerun sketch vectorization')
+
+    monkeypatch.setattr(web_server, 'convert_color_image_to_lineart', _reject_color_conversion)
+    monkeypatch.setattr(web_server, 'vectorize_sketch_image_to_plan', _reject_vectorize)
+
+    response = client.post('/api/draw', json={'preview_id': preview['preview_id']})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['primitive_hash'] == preview['primitive_hash']
+    assert body['execution_hash'] == preview['execution_hash']
+    assert body['preview_draw_hash_match'] is True
+    assert runtime.node.publish_count == 1
+
+
+def test_forced_sketch_image_bypasses_color_lineart_conversion(monkeypatch) -> None:
+    client, _runtime = _client_and_runtime()
+
+    def _reject_color_conversion(*_args, **_kwargs):
+        raise AssertionError('forced sketch_image must not call color conversion')
+
+    monkeypatch.setattr(web_server, 'convert_color_image_to_lineart', _reject_color_conversion)
+    response = client.post(
+        '/api/preview',
+        files={'file': ('diagram.png', _simple_colored_diagram_png(), 'image/png')},
+        data={
+            'input_type': 'sketch_image',
+            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600,"color_lineart_method":"auto_outline"}',
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['pipeline_mode'] == 'sketch_centerline'
+    assert body['input_type'] == 'sketch_image'
+    assert 'converted_lineart_preview' not in body
+
+
+def test_invalid_raster_upload_returns_clear_bad_request() -> None:
+    client, _runtime = _client_and_runtime()
+    response = client.post(
+        '/api/preview',
+        files={'file': ('bad.png', b'not-a-real-image', 'image/png')},
+        data={
+            'input_type': 'auto',
+            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600}',
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'Unable to decode uploaded image' in response.json()['detail']
+
+
+def test_preview_metrics_split_canonical_and_executable_geometry() -> None:
+    client, _runtime = _client_and_runtime()
+    preview = _preview_sketch(client)
+    metrics = preview['metrics']
+
+    assert 'canonical_geometry' in metrics
+    assert 'executable_geometry' in metrics
+    assert set(metrics['canonical_geometry']).issuperset(
+        {'line_count', 'quadratic_count', 'cubic_count', 'arc_count', 'total_curve_count'}
+    )
+    assert set(metrics['executable_geometry']).issuperset(
+        {'draw_path_count', 'sampled_point_count', 'sampled_segment_count'}
+    )
+    assert metrics['executable_geometry']['sampled_point_count'] == metrics['draw_sample_count']
+
+
+def test_compare_methods_returns_per_engine_results_without_selecting_active_preview() -> None:
+    client, _runtime = _client_and_runtime()
+
+    response = client.post(
+        '/api/preview/compare',
+        files={'file': ('line.png', _simple_line_art_png(), 'image/png')},
+        data={
+            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600}',
+            'engines_json': '["internal_centerline","autotrace_centerline"]',
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload['active_preview_mutated'] is False
+    results = payload['results']
+    assert [result['engine_name'] for result in results] == ['internal_centerline', 'autotrace_centerline']
+    assert results[0]['available'] is True
+    assert results[0]['preview_id']
+    assert results[0]['execution_preview_svg'].startswith('<svg')
+    assert 'canonical_geometry' in results[0]
+    assert 'executable_geometry' in results[0]
+    assert 'available' in results[1]
 
 
 def test_draw_with_preview_id_uses_cached_svg_without_rebuilding(monkeypatch) -> None:
