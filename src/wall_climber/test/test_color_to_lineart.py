@@ -66,3 +66,34 @@ def test_simple_cartoon_mode_still_returns_line_art() -> None:
     assert result.line_art_png
     assert result.metadata['color_lineart_method'] == 'simple_cartoon'
     assert _foreground_ratio(result.line_art_png) > 0.005
+
+
+def test_photo_diagram_edges_returns_canny_metadata_and_reasonable_foreground() -> None:
+    result = convert_color_image_to_lineart(
+        _cartoon_diagram_image(),
+        method='photo_diagram_edges',
+        max_image_dim=500,
+    )
+
+    assert result.line_art_png
+    assert result.metadata['color_lineart_method'] == 'photo_diagram_edges'
+    assert result.metadata['effective_color_lineart_method'] == 'photo_diagram_edges'
+    assert result.metadata['photo_diagram_preprocessing'] == 'lab_lightness_clahe_bilateral'
+    assert result.metadata['canny_lower_threshold'] < result.metadata['canny_upper_threshold']
+    assert result.metadata['edge_pixel_ratio'] > 0.0
+    ratio = _foreground_ratio(result.line_art_png)
+    assert 0.002 < ratio < 0.20
+
+
+def test_photo_diagram_edges_warns_for_complex_images_without_failing() -> None:
+    result = convert_color_image_to_lineart(
+        _complex_painted_image(),
+        method='photo_diagram_edges',
+        max_image_dim=500,
+    )
+
+    assert result.line_art_png
+    assert result.metadata['color_lineart_method'] == 'photo_diagram_edges'
+    assert result.metadata['color_lineart_quality'] in {'noisy', 'complex'}
+    assert result.metadata['removed_small_component_count'] >= 0
+    assert result.warnings

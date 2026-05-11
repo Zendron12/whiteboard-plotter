@@ -216,14 +216,17 @@ def _preview_image(client: TestClient, runtime: _FakeRuntime) -> dict:
     return body
 
 
-def _preview_colored_image(client: TestClient) -> dict:
+def _preview_colored_image(client: TestClient, *, color_lineart_method: str = 'auto_outline') -> dict:
     payload = _simple_colored_diagram_png()
     response = client.post(
         '/api/preview',
         files={'file': ('diagram.png', payload, 'image/png')},
         data={
             'input_type': 'colored_image',
-            'settings_json': '{"preview_geometry_mode":"polyline","max_image_dim":600,"color_lineart_method":"auto_outline"}',
+            'settings_json': (
+                '{"preview_geometry_mode":"polyline","max_image_dim":600,'
+                f'"color_lineart_method":"{color_lineart_method}"' + '}'
+            ),
         },
     )
     assert response.status_code == 200, response.text
@@ -231,7 +234,7 @@ def _preview_colored_image(client: TestClient) -> dict:
     assert body['preview_id']
     assert body['pipeline_mode'] == 'local_outline_adaptive_centerline'
     assert body['input_type'] == 'colored_image'
-    assert body['metadata']['color_lineart_method'] == 'auto_outline'
+    assert body['metadata']['color_lineart_method'] == color_lineart_method
     assert body['converted_lineart_preview']['data_url'].startswith('data:image/png;base64,')
     assert body['primitive_hash']
     assert body['execution_hash']
@@ -255,6 +258,25 @@ def test_auto_colored_raster_uses_local_outline_pipeline() -> None:
     assert body['pipeline_mode'] == 'local_outline_adaptive_centerline'
     assert body['metadata']['input_detection']['input_type'] == 'colored_image'
     assert body['converted_lineart_preview']['quality'] in {'good', 'noisy', 'complex'}
+
+
+def test_photo_diagram_edges_preview_contract_and_settings_hash() -> None:
+    client, _runtime = _client_and_runtime()
+    auto = _preview_colored_image(client, color_lineart_method='auto_outline')
+    photo_edges = _preview_colored_image(client, color_lineart_method='photo_diagram_edges')
+
+    assert photo_edges['metadata']['color_lineart_method'] == 'photo_diagram_edges'
+    assert photo_edges['metadata']['effective_color_lineart_method'] == 'photo_diagram_edges'
+    assert photo_edges['metadata']['canny_lower_threshold'] < photo_edges['metadata']['canny_upper_threshold']
+    assert photo_edges['metadata']['edge_pixel_ratio'] > 0
+    assert photo_edges['converted_lineart_preview']['method'] == 'photo_diagram_edges'
+    assert photo_edges['converted_lineart_preview']['metadata']['canny_lower_threshold'] < (
+        photo_edges['converted_lineart_preview']['metadata']['canny_upper_threshold']
+    )
+    assert photo_edges['metrics']['color_lineart']['color_lineart_method'] == 'photo_diagram_edges'
+    assert photo_edges['metrics']['color_lineart']['edge_pixel_ratio'] > 0
+    assert photo_edges['execution_preview_svg'].startswith('<svg')
+    assert photo_edges['settings_hash'] != auto['settings_hash']
 
 
 def _preview_sketch(client: TestClient) -> dict:

@@ -1378,6 +1378,7 @@
                     <label for="color-lineart-method">Color Line-Art Method</label>
                     <select id="color-lineart-method">
                       <option value="auto_outline" selected>Auto Outline (Recommended)</option>
+                      <option value="photo_diagram_edges">Photo / Diagram Edges</option>
                       <option value="simple_cartoon">Simple Cartoon / Diagram Outline</option>
                     </select>
                   </div>
@@ -1902,6 +1903,9 @@
         const metadata = payload.metadata || {};
         const method = metadata.color_lineart_method || (metadata.color_lineart && metadata.color_lineart.color_lineart_method);
         if (mode === 'local_outline_adaptive_centerline' || inputType === 'colored_image') {
+          if (method === 'photo_diagram_edges') {
+            return 'Photo / Diagram Edges → Adaptive Centerline';
+          }
           if (method === 'simple_cartoon') {
             return 'Simple Diagram Outline → Adaptive Centerline';
           }

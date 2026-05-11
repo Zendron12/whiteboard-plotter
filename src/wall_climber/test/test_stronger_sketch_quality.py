@@ -77,11 +77,13 @@ def test_color_line_art_method_replaces_opencv_main_flow() -> None:
 
     assert 'Color Line-Art Method' in html
     assert '<option value="auto_outline" selected>Auto Outline (Recommended)</option>' in html
+    assert '<option value="photo_diagram_edges">Photo / Diagram Edges</option>' in html
     assert '<option value="simple_cartoon">Simple Cartoon / Diagram Outline</option>' in html
     assert 'Color-to-Sketch Method' not in html
     assert 'OpenCV Pencil / Edge Sketch' not in html
     assert 'Colored images use local outline conversion before Adaptive Centerline.' in html
     assert "option.textContent = 'OpenCV Edge Diagnostic';" in html
+    assert 'Photo / Diagram Edges → Adaptive Centerline' in html
 
 
 def test_converted_line_art_preview_exists_before_executable_preview() -> None:

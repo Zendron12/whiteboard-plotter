@@ -2202,6 +2202,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         travel_sample_count = sum(len(sampled.points) for sampled in sampled_paths if not sampled.draw)
         canonical_geometry = _canonical_geometry_metrics(executable_plan)
         executable_geometry = _executable_geometry_metrics(sampled_paths)
+        source_metadata = dict(getattr(canonical_plan, 'metadata', {}) or {})
+        color_lineart_metrics = dict(source_metadata.get('color_lineart') or {})
         return {
             'executable_canonical_plan': executable_plan,
             'executable_canonical_hash': canonical_plan_hash(executable_plan),
@@ -2235,6 +2237,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'travel_length_m': _sampled_paths_length(sampled_paths, draw=False),
                 'bounds': _sampled_paths_bounds(sampled_paths),
                 'runtime_sampling_policy': _stable_payload(runtime_sampling_policy),
+                'color_lineart': color_lineart_metrics,
             },
         }
 
@@ -2635,10 +2638,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             sketch_color_method = str(color_lineart_method or color_to_sketch_method or 'auto_outline').strip().lower()
             if sketch_color_method in {'opencv_pencil', 'opencv_edge'}:
                 sketch_color_method = 'opencv_edge_diagnostic'
-            if sketch_color_method not in {'auto_outline', 'simple_cartoon', 'opencv_edge_diagnostic'}:
+            if sketch_color_method not in {'auto_outline', 'photo_diagram_edges', 'simple_cartoon', 'opencv_edge_diagnostic'}:
                 raise HTTPException(
                     status_code=422,
-                    detail='color_lineart_method must be one of: auto_outline, simple_cartoon, opencv_edge_diagnostic',
+                    detail='color_lineart_method must be one of: auto_outline, photo_diagram_edges, simple_cartoon, opencv_edge_diagnostic',
                 )
             sketch_merge_gap_px = _coerce_float(
                 0.0 if merge_gap_px is None else merge_gap_px,
@@ -2766,6 +2769,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                         'profile': color_lineart_metadata.get('color_lineart_profile'),
                         'foreground_ratio': color_lineart_metadata.get('foreground_ratio'),
                         'method': color_lineart_metadata.get('color_lineart_method'),
+                        'metadata': color_lineart_metadata,
+                        'warnings': list(color_lineart_warnings),
                     }
                 sketch_parameters['input_type'] = effective_input_type
                 sketch_parameters['pipeline_mode'] = pipeline_mode
@@ -2928,6 +2933,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 route_metadata=dict(response_payload.get('metadata') or {}),
                 optimize_stroke_order=sketch_optimize_stroke_order,
             )
+            if color_lineart_metadata:
+                generic_entry.metrics['color_lineart'] = dict(color_lineart_metadata)
             _store_sketch_preview(
                 preview_id=preview_id,
                 drawing_plan=plan,

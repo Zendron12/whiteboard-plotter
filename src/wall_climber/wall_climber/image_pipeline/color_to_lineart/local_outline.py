@@ -95,6 +95,27 @@ def _strong_edge_mask(gray: numpy.ndarray, *, diagnostic: bool = False) -> numpy
     return cv2.Canny(denoised, lower, upper)
 
 
+def _photo_diagram_edge_mask(image: numpy.ndarray) -> tuple[numpy.ndarray, dict[str, Any]]:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lightness = lab[:, :, 0]
+    clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8))
+    enhanced = clahe.apply(lightness)
+    denoised = cv2.bilateralFilter(enhanced, d=7, sigmaColor=55, sigmaSpace=55)
+    median_value = float(numpy.median(denoised))
+    lower = int(max(20, min(150, median_value * 0.58)))
+    upper = int(max(lower + 35, min(245, median_value * 1.22)))
+    edges = cv2.Canny(denoised, lower, upper)
+    edge_pixel_ratio = float(numpy.count_nonzero(edges)) / float(max(1, edges.size))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, numpy.ones((3, 3), dtype=numpy.uint8), iterations=1)
+    metadata = {
+        'photo_diagram_preprocessing': 'lab_lightness_clahe_bilateral',
+        'canny_lower_threshold': int(lower),
+        'canny_upper_threshold': int(upper),
+        'edge_pixel_ratio': edge_pixel_ratio,
+    }
+    return closed.astype(numpy.uint8), metadata
+
+
 def _image_complexity_metrics(image: numpy.ndarray) -> dict[str, float | int]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -147,8 +168,10 @@ def convert_color_image_to_lineart(
     max_image_dim: int = 1000,
 ) -> ColorLineArtResult:
     normalized_method = str(method or 'auto_outline').strip().lower()
-    if normalized_method not in {'auto_outline', 'simple_cartoon', 'opencv_edge_diagnostic'}:
-        raise ValueError('color_lineart_method must be one of: auto_outline, simple_cartoon, opencv_edge_diagnostic')
+    if normalized_method not in {'auto_outline', 'photo_diagram_edges', 'simple_cartoon', 'opencv_edge_diagnostic'}:
+        raise ValueError(
+            'color_lineart_method must be one of: auto_outline, photo_diagram_edges, simple_cartoon, opencv_edge_diagnostic'
+        )
 
     started = time.perf_counter()
     original = _decode_bgr(image_bytes)
@@ -162,8 +185,16 @@ def convert_color_image_to_lineart(
         warnings = tuple(warning for warning in warnings if warning != _COMPLEX_WARNING)
         if quality == 'noisy':
             warnings = warnings + ('Simple cartoon mode was forced on a complex image; inspect preview before drawing.',)
+    lineart_metadata: dict[str, Any] = {}
+    if normalized_method == 'photo_diagram_edges':
+        effective_method = 'photo_diagram_edges'
+        if profile == 'complex_artwork_photo':
+            warnings = warnings + ('Complex colored artwork may require AI line-art backend later.',)
 
-    mask = _build_outline_mask(resized, method=effective_method, profile=profile)
+    if normalized_method == 'photo_diagram_edges':
+        mask, lineart_metadata = _photo_diagram_edge_mask(resized)
+    else:
+        mask = _build_outline_mask(resized, method=effective_method, profile=profile)
     mask, removed_components = _remove_small_components(mask, min_area_px=4 if quality == 'good' else 8)
     foreground_ratio = float(numpy.count_nonzero(mask)) / float(max(1, mask.size))
     component_count = _component_count(mask)
@@ -191,6 +222,7 @@ def convert_color_image_to_lineart(
         'removed_small_component_count': int(removed_components),
         'processing_time_ms': (time.perf_counter() - started) * 1000.0,
         **metrics,
+        **lineart_metadata,
     }
     return ColorLineArtResult(
         line_art_png=bytes(encoded.tobytes()),
