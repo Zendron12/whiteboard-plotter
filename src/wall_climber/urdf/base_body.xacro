@@ -141,9 +141,30 @@
     <xacro:property name="service_panel_w" value="${carriage_cfg['width'] * 0.15}"/>
     <xacro:property name="service_panel_h" value="${carriage_cfg['height'] * 0.46}"/>
     <xacro:property name="service_panel_d" value="${carriage_cfg['depth'] * 0.10}"/>
-    <xacro:property name="service_panel_x" value="${carriage_cfg['width'] * 0.28}"/>
+    <xacro:property name="service_panel_x" value="${-carriage_cfg['width'] * 0.28}"/>
     <xacro:property name="service_panel_y" value="${-carriage_cfg['height'] * 0.04}"/>
     <xacro:property name="service_panel_z" value="${carriage_cfg['depth'] / 2.0 - service_panel_d / 2.0}"/>
+
+    <xacro:property name="arm_exit_slot_x" value="${(carriage_cfg['width'] * 0.5) - ((carriage_cfg['width'] * 0.18) * 0.5) - 0.016}"/>
+    <xacro:property name="arm_exit_slot_y" value="${-carriage_cfg['pen_offset_y']}"/>
+    <xacro:property name="arm_exit_slot_w" value="${carriage_cfg['width'] * 0.26}"/>
+    <xacro:property name="arm_exit_slot_h" value="${carriage_cfg['height'] * 0.48}"/>
+    <xacro:property name="arm_exit_slot_d" value="${carriage_cfg['depth'] * 0.08}"/>
+    <xacro:property name="arm_exit_slot_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_slot_d / 2.0 + 0.0004}"/>
+    <xacro:property name="arm_exit_bezel_t" value="0.006"/>
+    <xacro:property name="arm_exit_bezel_d" value="${carriage_cfg['depth'] * 0.07}"/>
+    <xacro:property name="arm_exit_bezel_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_bezel_d / 2.0 + 0.0008}"/>
+    <xacro:property name="arm_exit_rail_w" value="${arm_exit_slot_w * 0.72}"/>
+    <xacro:property name="arm_exit_rail_h" value="0.0036"/>
+    <xacro:property name="arm_exit_rail_d" value="${carriage_cfg['depth'] * 0.09}"/>
+    <xacro:property name="arm_exit_rail_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_rail_d / 2.0 + 0.0012}"/>
+    <xacro:property name="vent_slit_w" value="${service_panel_w * 0.68}"/>
+    <xacro:property name="vent_slit_h" value="0.0040"/>
+    <xacro:property name="vent_slit_d" value="${service_panel_d * 0.48}"/>
+    <xacro:property name="vent_slit_z" value="${service_panel_z + service_panel_d * 0.32}"/>
+    <xacro:property name="accent_bolt_r" value="0.0031"/>
+    <xacro:property name="accent_bolt_l" value="0.0028"/>
+    <xacro:property name="accent_bolt_z" value="${carriage_cfg['depth'] / 2.0 + accent_bolt_l / 2.0 + 0.0006}"/>
 
     <link name="base_link">
       <visual>
@@ -237,6 +258,128 @@
         <material name="robot_service_inset_mat">
           <color rgba="0.44 0.48 0.54 1.0"/>
         </material>
+      </visual>
+
+      <visual>
+        <origin xyz="${service_panel_x} ${service_panel_y + service_panel_h * 0.22} ${vent_slit_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${vent_slit_w} ${vent_slit_h} ${vent_slit_d}"/>
+        </geometry>
+        <material name="robot_vent_slat_mat">
+          <color rgba="0.09 0.10 0.12 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${service_panel_x} ${service_panel_y + service_panel_h * 0.10} ${vent_slit_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${vent_slit_w} ${vent_slit_h} ${vent_slit_d}"/>
+        </geometry>
+        <material name="robot_vent_slat_mat">
+          <color rgba="0.09 0.10 0.12 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${service_panel_x} ${service_panel_y - service_panel_h * 0.02} ${vent_slit_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${vent_slit_w} ${vent_slit_h} ${vent_slit_d}"/>
+        </geometry>
+        <material name="robot_vent_slat_mat">
+          <color rgba="0.09 0.10 0.12 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${service_panel_x} ${service_panel_y - service_panel_h * 0.14} ${vent_slit_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${vent_slit_w} ${vent_slit_h} ${vent_slit_d}"/>
+        </geometry>
+        <material name="robot_vent_slat_mat">
+          <color rgba="0.09 0.10 0.12 1.0"/>
+        </material>
+      </visual>
+
+      <visual>
+        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y} ${arm_exit_slot_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_slot_w} ${arm_exit_slot_h} ${arm_exit_slot_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_recess_mat">
+          <color rgba="0.025 0.027 0.032 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y + arm_exit_slot_h / 2.0 + arm_exit_bezel_t / 2.0} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_slot_w + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_bezel_mat">
+          <color rgba="0.20 0.23 0.28 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y - arm_exit_slot_h / 2.0 - arm_exit_bezel_t / 2.0} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_slot_w + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_bezel_mat">
+          <color rgba="0.20 0.23 0.28 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x - arm_exit_slot_w / 2.0 - arm_exit_bezel_t / 2.0} ${arm_exit_slot_y} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_bezel_t} ${arm_exit_slot_h + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_bezel_mat">
+          <color rgba="0.20 0.23 0.28 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x + arm_exit_slot_w / 2.0 + arm_exit_bezel_t / 2.0} ${arm_exit_slot_y} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_bezel_t} ${arm_exit_slot_h + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_bezel_mat">
+          <color rgba="0.20 0.23 0.28 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y + arm_exit_slot_h * 0.22} ${arm_exit_rail_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_rail_w} ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_rail_mat">
+          <color rgba="0.54 0.58 0.64 1.0"/>
+        </material>
+      </visual>
+      <visual>
+        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y - arm_exit_slot_h * 0.22} ${arm_exit_rail_z}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${arm_exit_rail_w} ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
+        </geometry>
+        <material name="robot_arm_exit_rail_mat">
+          <color rgba="0.54 0.58 0.64 1.0"/>
+        </material>
+      </visual>
+
+      <visual>
+        <origin xyz="${-front_mask_w / 2.0 + 0.018} ${front_mask_h / 2.0 - 0.018} ${accent_bolt_z}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${accent_bolt_r}" length="${accent_bolt_l}"/></geometry>
+        <material name="robot_corner_bolt_mat"><color rgba="0.64 0.68 0.74 1.0"/></material>
+      </visual>
+      <visual>
+        <origin xyz="${front_mask_w / 2.0 - 0.018} ${front_mask_h / 2.0 - 0.018} ${accent_bolt_z}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${accent_bolt_r}" length="${accent_bolt_l}"/></geometry>
+        <material name="robot_corner_bolt_mat"><color rgba="0.64 0.68 0.74 1.0"/></material>
+      </visual>
+      <visual>
+        <origin xyz="${-front_mask_w / 2.0 + 0.018} ${-front_mask_h / 2.0 + 0.018} ${accent_bolt_z}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${accent_bolt_r}" length="${accent_bolt_l}"/></geometry>
+        <material name="robot_corner_bolt_mat"><color rgba="0.64 0.68 0.74 1.0"/></material>
+      </visual>
+      <visual>
+        <origin xyz="${front_mask_w / 2.0 - 0.018} ${-front_mask_h / 2.0 + 0.018} ${accent_bolt_z}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${accent_bolt_r}" length="${accent_bolt_l}"/></geometry>
+        <material name="robot_corner_bolt_mat"><color rgba="0.64 0.68 0.74 1.0"/></material>
       </visual>
 
       <collision>

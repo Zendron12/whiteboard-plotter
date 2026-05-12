@@ -190,6 +190,23 @@ _REQUIRED_STATUS_KEYS = (
     'cable_executor_status',
     'cable_supervisor_status',
 )
+_FACE_TEXT_TOPIC = '/wall_climber/face/text'
+_FACE_EXPRESSION_TOPIC = '/wall_climber/face/expression'
+_FACE_VALID_EXPRESSIONS = {
+    'happy',
+    'smile',
+    'ready',
+    'neutral',
+    'sleep',
+    'sleepy',
+    'closed',
+    'angry',
+    'focus',
+    'focused',
+    'sad',
+    'error',
+}
+_FACE_MAX_TEXT_CHARS = 18
 _DEFAULT_IMAGE_PREP_OPTIONS = {
     'min_perimeter_px': 8.0,
     'contour_simplify_ratio': 0.001,
@@ -296,6 +313,16 @@ class WebBackendNode(Node):
             MANUAL_PEN_MODE_TOPIC,
             _ACTIVE_MODE_QOS,
         )
+        self._face_text_pub = self.create_publisher(
+            String,
+            _FACE_TEXT_TOPIC,
+            _ACTIVE_MODE_QOS,
+        )
+        self._face_expression_pub = self.create_publisher(
+            String,
+            _FACE_EXPRESSION_TOPIC,
+            _ACTIVE_MODE_QOS,
+        )
 
         self.create_subscription(
             String,
@@ -397,6 +424,23 @@ class WebBackendNode(Node):
         msg = String()
         msg.data = mode
         self._manual_pen_mode_pub.publish(msg)
+
+    def publish_face_text(self, text: str) -> str:
+        value = str(text).strip()[:_FACE_MAX_TEXT_CHARS]
+        msg = String()
+        msg.data = value
+        self._face_text_pub.publish(msg)
+        return value
+
+    def publish_face_expression(self, expression: str) -> str:
+        value = str(expression).strip().lower()
+        if value not in _FACE_VALID_EXPRESSIONS:
+            allowed = ', '.join(sorted(_FACE_VALID_EXPRESSIONS))
+            raise HTTPException(status_code=422, detail=f'expression must be one of: {allowed}')
+        msg = String()
+        msg.data = value
+        self._face_expression_pub.publish(msg)
+        return value
 
     def runtime_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -3662,6 +3706,28 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             )
         snapshot = runtime.node.set_manual_pen_mode(mode)
         return JSONResponse({'ok': True, 'manual_pen_mode': mode, 'runtime': snapshot})
+
+    @app.post('/api/face/text')
+    async def set_face_text(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='face text request',
+            max_bytes=512,
+        )
+        _reject_extra_fields(raw, {'text'}, 'face text request')
+        value = runtime.node.publish_face_text(str(raw.get('text', '')))
+        return JSONResponse({'ok': True, 'text': value, 'topic': _FACE_TEXT_TOPIC})
+
+    @app.post('/api/face/expression')
+    async def set_face_expression(request: Request) -> JSONResponse:
+        raw = await _load_json_request(
+            request,
+            name='face expression request',
+            max_bytes=512,
+        )
+        _reject_extra_fields(raw, {'expression'}, 'face expression request')
+        value = runtime.node.publish_face_expression(str(raw.get('expression', '')))
+        return JSONResponse({'ok': True, 'expression': value, 'topic': _FACE_EXPRESSION_TOPIC})
 
     def _elapsed_ms(start_time: float) -> float:
         return max(0.0, (time.perf_counter() - start_time) * 1000.0)

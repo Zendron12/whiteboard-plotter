@@ -24,6 +24,19 @@
             <pen_up_position>${pen_cfg['up_position']}</pen_up_position>
             <pen_down_position>${pen_cfg['down_position']}</pen_down_position>
         </plugin>
+        <plugin type="wall_climber.face_display_plugin.FaceDisplayPlugin">
+            <display_name>face_display</display_name>
+            <default_text>READY</default_text>
+            <text_topic>/wall_climber/face/text</text_topic>
+            <expression_topic>/wall_climber/face/expression</expression_topic>
+            <blink_period_sec>3.8</blink_period_sec>
+            <blink_duration_sec>0.14</blink_duration_sec>
+        </plugin>
+        <device reference="screen_link" type="Display">
+            <name>face_display</name>
+            <width>256</width>
+            <height>128</height>
+        </device>
     </webots>
 
     </robot>

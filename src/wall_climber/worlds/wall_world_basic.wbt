@@ -88,39 +88,7 @@ Solid {
 }
 
 # --- Cable Anchor Mounts ---
-Solid {
-  translation -3.15 2.404 3.30
-  children [
-    Shape {
-      appearance PBRAppearance {
-        baseColor 0.95 0.64 0.28
-        roughness 0.42
-        metalness 0.06
-        emissiveColor 0.07 0.03 0.01
-      }
-      geometry Sphere { radius 0.035 }
-    }
-  ]
-  name "left_cable_anchor_mount"
-  locked TRUE
-}
-
-Solid {
-  translation 3.15 2.404 3.30
-  children [
-    Shape {
-      appearance PBRAppearance {
-        baseColor 0.95 0.64 0.28
-        roughness 0.42
-        metalness 0.06
-        emissiveColor 0.07 0.03 0.01
-      }
-      geometry Sphere { radius 0.035 }
-    }
-  ]
-  name "right_cable_anchor_mount"
-  locked TRUE
-}
+# Four stepper-style corner anchors are spawned from cable_supervisor.urdf.xacro.
 
 # --- Cable Supervisor (invisible, no geometry) ---
 Robot {
