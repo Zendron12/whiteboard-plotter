@@ -48,6 +48,20 @@ def test_advanced_numeric_fields_hidden_until_custom_or_debug() -> None:
         assert field_id in html
 
 
+def test_vpype_optimizer_control_is_advanced_not_main_flow() -> None:
+    html = _index_html()
+
+    assert 'id="path-optimizer"' in html
+    assert '<option value="internal" selected>Internal</option>' in html
+    assert '<option value="vpype">vpype (optional)</option>' in html
+    assert '<option value="none">None</option>' in html
+    advanced_start = html.index('<details id="advanced-sketch-settings"')
+    advanced_end = html.index('</details>', advanced_start)
+    action_start = html.index('<div class="action-row">', advanced_end)
+    assert advanced_start < html.index('id="path-optimizer"') < advanced_end
+    assert 'id="path-optimizer"' not in html[advanced_end:action_start]
+
+
 def test_optional_engine_compare_controls_are_debug_only() -> None:
     html = _index_html()
 

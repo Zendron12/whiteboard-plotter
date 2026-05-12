@@ -136,6 +136,7 @@ from wall_climber.image_pipeline.vectorizers.autotrace_centerline import (
 from wall_climber.image_pipeline.vectorizers.base import VectorizationEngineResult
 from wall_climber.image_pipeline.vectorizers.potrace_backend import vectorize_potrace_bw
 from wall_climber.image_pipeline.vectorizers.vtracer_backend import vectorize_vtracer_svg
+from wall_climber.optimizers import vpype_optimizer
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
     CABLE_EXECUTOR_STATUS_TOPIC,
@@ -2061,6 +2062,17 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             return _carriage_safe_writable_bounds_for_sketch()
         return runtime.node.carriage_safe_writable_bounds()
 
+    def _normalize_path_optimizer(value: Any, *, field_name: str = 'path_optimizer') -> str:
+        optimizer = str('internal' if value in (None, '') else value).strip().lower()
+        if optimizer in {'off', 'false', 'disabled'}:
+            optimizer = 'none'
+        if optimizer not in {'internal', 'vpype', 'none'}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field_name} must be one of: internal, vpype, none",
+            )
+        return optimizer
+
     def _tiny_detail_policy_for_preview(
         source_type: str,
         settings_payload: dict[str, Any],
@@ -2132,12 +2144,15 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         settings_payload: dict[str, Any],
         writable_bounds: dict[str, float],
         optimize_stroke_order: bool,
+        path_optimizer: str = 'internal',
         existing_optimizer_stats: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         executable_plan = canonical_plan
+        path_optimizer = _normalize_path_optimizer(path_optimizer)
         tiny_detail_policy = _tiny_detail_policy_for_preview(source_type, settings_payload)
         effective_settings_payload = dict(settings_payload)
         effective_settings_payload['tiny_detail_policy'] = tiny_detail_policy
+        effective_settings_payload['path_optimizer'] = path_optimizer
         tiny_detail_metrics = {
             'preserve_tiny_details': bool(tiny_detail_policy['preserve_tiny_details']),
             'tiny_detail_expand_mode': tiny_detail_policy['tiny_detail_expand_mode'],
@@ -2174,15 +2189,47 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             tiny_detail_metrics = dict(tiny_detail_result.metrics)
         optimization_stats = dict(existing_optimizer_stats or {})
         optimization_ms = 0.0
-        if optimize_stroke_order:
-            optimization_started = time.perf_counter()
-            optimization_result = optimize_canonical_plan(
+        pre_optimization_sampled_paths = None
+        optimizer_warnings: list[str] = []
+        optimizer_available = True
+        optimizer_used = 'none'
+        if optimize_stroke_order and path_optimizer != 'none':
+            pre_optimization_sampled_paths = _validated_runtime_sampled_paths(
                 executable_plan,
-                policy=_preview_optimization_policy(source_type),
+                writable_bounds=writable_bounds,
+                shared_config=shared,
+                sampling_policy=runtime_sampling_policy,
             )
+            optimization_started = time.perf_counter()
+            if path_optimizer == 'vpype':
+                vpype_plan, vpype_metadata = vpype_optimizer.optimize_with_vpype(executable_plan)
+                optimizer_available = bool(vpype_metadata.get('available'))
+                optimizer_warnings.extend(str(item) for item in vpype_metadata.get('warnings') or ())
+                if vpype_plan is not None:
+                    executable_plan = vpype_plan
+                    optimization_stats = dict(vpype_metadata)
+                    optimizer_used = 'vpype'
+                else:
+                    internal_result = optimize_canonical_plan(
+                        executable_plan,
+                        policy=_preview_optimization_policy(source_type),
+                    )
+                    executable_plan = internal_result.plan
+                    optimization_stats = {
+                        'fallback_from': 'vpype',
+                        'vpype': dict(vpype_metadata),
+                        'internal': internal_result.stats.to_dict(),
+                    }
+                    optimizer_used = 'internal'
+            else:
+                optimization_result = optimize_canonical_plan(
+                    executable_plan,
+                    policy=_preview_optimization_policy(source_type),
+                )
+                executable_plan = optimization_result.plan
+                optimization_stats = optimization_result.stats.to_dict()
+                optimizer_used = 'internal'
             optimization_ms = max(0.0, (time.perf_counter() - optimization_started) * 1000.0)
-            executable_plan = optimization_result.plan
-            optimization_stats = optimization_result.stats.to_dict()
 
         sampled_paths = _validated_runtime_sampled_paths(
             executable_plan,
@@ -2204,6 +2251,24 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         executable_geometry = _executable_geometry_metrics(sampled_paths)
         source_metadata = dict(getattr(canonical_plan, 'metadata', {}) or {})
         color_lineart_metrics = dict(source_metadata.get('color_lineart') or {})
+        travel_before_m = None
+        path_count_before = None
+        if pre_optimization_sampled_paths is not None:
+            travel_before_m = _sampled_paths_length(pre_optimization_sampled_paths, draw=False)
+            path_count_before = sum(1 for sampled in pre_optimization_sampled_paths if sampled.draw)
+        travel_after_m = _sampled_paths_length(sampled_paths, draw=False)
+        path_count_after = int(draw_path_count)
+        optimizer_metrics = {
+            'name': optimizer_used,
+            'requested': path_optimizer,
+            'used': optimizer_used,
+            'available': bool(optimizer_available),
+            'warnings': tuple(optimizer_warnings),
+            'travel_before_m': travel_before_m,
+            'travel_after_m': travel_after_m,
+            'path_count_before': path_count_before,
+            'path_count_after': path_count_after,
+        }
         return {
             'executable_canonical_plan': executable_plan,
             'executable_canonical_hash': canonical_plan_hash(executable_plan),
@@ -2224,6 +2289,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'optimized': bool(optimize_stroke_order),
                 'optimization': optimization_stats,
                 'optimization_ms': float(optimization_ms),
+                'optimizer': optimizer_metrics,
                 'canonical_command_count': int(len(canonical_plan.commands)),
                 'executable_canonical_command_count': int(len(executable_plan.commands)),
                 'canonical_geometry': canonical_geometry,
@@ -2276,17 +2342,20 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         route_metadata: dict[str, Any] | None = None,
         curve_fit_payload: dict[str, Any] | None = None,
         optimize_stroke_order: bool = False,
+        path_optimizer: str = 'internal',
         writable_bounds: dict[str, float] | None = None,
     ) -> PreviewCacheEntry:
         _cleanup_preview_cache()
         normalized_id = uuid.uuid4().hex if preview_id is None else _validate_preview_id(preview_id)
         canonical_hash = canonical_plan_hash(canonical_plan)
+        normalized_path_optimizer = _normalize_path_optimizer(path_optimizer)
         geometry_settings = {
             'source_type': str(source_type),
             'input_type': str(input_type),
             'pipeline_mode': str(pipeline_mode),
             'settings': dict(settings or {}),
             'optimize_stroke_order': bool(optimize_stroke_order),
+            'path_optimizer': normalized_path_optimizer,
         }
         executable_payload = _build_executable_preview_payload(
             canonical_plan,
@@ -2294,6 +2363,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             settings_payload=geometry_settings,
             writable_bounds=writable_bounds or _preview_writable_bounds_for_source(str(source_type)),
             optimize_stroke_order=bool(optimize_stroke_order),
+            path_optimizer=normalized_path_optimizer,
             existing_optimizer_stats=optimizer_stats,
         )
         enriched_preview = dict(preview_payload)
@@ -2544,6 +2614,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         center_y_m: Optional[float] = Form(None),
         fit_to_safe_area: Optional[bool] = Form(None),
         optimize_stroke_order: Optional[bool] = Form(None),
+        path_optimizer: Optional[str] = Form(None),
         preserve_tiny_details: Optional[bool] = Form(None),
         minimum_drawable_feature_m: Optional[float] = Form(None),
         tiny_detail_candidate_max_feature_m: Optional[float] = Form(None),
@@ -2667,6 +2738,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 field_name='optimize_stroke_order',
                 default=False,
             )
+            sketch_path_optimizer = _normalize_path_optimizer(path_optimizer)
             sketch_curve_tolerance_px = _coerce_float(
                 1.0 if curve_tolerance_px is None else curve_tolerance_px,
                 field_name='curve_tolerance_px',
@@ -2727,6 +2799,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'center_y_m': sketch_center_y_m,
                 'fit_to_safe_area': sketch_fit_to_safe_area,
                 'optimize_stroke_order': sketch_optimize_stroke_order,
+                'path_optimizer': sketch_path_optimizer,
                 'requested_input_type': normalized_requested_input_type,
                 'color_lineart_method': sketch_color_method,
                 'preserve_tiny_details': preserve_tiny_details,
@@ -2932,6 +3005,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 drawing_plan=plan,
                 route_metadata=dict(response_payload.get('metadata') or {}),
                 optimize_stroke_order=sketch_optimize_stroke_order,
+                path_optimizer=sketch_path_optimizer,
             )
             if color_lineart_metadata:
                 generic_entry.metrics['color_lineart'] = dict(color_lineart_metadata)
@@ -3201,7 +3275,11 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
 
     def _preview_json_builder_raw(raw: dict[str, Any], *, required_key: str) -> dict[str, Any]:
         settings = _preview_settings(raw.get('settings'), name='preview request')
-        payload = dict(settings)
+        payload = {
+            str(key): value
+            for key, value in settings.items()
+            if str(key) not in {'path_optimizer', 'optimize_stroke_order'}
+        }
         payload[required_key] = raw.get(required_key)
         if raw.get('placement') is not None and 'placement' not in payload:
             payload['placement'] = raw.get('placement')
@@ -3223,6 +3301,13 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         )
 
     def _json_text_preview_response(raw: dict[str, Any]) -> JSONResponse:
+        settings = _preview_settings(raw.get('settings'), name='preview request')
+        path_optimizer = _normalize_path_optimizer(settings.get('path_optimizer'))
+        optimize_stroke_order = _coerce_bool(
+            settings.get('optimize_stroke_order'),
+            field_name='preview request.settings.optimize_stroke_order',
+            default=path_optimizer != 'none',
+        )
         builder_raw = _preview_json_builder_raw(raw, required_key='text')
         _, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             builder_raw,
@@ -3255,7 +3340,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             input_type='text',
             pipeline_mode='text_vector',
             source_hash=_content_hash({'text': builder_raw.get('text'), 'settings': commit_request}),
-            settings=commit_request,
+            settings={**commit_request, 'path_optimizer': path_optimizer, 'optimize_stroke_order': optimize_stroke_order},
+            optimize_stroke_order=optimize_stroke_order,
+            path_optimizer=path_optimizer,
             writable_bounds=writable_bounds,
         )
         return JSONResponse(
@@ -3272,6 +3359,13 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         )
 
     def _json_svg_preview_response(raw: dict[str, Any], *, source_hash: str | None = None) -> JSONResponse:
+        settings = _preview_settings(raw.get('settings'), name='preview request')
+        path_optimizer = _normalize_path_optimizer(settings.get('path_optimizer'))
+        optimize_stroke_order = _coerce_bool(
+            settings.get('optimize_stroke_order'),
+            field_name='preview request.settings.optimize_stroke_order',
+            default=path_optimizer != 'none',
+        )
         builder_raw = _preview_json_builder_raw(raw, required_key='svg')
         placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
             builder_raw,
@@ -3309,7 +3403,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 key: value
                 for key, value in commit_request.items()
                 if key != 'svg'
-            },
+            } | {'path_optimizer': path_optimizer, 'optimize_stroke_order': optimize_stroke_order},
+            optimize_stroke_order=optimize_stroke_order,
+            path_optimizer=path_optimizer,
             writable_bounds=writable_bounds,
         )
         return JSONResponse(
@@ -3393,6 +3489,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 center_y_m=settings.get('center_y_m'),
                 fit_to_safe_area=settings.get('fit_to_safe_area'),
                 optimize_stroke_order=settings.get('optimize_stroke_order'),
+                path_optimizer=settings.get('path_optimizer'),
                 preserve_tiny_details=settings.get('preserve_tiny_details'),
                 minimum_drawable_feature_m=settings.get('minimum_drawable_feature_m'),
                 tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),
@@ -3481,6 +3578,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                         center_y_m=settings.get('center_y_m'),
                         fit_to_safe_area=settings.get('fit_to_safe_area'),
                         optimize_stroke_order=settings.get('optimize_stroke_order'),
+                        path_optimizer=settings.get('path_optimizer'),
                         preserve_tiny_details=settings.get('preserve_tiny_details'),
                         minimum_drawable_feature_m=settings.get('minimum_drawable_feature_m'),
                         tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),

@@ -73,10 +73,16 @@ def optimize_with_vpype(
             message = completed.stderr.strip() or completed.stdout.strip() or f'exit {completed.returncode}'
             return None, {'available': True, 'warnings': (f'vpype failed: {message}',)}
         optimized_svg = output_path.read_text(encoding='utf-8')
-    optimized_plan = svg_text_to_canonical_plan(
+    parsed_plan = svg_text_to_canonical_plan(
         optimized_svg,
         metadata={'optimizer': 'vpype'},
     )
+    optimized_plan = CanonicalPathPlan(
+        frame=plan.frame,
+        theta_ref=plan.theta_ref,
+        commands=parsed_plan.commands,
+    )
+    optimized_plan.metadata = {**dict(getattr(plan, 'metadata', {}) or {}), 'optimizer': 'vpype'}
     return optimized_plan, {
         'available': True,
         'warnings': (),

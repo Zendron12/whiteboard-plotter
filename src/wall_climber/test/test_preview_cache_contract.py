@@ -279,6 +279,80 @@ def test_photo_diagram_edges_preview_contract_and_settings_hash() -> None:
     assert photo_edges['settings_hash'] != auto['settings_hash']
 
 
+def test_vpype_preview_falls_back_to_internal_when_missing(monkeypatch) -> None:
+    client, _runtime = _client_and_runtime()
+
+    def _missing_vpype(plan, *, timeout_sec=20.0):
+        return None, {
+            'available': False,
+            'warnings': ('vpype is not installed or is not on PATH.',),
+        }
+
+    monkeypatch.setattr(web_server.vpype_optimizer, 'optimize_with_vpype', _missing_vpype)
+    response = client.post(
+        '/api/preview',
+        files={'file': ('line.png', _simple_line_art_png(), 'image/png')},
+        data={
+            'input_type': 'sketch_image',
+            'settings_json': (
+                '{"preview_geometry_mode":"polyline","max_image_dim":600,'
+                '"optimize_stroke_order":true,"path_optimizer":"vpype"}'
+            ),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    optimizer = body['metrics']['optimizer']
+    assert optimizer['requested'] == 'vpype'
+    assert optimizer['used'] == 'internal'
+    assert optimizer['available'] is False
+    assert optimizer['warnings']
+    assert body['primitive_hash']
+    assert body['execution_hash']
+
+
+def test_vpype_optimizer_runs_only_during_preview_not_draw(monkeypatch) -> None:
+    client, runtime = _client_and_runtime()
+    calls = {'count': 0}
+
+    def _fake_vpype(plan, *, timeout_sec=20.0):
+        calls['count'] += 1
+        if calls['count'] > 1:
+            raise AssertionError('Draw must not rerun vpype')
+        return plan, {'available': True, 'warnings': (), 'optimizer': 'vpype'}
+
+    monkeypatch.setattr(web_server.vpype_optimizer, 'optimize_with_vpype', _fake_vpype)
+    response = client.post(
+        '/api/preview',
+        json={
+            'input_type': 'text',
+            'text': 'VPYPE',
+            'placement': {'x': 0.55, 'y': 0.45, 'scale': 0.8},
+            'settings': {
+                'font_source': 'relief_singleline',
+                'path_optimizer': 'vpype',
+                'optimize_stroke_order': True,
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview['metrics']['optimizer']['requested'] == 'vpype'
+    assert preview['metrics']['optimizer']['used'] == 'vpype'
+    assert calls['count'] == 1
+
+    runtime.node.active_mode = MODE_TEXT
+    draw_response = client.post('/api/draw', json={'preview_id': preview['preview_id']})
+
+    assert draw_response.status_code == 200, draw_response.text
+    draw = draw_response.json()
+    assert calls['count'] == 1
+    assert draw['primitive_hash'] == preview['primitive_hash']
+    assert draw['execution_hash'] == preview['execution_hash']
+    assert runtime.node.publish_count == 1
+
+
 def _preview_sketch(client: TestClient) -> dict:
     response = client.post(
         '/api/preview',

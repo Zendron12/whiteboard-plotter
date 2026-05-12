@@ -1467,6 +1467,14 @@
                       <input id="sketch-skeleton-prune" type="number" min="0" max="100" step="1" value="4">
                     </div>
                     <div class="field">
+                      <label for="path-optimizer">Path Optimizer</label>
+                      <select id="path-optimizer">
+                        <option value="internal" selected>Internal</option>
+                        <option value="vpype">vpype (optional)</option>
+                        <option value="none">None</option>
+                      </select>
+                    </div>
+                    <div class="field">
                       <label for="sketch-merge-gap">Stroke Merge Gap (px)</label>
                       <input id="sketch-merge-gap" type="number" min="0" step="0.5" value="0">
                     </div>
@@ -1754,6 +1762,7 @@
         sketchLineSensitivity: document.getElementById('sketch-line-sensitivity'),
         sketchMinStroke: document.getElementById('sketch-min-stroke'),
         sketchSkeletonPrune: document.getElementById('sketch-skeleton-prune'),
+        pathOptimizer: document.getElementById('path-optimizer'),
         sketchMergeGap: document.getElementById('sketch-merge-gap'),
         sketchSimplifyEpsilon: document.getElementById('sketch-simplify-epsilon'),
         sketchScalePercent: document.getElementById('sketch-scale-percent'),
@@ -3933,6 +3942,7 @@
         const timing = metadata.timing || {};
         const canonicalGeometry = metrics.canonical_geometry || {};
         const executableGeometry = metrics.executable_geometry || {};
+        const optimizer = metrics.optimizer || {};
         const tinyDetected = Number(metrics.tiny_details_detected || 0);
         const tinyExpanded = Number(metrics.tiny_details_expanded || 0);
         const tinySizeMm = Number(metrics.minimum_drawable_feature_m || 0) * 1000;
@@ -3943,6 +3953,7 @@
           metricTile('Canonical Geometry', `${formatCount(canonicalGeometry.total_curve_count || 0)} curves · ${formatCount(canonicalGeometry.line_count || metadata.line_primitive_count || 0)} lines`),
           metricTile('Draw Length', formatMeters(metrics.draw_length_m)),
           metricTile('Travel', formatMeters(metrics.travel_length_m)),
+          metricTile('Optimizer', `${optimizer.used || (metrics.optimized ? 'internal' : 'none')}${optimizer.requested && optimizer.requested !== optimizer.used ? ` · requested ${optimizer.requested}` : ''}`),
           metricTile('Total Time', formatMillis(timing.preview_total_time_ms)),
           metricTile('Primitive Hash', shortHash(payload.primitive_hash)),
         ];
@@ -3998,13 +4009,14 @@
         const lineCount = Number(metadata.line_primitive_count || 0);
         const extractionMethod = metadata.sketch_extraction_method || metadata.threshold_method || '--';
         const vectorizationEngine = metadata.vectorization_engine || 'internal_centerline';
+        const optimizer = (payload.metrics && payload.metrics.optimizer) || {};
         const warnings = Array.isArray(payload.warnings) && payload.warnings.length > 0
           ? ` · warnings ${payload.warnings.length}`
           : '';
         const lines = [
           `Executable preview is generated from the same cached primitive payload Draw publishes.`,
           `Pipeline ${payload.pipeline_mode || 'sketch_centerline'} · safe fit ${metadata.fit_to_safe_area === false ? 'off' : 'on'} · bounds ${formatSketchBounds(payload.bounds)}`,
-          `Detail ${metadata.optimization_preset || '--'} · extraction ${extractionMethod} · engine ${vectorizationEngine} · smoothness ${metadata.preview_geometry_mode || '--'} · sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}%`,
+          `Detail ${metadata.optimization_preset || '--'} · extraction ${extractionMethod} · engine ${vectorizationEngine} · optimizer ${optimizer.used || '--'} · smoothness ${metadata.preview_geometry_mode || '--'} · sensitivity ${Number.isFinite(lineSensitivity) ? lineSensitivity.toFixed(2) : '--'} · scale ${Number.isFinite(scalePercent) ? scalePercent.toFixed(0) : '--'}%`,
           `Debug sampled preview ${Number(preview.returned_point_count || 0)}/${Number(preview.original_point_count || 0)} pts${preview.truncated ? ' · truncated' : ''}; Draw uses the full cached backend plan.`,
           `Robot-safe ${formatSketchSafeBounds(metadata)} · skeleton ${metadata.skeleton_backend || '--'}${warnings}`,
           formatSketchTiming(metadata.timing).split('\n')[0],
@@ -4220,6 +4232,7 @@
           preview_geometry_mode: String(dom.sketchPreviewGeometry.value || 'smooth_curves'),
           fit_to_safe_area: Boolean(dom.sketchFitSafe.checked),
           optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
+          path_optimizer: String(dom.pathOptimizer ? dom.pathOptimizer.value : 'internal'),
           max_image_dim: Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000)))),
           margin_m: Number(dom.sketchMargin.value || 0.05),
           line_sensitivity: Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0.35))),
@@ -4463,6 +4476,8 @@
         dom.sketchMinComponent,
         dom.sketchLineSensitivity,
         dom.sketchMinStroke,
+        dom.sketchSkeletonPrune,
+        dom.pathOptimizer,
         dom.sketchMergeGap,
         dom.sketchSimplifyEpsilon,
         dom.sketchScalePercent,
