@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" xmlns:webots="http://www.cyberbotics.com">
 
   <xacro:macro name="rounded_panel" params="x y z width height depth radius mat_name rgba">
     <visual>
@@ -128,20 +128,25 @@
     </joint>
 
     <link name="screen_link">
-      <xacro:rounded_panel
-        x="0" y="0" z="0"
-        width="${bezel_width}" height="${bezel_height}" depth="${bezel_depth}" radius="${bezel_radius}"
-        mat_name="screen_bezel_mat" rgba="0.02 0.03 0.04 1.0"/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${bezel_width} ${bezel_height} ${bezel_depth}"/>
+        </geometry>
+        <material name="screen_bezel_mat">
+          <color rgba="0.02 0.03 0.04 1.0"/>
+        </material>
+      </visual>
 
-      <xacro:rounded_panel
-        x="0" y="0" z="${bezel_depth / 2.0 + screen_depth / 2.0 - 0.0004}"
-        width="${screen_width}" height="${screen_height}" depth="${screen_depth}" radius="${screen_radius}"
-        mat_name="screen_glass_mat" rgba="0.03 0.10 0.14 1.0"/>
-
-      <xacro:rounded_panel
-        x="0" y="0" z="${bezel_depth / 2.0 + screen_depth + 0.0002}"
-        width="${screen_width * 0.96}" height="${screen_height * 0.96}" depth="0.0008" radius="${screen_radius * 0.92}"
-        mat_name="screen_emit_mat" rgba="0.05 0.84 0.92 1.0"/>
+      <visual>
+        <origin xyz="0 0 ${bezel_depth / 2.0 + 0.0001}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${screen_width} ${screen_height} 0.001"/>
+        </geometry>
+        <material name="screen_glass_mat">
+          <color rgba="0.01 0.01 0.01 1.0"/>
+        </material>
+      </visual>
 
       <collision>
         <geometry>
@@ -153,6 +158,8 @@
         <mass value="0.02"/>
         <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
       </inertial>
+
+      <webots:device reference="face_display" type="Display"/>
     </link>
   </xacro:macro>
 </robot>

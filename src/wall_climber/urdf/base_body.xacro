@@ -145,19 +145,18 @@
     <xacro:property name="service_panel_y" value="${-carriage_cfg['height'] * 0.04}"/>
     <xacro:property name="service_panel_z" value="${carriage_cfg['depth'] / 2.0 - service_panel_d / 2.0}"/>
 
-    <xacro:property name="arm_exit_slot_x" value="${(carriage_cfg['width'] * 0.5) - ((carriage_cfg['width'] * 0.18) * 0.5) - 0.016}"/>
+    <xacro:property name="arm_exit_slot_x" value="${carriage_cfg['width'] / 2.0 + 0.0025}"/>
     <xacro:property name="arm_exit_slot_y" value="${-carriage_cfg['pen_offset_y']}"/>
-    <xacro:property name="arm_exit_slot_w" value="${carriage_cfg['width'] * 0.26}"/>
-    <xacro:property name="arm_exit_slot_h" value="${carriage_cfg['height'] * 0.48}"/>
-    <xacro:property name="arm_exit_slot_d" value="${carriage_cfg['depth'] * 0.08}"/>
-    <xacro:property name="arm_exit_slot_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_slot_d / 2.0 + 0.0004}"/>
+    <xacro:property name="arm_exit_slot_w" value="0.005"/>
+    <xacro:property name="arm_exit_slot_h" value="${carriage_cfg['height'] * 0.50}"/>
+    <xacro:property name="arm_exit_slot_d" value="${carriage_cfg['depth'] * 0.48}"/>
+    <xacro:property name="arm_exit_slot_z" value="${-(carriage_cfg['depth'] / 2.0) + 0.0195}"/>
     <xacro:property name="arm_exit_bezel_t" value="0.006"/>
-    <xacro:property name="arm_exit_bezel_d" value="${carriage_cfg['depth'] * 0.07}"/>
-    <xacro:property name="arm_exit_bezel_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_bezel_d / 2.0 + 0.0008}"/>
-    <xacro:property name="arm_exit_rail_w" value="${arm_exit_slot_w * 0.72}"/>
+    <xacro:property name="arm_exit_bezel_x" value="${carriage_cfg['width'] / 2.0 + 0.005}"/>
+    <xacro:property name="arm_exit_rail_x" value="${carriage_cfg['width'] / 2.0 + 0.006}"/>
     <xacro:property name="arm_exit_rail_h" value="0.0036"/>
-    <xacro:property name="arm_exit_rail_d" value="${carriage_cfg['depth'] * 0.09}"/>
-    <xacro:property name="arm_exit_rail_z" value="${-(carriage_cfg['depth'] / 2.0) + arm_exit_rail_d / 2.0 + 0.0012}"/>
+    <xacro:property name="arm_exit_rail_d" value="${arm_exit_slot_d * 0.8}"/>
+
     <xacro:property name="vent_slit_w" value="${service_panel_w * 0.68}"/>
     <xacro:property name="vent_slit_h" value="0.0040"/>
     <xacro:property name="vent_slit_d" value="${service_panel_d * 0.48}"/>
@@ -307,54 +306,54 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y + arm_exit_slot_h / 2.0 + arm_exit_bezel_t / 2.0} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_bezel_x} ${arm_exit_slot_y + arm_exit_slot_h / 2.0 + arm_exit_bezel_t / 2.0} ${arm_exit_slot_z}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_slot_w + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+          <box size="0.004 ${arm_exit_bezel_t} ${arm_exit_slot_d + 2.0 * arm_exit_bezel_t}"/>
         </geometry>
         <material name="robot_arm_exit_bezel_mat">
           <color rgba="0.20 0.23 0.28 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y - arm_exit_slot_h / 2.0 - arm_exit_bezel_t / 2.0} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_bezel_x} ${arm_exit_slot_y - arm_exit_slot_h / 2.0 - arm_exit_bezel_t / 2.0} ${arm_exit_slot_z}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_slot_w + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+          <box size="0.004 ${arm_exit_bezel_t} ${arm_exit_slot_d + 2.0 * arm_exit_bezel_t}"/>
         </geometry>
         <material name="robot_arm_exit_bezel_mat">
           <color rgba="0.20 0.23 0.28 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x - arm_exit_slot_w / 2.0 - arm_exit_bezel_t / 2.0} ${arm_exit_slot_y} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_bezel_x} ${arm_exit_slot_y} ${arm_exit_slot_z + arm_exit_slot_d / 2.0 + arm_exit_bezel_t / 2.0}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_bezel_t} ${arm_exit_slot_h + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+          <box size="0.004 ${arm_exit_slot_h} ${arm_exit_bezel_t}"/>
         </geometry>
         <material name="robot_arm_exit_bezel_mat">
           <color rgba="0.20 0.23 0.28 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x + arm_exit_slot_w / 2.0 + arm_exit_bezel_t / 2.0} ${arm_exit_slot_y} ${arm_exit_bezel_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_bezel_x} ${arm_exit_slot_y} ${arm_exit_slot_z - arm_exit_slot_d / 2.0 - arm_exit_bezel_t / 2.0}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_bezel_t} ${arm_exit_slot_h + 2.0 * arm_exit_bezel_t} ${arm_exit_bezel_d}"/>
+          <box size="0.004 ${arm_exit_slot_h} ${arm_exit_bezel_t}"/>
         </geometry>
         <material name="robot_arm_exit_bezel_mat">
           <color rgba="0.20 0.23 0.28 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y + arm_exit_slot_h * 0.22} ${arm_exit_rail_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_rail_x} ${arm_exit_slot_y + arm_exit_slot_h * 0.24} ${arm_exit_slot_z}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_rail_w} ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
+          <box size="0.003 ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
         </geometry>
         <material name="robot_arm_exit_rail_mat">
           <color rgba="0.54 0.58 0.64 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${arm_exit_slot_x} ${arm_exit_slot_y - arm_exit_slot_h * 0.22} ${arm_exit_rail_z}" rpy="0 0 0"/>
+        <origin xyz="${arm_exit_rail_x} ${arm_exit_slot_y - arm_exit_slot_h * 0.24} ${arm_exit_slot_z}" rpy="0 0 0"/>
         <geometry>
-          <box size="${arm_exit_rail_w} ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
+          <box size="0.003 ${arm_exit_rail_h} ${arm_exit_rail_d}"/>
         </geometry>
         <material name="robot_arm_exit_rail_mat">
           <color rgba="0.54 0.58 0.64 1.0"/>

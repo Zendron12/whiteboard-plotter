@@ -39,90 +39,90 @@
       <visual>
         <origin xyz="${0.018 * x_sign} 0.010 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
-          <box size="0.050 0.007 0.050"/>
+          <box size="0.040 0.006 0.040"/>
         </geometry>
         <material name="${name}_mounting_plate_mat">
           <color rgba="0.12 0.14 0.17 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.025 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} 0.028 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
-          <box size="0.038 0.026 0.038"/>
+          <box size="0.034 0.030 0.034"/>
         </geometry>
         <material name="${name}_motor_housing_mat">
-          <color rgba="0.23 0.26 0.31 1.0"/>
+          <color rgba="0.08 0.09 0.11 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.040 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} 0.028 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
-          <box size="0.041 0.0045 0.041"/>
+          <box size="0.035 0.004 0.035"/>
         </geometry>
         <material name="${name}_accent_band_mat">
           <color rgba="0.55 0.60 0.67 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.041 * x_sign} 0.027 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} 0.044 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
-          <box size="0.011 0.018 0.016"/>
+          <box size="0.012 0.004 0.012"/>
         </geometry>
         <material name="${name}_connector_cap_mat">
-          <color rgba="0.08 0.09 0.11 1.0"/>
+          <color rgba="0.12 0.14 0.17 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign - 0.013} 0.044 ${0.018 * z_sign - 0.013}" rpy="1.57079632679 0 0"/>
-        <geometry><cylinder radius="0.0028" length="0.004"/></geometry>
+        <origin xyz="${0.018 * x_sign - 0.014} 0.014 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign + 0.013} 0.044 ${0.018 * z_sign - 0.013}" rpy="1.57079632679 0 0"/>
-        <geometry><cylinder radius="0.0028" length="0.004"/></geometry>
+        <origin xyz="${0.018 * x_sign + 0.014} 0.014 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign - 0.013} 0.044 ${0.018 * z_sign + 0.013}" rpy="1.57079632679 0 0"/>
-        <geometry><cylinder radius="0.0028" length="0.004"/></geometry>
+        <origin xyz="${0.018 * x_sign - 0.014} 0.014 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign + 0.013} 0.044 ${0.018 * z_sign + 0.013}" rpy="1.57079632679 0 0"/>
-        <geometry><cylinder radius="0.0028" length="0.004"/></geometry>
+        <origin xyz="${0.018 * x_sign + 0.014} 0.014 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="0 0.043 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.008 0" rpy="1.57079632679 0 0"/>
         <geometry>
-          <cylinder radius="0.0048" length="0.014"/>
+          <cylinder radius="0.004" length="0.012"/>
         </geometry>
         <material name="${name}_output_shaft_mat">
           <color rgba="0.72 0.75 0.80 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="0 0.052 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.002 0" rpy="1.57079632679 0 0"/>
         <geometry>
-          <cylinder radius="0.0135" length="0.011"/>
+          <cylinder radius="0.014" length="0.008"/>
         </geometry>
         <material name="${name}_pulley_mat">
           <color rgba="0.36 0.39 0.44 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="0 0.052 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.002 0" rpy="1.57079632679 0 0"/>
         <geometry>
-          <cylinder radius="0.0142" length="0.0022"/>
+          <cylinder radius="0.015" length="0.002"/>
         </geometry>
         <material name="${name}_pulley_groove_mat">
           <color rgba="0.08 0.09 0.11 1.0"/>
         </material>
       </visual>
       <visual>
-        <origin xyz="0 0.059 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 -0.004 0" rpy="1.57079632679 0 0"/>
         <geometry>
-          <cylinder radius="0.0065" length="0.006"/>
+          <cylinder radius="0.006" length="0.004"/>
         </geometry>
         <material name="${name}_pulley_hub_mat">
           <color rgba="0.68 0.71 0.76 1.0"/>
@@ -137,10 +137,10 @@
 
   <link name="base_link"/>
 
-  <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="1" z_sign="-1"/>
-  <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="-1" z_sign="-1"/>
-  <xacro:board_anchor_visual name="bottom_left_board_anchor" world_x="${bottom_left_anchor_world_x}" world_z="${bottom_left_anchor_world_z}" x_sign="1" z_sign="1"/>
-  <xacro:board_anchor_visual name="bottom_right_board_anchor" world_x="${bottom_right_anchor_world_x}" world_z="${bottom_right_anchor_world_z}" x_sign="-1" z_sign="1"/>
+  <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="-1" z_sign="-1"/>
+  <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="1" z_sign="-1"/>
+  <xacro:board_anchor_visual name="bottom_left_board_anchor" world_x="${bottom_left_anchor_world_x}" world_z="${bottom_left_anchor_world_z}" x_sign="-1" z_sign="1"/>
+  <xacro:board_anchor_visual name="bottom_right_board_anchor" world_x="${bottom_right_anchor_world_x}" world_z="${bottom_right_anchor_world_z}" x_sign="1" z_sign="1"/>
 
   <webots>
     <plugin type="wall_climber.cable_supervisor_plugin.CableSupervisorPlugin">
