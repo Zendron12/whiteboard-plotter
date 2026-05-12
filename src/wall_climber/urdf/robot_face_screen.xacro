@@ -143,7 +143,8 @@
         <geometry>
           <box size="${screen_width} ${screen_height} 0.001"/>
         </geometry>
-        <material name="screen_glass_mat">
+        <!-- The material name MUST match the device name for Webots to map the Display -->
+        <material name="face_display">
           <color rgba="0.01 0.01 0.01 1.0"/>
         </material>
       </visual>

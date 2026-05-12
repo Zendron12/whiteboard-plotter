@@ -32,12 +32,14 @@
     <joint name="${name}_joint" type="fixed">
       <parent link="base_link"/>
       <child link="${name}"/>
-      <origin xyz="${world_x} ${board_cfg['surface_y']} ${world_z}" rpy="0 0 0"/>
+      <!-- Move anchor origin forward (smaller Y) to be in front of the frame -->
+      <origin xyz="${world_x} ${board_cfg['surface_y'] - 0.035} ${world_z}" rpy="0 0 0"/>
     </joint>
 
     <link name="${name}">
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.010 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <!-- Negative Y offsets move elements away from the wall -->
+        <origin xyz="${0.018 * x_sign} -0.005 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
           <box size="0.040 0.006 0.040"/>
         </geometry>
@@ -46,7 +48,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.028 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} -0.023 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
           <box size="0.034 0.030 0.034"/>
         </geometry>
@@ -55,7 +57,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.028 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} -0.023 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
           <box size="0.035 0.004 0.035"/>
         </geometry>
@@ -64,7 +66,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign} 0.044 ${0.018 * z_sign}" rpy="0 0 0"/>
+        <origin xyz="${0.018 * x_sign} -0.039 ${0.018 * z_sign}" rpy="0 0 0"/>
         <geometry>
           <box size="0.012 0.004 0.012"/>
         </geometry>
@@ -73,27 +75,27 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign - 0.014} 0.014 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
+        <origin xyz="${0.018 * x_sign - 0.014} -0.009 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
         <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign + 0.014} 0.014 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
+        <origin xyz="${0.018 * x_sign + 0.014} -0.009 ${0.018 * z_sign - 0.014}" rpy="1.57079632679 0 0"/>
         <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign - 0.014} 0.014 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
+        <origin xyz="${0.018 * x_sign - 0.014} -0.009 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
         <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="${0.018 * x_sign + 0.014} 0.014 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
+        <origin xyz="${0.018 * x_sign + 0.014} -0.009 ${0.018 * z_sign + 0.014}" rpy="1.57079632679 0 0"/>
         <geometry><cylinder radius="0.0025" length="0.003"/></geometry>
         <material name="${name}_bolt_mat"><color rgba="0.70 0.74 0.80 1.0"/></material>
       </visual>
       <visual>
-        <origin xyz="0 0.008 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 -0.003 0" rpy="1.57079632679 0 0"/>
         <geometry>
           <cylinder radius="0.004" length="0.012"/>
         </geometry>
@@ -102,7 +104,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="0 0.002 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.003 0" rpy="1.57079632679 0 0"/>
         <geometry>
           <cylinder radius="0.014" length="0.008"/>
         </geometry>
@@ -111,7 +113,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="0 0.002 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.003 0" rpy="1.57079632679 0 0"/>
         <geometry>
           <cylinder radius="0.015" length="0.002"/>
         </geometry>
@@ -120,7 +122,7 @@
         </material>
       </visual>
       <visual>
-        <origin xyz="0 -0.004 0" rpy="1.57079632679 0 0"/>
+        <origin xyz="0 0.009 0" rpy="1.57079632679 0 0"/>
         <geometry>
           <cylinder radius="0.006" length="0.004"/>
         </geometry>
@@ -137,10 +139,12 @@
 
   <link name="base_link"/>
 
-  <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="-1" z_sign="-1"/>
-  <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="1" z_sign="-1"/>
-  <xacro:board_anchor_visual name="bottom_left_board_anchor" world_x="${bottom_left_anchor_world_x}" world_z="${bottom_left_anchor_world_z}" x_sign="-1" z_sign="1"/>
-  <xacro:board_anchor_visual name="bottom_right_board_anchor" world_x="${bottom_right_anchor_world_x}" world_z="${bottom_right_anchor_world_z}" x_sign="1" z_sign="1"/>
+  <!-- x_sign=1 moves inward for left anchors, x_sign=-1 moves inward for right anchors -->
+  <!-- z_sign=-1 moves inward (down) for top anchors, z_sign=1 moves inward (up) for bottom anchors -->
+  <xacro:board_anchor_visual name="left_board_anchor" world_x="${left_anchor_world_x}" world_z="${left_anchor_world_z}" x_sign="1" z_sign="-1"/>
+  <xacro:board_anchor_visual name="right_board_anchor" world_x="${right_anchor_world_x}" world_z="${right_anchor_world_z}" x_sign="-1" z_sign="-1"/>
+  <xacro:board_anchor_visual name="bottom_left_board_anchor" world_x="${bottom_left_anchor_world_x}" world_z="${bottom_left_anchor_world_z}" x_sign="1" z_sign="1"/>
+  <xacro:board_anchor_visual name="bottom_right_board_anchor" world_x="${bottom_right_anchor_world_x}" world_z="${bottom_right_anchor_world_z}" x_sign="-1" z_sign="1"/>
 
   <webots>
     <plugin type="wall_climber.cable_supervisor_plugin.CableSupervisorPlugin">
