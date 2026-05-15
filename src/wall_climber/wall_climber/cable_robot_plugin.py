@@ -4,6 +4,7 @@ import threading
 
 import rclpy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from wall_climber_interfaces.msg import CableSetpoint
 from wall_climber.runtime_topics import (
@@ -11,6 +12,14 @@ from wall_climber.runtime_topics import (
     PEN_MODE_AUTO,
     PEN_MODE_DOWN,
     PEN_MODE_UP,
+)
+
+# Match the cable_supervisor subscriber depth so the pen-state stream is not
+# silently dropped when the supervisor stalls.
+_SETPOINT_STREAM_QOS = QoSProfile(
+    depth=4000,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
 )
 
 try:
@@ -46,7 +55,7 @@ class CableRobotPlugin:
             CableSetpoint,
             '/wall_climber/cable_setpoint',
             self._setpoint_cb,
-            1,
+            _SETPOINT_STREAM_QOS,
         )
         self._node.create_subscription(
             String,

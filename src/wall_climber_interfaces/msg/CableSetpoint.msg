@@ -1,9 +1,10 @@
 # Carriage pose in board coordinates. theta is currently the reference tool angle.
 geometry_msgs/Pose2D carriage_pose
 
-# Commanded left and right cable lengths in meters.
-float64 left_cable_length
-float64 right_cable_length
+# Commanded cable lengths in meters, ordered as
+# [top_left, top_right, bottom_left, bottom_right]. See
+# wall_climber.four_cable_kinematics.FOUR_CABLE_NAMES for the canonical order.
+float64[4] cable_lengths
 
 # True while the pen should touch/draw on the board.
 bool pen_down

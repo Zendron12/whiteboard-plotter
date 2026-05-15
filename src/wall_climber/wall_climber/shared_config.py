@@ -103,7 +103,6 @@ class PenDefaults:
 @dataclass(frozen=True)
 class TextLayoutDefaults:
     left_margin: float
-    right_margin: float
     top_margin: float
     bottom_margin: float
     glyph_height: float

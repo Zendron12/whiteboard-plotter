@@ -191,13 +191,13 @@ def test_web_server_text_commit_omits_oversized_legacy_normalized_plan() -> None
     source = (
         Path(__file__).resolve().parents[1] / 'wall_climber' / 'web_server.py'
     ).read_text(encoding='utf-8')
-    assert 'def _normalized_text_plan_or_summary(' in source
-    assert 'except HTTPException as exc:' in source
-    assert 'if exc.status_code != 413:' in source
-    assert "'normalized_plan_omitted': True" in source
-    assert "'transport': 'primitive_path_plan'" in source
-    assert 'normalized_plan = _normalized_text_plan_or_summary(' in source
-    assert "'normalized_plan': normalized_plan" in source
+    # The legacy normalized-plan helpers were removed alongside the dead text
+    # commit endpoints. The contract that survives is that ``primitive_path_plan``
+    # is still the chosen transport and that no DrawPlan / oversized stroke
+    # payload sneaks back into the response.
+    assert "'preferred_transport': 'primitive_path_plan'" in source
+    assert "publish_execution_plan(" in source
+    assert "DrawPlan" not in source
 
 
 def test_raw_draw_plan_endpoint_remains_explicitly_disabled() -> None:

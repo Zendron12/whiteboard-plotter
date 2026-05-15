@@ -27,6 +27,21 @@ rclcpp::QoS transient_local_qos() {
   return rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 }
 
+// QoS for the high-rate /wall_climber/cable_setpoint stream.
+//
+// The executor publishes one setpoint every ``publish_period_sec`` (~20ms by
+// default). With ``KeepLast(1)`` the middleware silently dropped intermediate
+// samples whenever the supervisor or any other subscriber fell behind by even
+// a few milliseconds, producing visible warp jumps on the rendered board
+// (sometimes >70mm in a single Webots step). A deeper queue lets the
+// supervisor drain at Webots cadence without losing samples.
+//
+// 4000 entries at 20ms covers ~80s of buffered motion, which is far more than
+// any reasonable lag while still bounded.
+rclcpp::QoS setpoint_stream_qos() {
+  return rclcpp::QoS(rclcpp::KeepLast(4000)).reliable();
+}
+
 using Point2D = geometry::Point2;
 
 struct PlannedSample {
@@ -122,7 +137,7 @@ class CableDrawExecutor final : public rclcpp::Node {
 
     setpoint_pub_ = create_publisher<wall_climber_interfaces::msg::CableSetpoint>(
       "/wall_climber/cable_setpoint",
-      transient_local_qos());
+      setpoint_stream_qos());
     status_pub_ = create_publisher<std_msgs::msg::String>(
       "/wall_climber/cable_executor_status",
       transient_local_qos());
@@ -388,8 +403,16 @@ class CableDrawExecutor final : public rclcpp::Node {
     setpoint.carriage_pose.x = carriage_center.x;
     setpoint.carriage_pose.y = carriage_center.y;
     setpoint.carriage_pose.theta = params.fixed_theta_rad;
-    setpoint.left_cable_length = executor_distance_xy(params.anchor_left, attach_left);
-    setpoint.right_cable_length = executor_distance_xy(params.anchor_right, attach_right);
+    // cable_lengths[] ordering matches FOUR_CABLE_NAMES:
+    //   0: top_left, 1: top_right, 2: bottom_left, 3: bottom_right.
+    // The executor only knows the two top anchors/attachments; the
+    // supervisor re-computes the full four-cable solution from carriage_pose
+    // using config-provided layout. We leave the bottom slots as NaN to make
+    // that contract explicit instead of publishing misleading zeros.
+    setpoint.cable_lengths[0] = executor_distance_xy(params.anchor_left, attach_left);
+    setpoint.cable_lengths[1] = executor_distance_xy(params.anchor_right, attach_right);
+    setpoint.cable_lengths[2] = std::numeric_limits<double>::quiet_NaN();
+    setpoint.cable_lengths[3] = std::numeric_limits<double>::quiet_NaN();
     setpoint.pen_down = pen_down;
     setpoint.active_segment_index = segment_index;
     setpoint.progress = progress;
@@ -462,8 +485,8 @@ class CableDrawExecutor final : public rclcpp::Node {
       segment_index,
       std::min(1.0, pending_traversed_length_m_ / pending_total_length_m_),
       params);
-    if (!std::isfinite(sample.setpoint.left_cable_length) ||
-        !std::isfinite(sample.setpoint.right_cable_length)) {
+    if (!std::isfinite(sample.setpoint.cable_lengths[0]) ||
+        !std::isfinite(sample.setpoint.cable_lengths[1])) {
       *failure = "failed to compute finite cable lengths";
       return false;
     }

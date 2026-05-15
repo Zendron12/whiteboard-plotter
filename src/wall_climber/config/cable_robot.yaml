@@ -69,7 +69,6 @@ pen:
 
 text_layout:
   left_margin: 0.020
-  right_margin: 0.020
   top_margin: 0.020
   bottom_margin: 0.020
   glyph_height: 0.086
@@ -90,8 +89,15 @@ draw_execution:
   fixed_draw_theta_rad: 0.0
   draw_scale_fit_margin_m: 0.030
   draw_path_simplify_tolerance_m: 0.0004
-  draw_resample_step_m: 0.003
-  travel_resample_step_m: 0.010
+  # Resample steps drive the visible drawing speed:
+  #   speed_m_per_s = resample_step_m / publish_period_sec
+  # With period=0.02s these defaults give ~0.45 m/s draw, ~1.5 m/s travel.
+  # The C++ sampler enforces ``chord <= resample_step_m`` between consecutive
+  # samples (see geometry_sampling.cpp), so increasing these values speeds up
+  # motion without re-introducing the warp jumps that the smaller defaults
+  # were originally chosen to avoid.
+  draw_resample_step_m: 0.009
+  travel_resample_step_m: 0.030
   text_draw_resample_step_m: 0.0038
   text_travel_resample_step_m: 0.012
   publish_period_sec: 0.02

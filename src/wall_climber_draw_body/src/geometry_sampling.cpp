@@ -61,6 +61,7 @@ double sanitized_heading_delta(const SamplePolicy & policy) {
 }
 
 double sanitized_tolerance(const SamplePolicy & policy);
+double sanitized_linear_step(double step_m, const SamplePolicy & policy);
 
 std::pair<QuadraticBezier, QuadraticBezier> split_quadratic(const QuadraticBezier & segment) {
   const Point2 p01 = lerp(segment.start, segment.control, 0.5);
@@ -95,7 +96,18 @@ void sample_quadratic_recursive(
   const bool heading_ok =
     heading_delta_rad(tangent_vector(segment, 0.0), tangent_vector(segment, 1.0)) <=
     sanitized_heading_delta(policy);
-  if (depth >= kMaxSamplingDepth || (quadratic_flatness(segment) <= tolerance_m && heading_ok)) {
+  // Flatness alone is not enough: a long, near-straight Bezier passes the
+  // flatness test in one go, leaving only ``segment.start`` and ``segment.end``
+  // in the output even when the chord is many ``draw_step_m`` apart. We also
+  // require the chord length to be within ``draw_step_m`` so the cable
+  // executor never sees more than one resample step between two samples.
+  const double draw_step =
+    sanitized_linear_step(policy.draw_step_m, policy);
+  const double chord_m = distance_xy(segment.start, segment.end);
+  const bool chord_short_enough =
+    draw_step <= 0.0 || chord_m <= draw_step;
+  if (depth >= kMaxSamplingDepth ||
+      (quadratic_flatness(segment) <= tolerance_m && heading_ok && chord_short_enough)) {
     append_unique_point(points, segment.start);
     append_unique_point(points, segment.end);
     return;
@@ -116,7 +128,17 @@ void sample_cubic_recursive(
   const bool heading_ok =
     heading_delta_rad(tangent_vector(segment, 0.0), tangent_vector(segment, 1.0)) <=
     sanitized_heading_delta(policy);
-  if (depth >= kMaxSamplingDepth || (cubic_flatness(segment) <= tolerance_m && heading_ok)) {
+  // See ``sample_quadratic_recursive`` for the chord-length rationale: we
+  // refuse to terminate recursion until the remaining chord is no longer than
+  // a single ``draw_step_m`` so the executor never sees a >step gap inside
+  // a draw segment.
+  const double draw_step =
+    sanitized_linear_step(policy.draw_step_m, policy);
+  const double chord_m = distance_xy(segment.start, segment.end);
+  const bool chord_short_enough =
+    draw_step <= 0.0 || chord_m <= draw_step;
+  if (depth >= kMaxSamplingDepth ||
+      (cubic_flatness(segment) <= tolerance_m && heading_ok && chord_short_enough)) {
     append_unique_point(points, segment.start);
     append_unique_point(points, segment.end);
     return;
@@ -298,13 +320,50 @@ std::vector<SampledPath> sampled_paths_from_plan(const PathPlan & plan, const Sa
   bool active_draw = false;
   bool has_active = false;
 
+  // Final-mile resample step: ensure no two adjacent samples in the same path
+  // are separated by more than ``policy.{draw|travel}_step_m``. Bezier
+  // recursion already terminates on chord length, but ``LineSegment`` and
+  // ``ArcSegment`` outputs can still leave back-to-back commands whose join
+  // points are far apart relative to the resample step (for example a long
+  // straight line followed immediately by another line in a different
+  // direction). This pass interpolates extra samples so the cable executor
+  // never sees a >step jump within a draw segment.
+  const auto enforce_step_density =
+    [](std::vector<Point2> points, const double step_m) {
+      if (points.size() < 2U || step_m <= 0.0) {
+        return points;
+      }
+      std::vector<Point2> dense;
+      dense.reserve(points.size() * 2U);
+      dense.push_back(points.front());
+      for (std::size_t index = 1; index < points.size(); ++index) {
+        const auto & start = points[index - 1];
+        const auto & end = points[index];
+        const double chord = distance_xy(start, end);
+        if (chord <= step_m) {
+          append_unique_point(&dense, end);
+          continue;
+        }
+        const int subdivisions =
+          std::max(1, static_cast<int>(std::ceil(chord / step_m)));
+        for (int sub = 1; sub <= subdivisions; ++sub) {
+          const double t = static_cast<double>(sub) / static_cast<double>(subdivisions);
+          append_unique_point(&dense, lerp(start, end, t));
+        }
+      }
+      return dense;
+    };
+
   const auto flush_active = [&]() {
     if (!has_active || active_points.size() < 2U) {
       active_points.clear();
       has_active = false;
       return;
     }
-    sampled_paths.push_back(SampledPath{active_draw, active_points});
+    const double step_m = sanitized_linear_step(
+      active_draw ? policy.draw_step_m : policy.travel_step_m, policy);
+    sampled_paths.push_back(
+      SampledPath{active_draw, enforce_step_density(active_points, step_m)});
     active_points.clear();
     has_active = false;
   };

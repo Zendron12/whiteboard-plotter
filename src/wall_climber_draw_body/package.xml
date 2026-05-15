@@ -3,7 +3,7 @@
 <package format="3">
   <name>wall_climber_draw_body</name>
   <version>0.0.0</version>
-  <description>C++ cable trajectory executor for the two-cable Webots drawing robot.</description>
+  <description>C++ cable trajectory executor for the four-cable Webots drawing robot.</description>
   <maintainer email="2144934@std.hu.edu.jo">hisham</maintainer>
   <license>Apache-2.0</license>
 

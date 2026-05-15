@@ -44,12 +44,19 @@ setup(
         'matplotlib',
         'scikit-image',
     ],
+    extras_require={
+        'test': [
+            'pytest',
+            'ament-copyright',
+            'ament-flake8',
+            'ament-pep257',
+        ],
+    },
     zip_safe=True,
     maintainer='hisham',
     maintainer_email='2144934@std.hu.edu.jo',
-    description='Two-cable Webots drawing robot package',
+    description='Four-cable Webots drawing robot package',
     license='Apache-2.0',
-    # تم إزالة tests_require لحل مشكلة التحذير في setuptools
     entry_points={
         'console_scripts': [
             'urdf_spawner = wall_climber.urdf_spawner:main',

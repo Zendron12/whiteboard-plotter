@@ -122,7 +122,6 @@ Ingestion and vectorization:
 - `wall_climber/ingestion/image.py`: image vectorization facade.
 - `wall_climber/ingestion/image_curve_fitting.py`: image contour tracing, centerline behavior, curve fitting, route debug output, and metadata mapping.
 - `wall_climber/ingestion/upload_routing.py`: upload classification for SVG versus raster image input.
-- `wall_climber/image_routing.py`: image route compatibility exports.
 
 The project already has a canonical path model. The new `DrawingPathPlan` added in this task is only a future-facing image-pipeline interface and must not replace or wire into the current runtime yet.
 

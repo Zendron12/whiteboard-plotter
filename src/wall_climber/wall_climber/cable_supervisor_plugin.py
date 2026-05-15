@@ -7,6 +7,7 @@ import rclpy
 from geometry_msgs.msg import PointStamped, Pose2D
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64, String
+from wall_climber import _webots_nav as _wnav
 from wall_climber.four_cable_kinematics import FOUR_CABLE_NAMES, compute_four_cable_lengths
 from wall_climber_interfaces.msg import CableSetpoint
 from wall_climber.runtime_topics import (
@@ -22,6 +23,27 @@ _TRANSIENT_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
+
+# Deep queue for the high-rate /wall_climber/cable_setpoint stream so the
+# supervisor drains at Webots step cadence (16ms) without losing intermediate
+# samples when the executor publishes faster (~20ms). KeepLast(1) here was the
+# root cause of visible warp jumps during draw mode: the middleware silently
+# dropped any sample the supervisor did not consume in time.
+_SETPOINT_STREAM_QOS = QoSProfile(
+    depth=4000,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+# Hard upper bound on how far the carriage may move in a single Webots step.
+# The real source of warp jumps was the cable_setpoint stream being sampled
+# only on chord flatness (which left up to 76mm gaps inside curves) and the
+# QoS depth being 1 (which silently dropped intermediate samples). Both are
+# fixed at the publisher and sampler level; this clamp now acts purely as a
+# defence-in-depth so a buggy plan cannot warp the simulator. The cap is set
+# well above any expected per-sample step (travel_resample_step_m today is
+# 30mm; this leaves headroom for users who tune the resample step higher).
+_MAX_STEP_TELEPORT_M = 0.120
 
 
 class CableSupervisorPlugin:
@@ -167,6 +189,7 @@ class CableSupervisorPlugin:
 
         self._latest_setpoint = None
         self._latest_four_cable_lengths = None
+        self._pending_setpoints: list = []
         self._pen_down_requested = False
         self._manual_pen_mode = PEN_MODE_AUTO
         self._pen_contact_latched = False
@@ -213,7 +236,7 @@ class CableSupervisorPlugin:
             CableSetpoint,
             '/wall_climber/cable_setpoint',
             self._setpoint_cb,
-            _TRANSIENT_QOS,
+            _SETPOINT_STREAM_QOS,
         )
         self._node.create_subscription(
             String,
@@ -256,6 +279,15 @@ class CableSupervisorPlugin:
         self._set_status('starting')
 
     def _setpoint_cb(self, msg: CableSetpoint):
+        # Buffer setpoints so the supervisor consumes them at Webots step
+        # cadence instead of dropping intermediate poses when the executor
+        # publishes faster than ``basicTimeStep`` (visible as warp jumps in
+        # the simulator).
+        self._pending_setpoints.append(msg)
+        # Cap the queue to avoid unbounded memory if the supervisor stalls.
+        if len(self._pending_setpoints) > 64:
+            # Always keep the most recent samples; drop the oldest excess.
+            del self._pending_setpoints[: len(self._pending_setpoints) - 64]
         self._latest_setpoint = msg
         if self._manual_pen_mode == PEN_MODE_AUTO:
             self._pen_down_requested = bool(msg.pen_down)
@@ -377,36 +409,6 @@ class CableSupervisorPlugin:
         if self._right_mount_node is None:
             self._right_mount_node = self._find_named_descendant(self._target, 'right_cable_mount')
 
-    def _find_named_descendant(self, node, target_name, depth=0):
-        if node is None or depth > 40:
-            return None
-        try:
-            name_field = node.getField('name')
-            if name_field is not None and name_field.getSFString() == target_name:
-                return node
-        except Exception:
-            pass
-        try:
-            children_field = node.getField('children')
-            if children_field is not None:
-                for index in range(children_field.getCount()):
-                    child = children_field.getMFNode(index)
-                    result = self._find_named_descendant(child, target_name, depth + 1)
-                    if result is not None:
-                        return result
-        except Exception:
-            pass
-        try:
-            endpoint_field = node.getField('endPoint')
-            if endpoint_field is not None:
-                endpoint = endpoint_field.getSFNode()
-                result = self._find_named_descendant(endpoint, target_name, depth + 1)
-                if result is not None:
-                    return result
-        except Exception:
-            pass
-        return None
-
     def _world_position(self, node):
         if node is None:
             return None
@@ -431,105 +433,13 @@ class CableSupervisorPlugin:
         return self._world_from_local(position, orientation, local_point)
 
     def _find_joint_endpoint(self, node, motor_name, depth=0):
-        if node is None or depth > 40:
-            return None
-        try:
-            device_field = node.getField('device')
-            if device_field is not None:
-                for index in range(device_field.getCount()):
-                    device = device_field.getMFNode(index)
-                    if device is None:
-                        continue
-                    name_field = device.getField('name')
-                    if name_field is not None and name_field.getSFString() == motor_name:
-                        endpoint_field = node.getField('endPoint')
-                        if endpoint_field is not None:
-                            return endpoint_field.getSFNode()
-        except Exception:
-            pass
-        try:
-            children_field = node.getField('children')
-            if children_field is not None:
-                for index in range(children_field.getCount()):
-                    child = children_field.getMFNode(index)
-                    result = self._find_joint_endpoint(child, motor_name, depth + 1)
-                    if result is not None:
-                        return result
-        except Exception:
-            pass
-        try:
-            endpoint_field = node.getField('endPoint')
-            if endpoint_field is not None:
-                endpoint = endpoint_field.getSFNode()
-                result = self._find_joint_endpoint(endpoint, motor_name, depth + 1)
-                if result is not None:
-                    return result
-        except Exception:
-            pass
-        return None
+        return _wnav.find_joint_endpoint(node, motor_name, depth)
 
     def _find_named_descendant(self, node, target_name, depth=0):
-        if node is None or depth > 50:
-            return None
-        try:
-            name_field = node.getField('name')
-            if name_field is not None and name_field.getSFString() == target_name:
-                return node
-        except Exception:
-            pass
-        try:
-            children_field = node.getField('children')
-            if children_field is not None:
-                for index in range(children_field.getCount()):
-                    child = children_field.getMFNode(index)
-                    result = self._find_named_descendant(child, target_name, depth + 1)
-                    if result is not None:
-                        return result
-        except Exception:
-            pass
-        try:
-            endpoint_field = node.getField('endPoint')
-            if endpoint_field is not None:
-                endpoint = endpoint_field.getSFNode()
-                result = self._find_named_descendant(endpoint, target_name, depth + 1)
-                if result is not None:
-                    return result
-        except Exception:
-            pass
-        return None
+        return _wnav.find_named_descendant(node, target_name, depth)
 
     def _find_named_descendant_contains(self, node, name_fragment, depth=0):
-        if node is None or depth > 50:
-            return None
-        lowered_fragment = str(name_fragment).lower()
-        try:
-            name_field = node.getField('name')
-            if name_field is not None:
-                name_value = str(name_field.getSFString())
-                if lowered_fragment in name_value.lower():
-                    return node
-        except Exception:
-            pass
-        try:
-            children_field = node.getField('children')
-            if children_field is not None:
-                for index in range(children_field.getCount()):
-                    child = children_field.getMFNode(index)
-                    result = self._find_named_descendant_contains(child, lowered_fragment, depth + 1)
-                    if result is not None:
-                        return result
-        except Exception:
-            pass
-        try:
-            endpoint_field = node.getField('endPoint')
-            if endpoint_field is not None:
-                endpoint = endpoint_field.getSFNode()
-                result = self._find_named_descendant_contains(endpoint, lowered_fragment, depth + 1)
-                if result is not None:
-                    return result
-        except Exception:
-            pass
-        return None
+        return _wnav.find_named_descendant_contains(node, name_fragment, depth)
 
     def _find_pen_tip_node(self):
         endpoint = self._find_joint_endpoint(self._target, 'pen_slide_joint')
@@ -553,38 +463,16 @@ class CableSupervisorPlugin:
         return endpoint
 
     def _field(self, node, name):
-        try:
-            return node.getField(name)
-        except Exception:
-            return None
+        return _wnav.get_field(node, name)
 
     def _field_sfnode(self, node, name):
-        field = self._field(node, name)
-        if field is None:
-            return None
-        try:
-            return field.getSFNode()
-        except Exception:
-            return None
+        return _wnav.get_field_sfnode(node, name)
 
     def _field_sfvec3f(self, node, name):
-        field = self._field(node, name)
-        if field is None:
-            return None
-        try:
-            value = field.getSFVec3f()
-            return (float(value[0]), float(value[1]), float(value[2]))
-        except Exception:
-            return None
+        return _wnav.get_field_sfvec3f(node, name)
 
     def _field_sffloat(self, node, name):
-        field = self._field(node, name)
-        if field is None:
-            return None
-        try:
-            return float(field.getSFFloat())
-        except Exception:
-            return None
+        return _wnav.get_field_sffloat(node, name)
 
     def _vec3_add(self, a, b):
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
@@ -1065,7 +953,16 @@ class CableSupervisorPlugin:
                 return
             self._apply_target_pose(self._current_center[0], self._current_center[1])
 
-        if self._latest_setpoint is None:
+        # Drain one setpoint per Webots step. If the executor publishes faster
+        # than basicTimeStep we still cap the visible motion to a sane per-step
+        # delta below; if it publishes slower we just hold the last pose.
+        active_setpoint = None
+        if self._pending_setpoints:
+            active_setpoint = self._pending_setpoints.pop(0)
+        elif self._latest_setpoint is not None:
+            active_setpoint = self._latest_setpoint
+
+        if active_setpoint is None:
             self._set_status('waiting_for_setpoint')
             try:
                 self._latest_four_cable_lengths = self._compute_four_cable_lengths(
@@ -1076,20 +973,63 @@ class CableSupervisorPlugin:
                 self._latest_four_cable_lengths = None
             self._apply_target_pose(self._current_center[0], self._current_center[1])
         else:
-            center_x = float(self._latest_setpoint.carriage_pose.x)
-            center_y = float(self._latest_setpoint.carriage_pose.y)
+            center_x = float(active_setpoint.carriage_pose.x)
+            center_y = float(active_setpoint.carriage_pose.y)
             if not self._pose_within_safe_workspace(center_x, center_y):
                 self._set_status('error')
             else:
+                # Clamp the per-step delta. If the requested pose is far away
+                # we approach it in a straight line at <= _MAX_STEP_TELEPORT_M
+                # per Webots step. The remaining distance is recovered on the
+                # next step by re-reading the same target through the queue,
+                # so we re-insert ``active_setpoint`` at the front when we did
+                # not reach it yet.
+                cur_x, cur_y = self._current_center
+                dx = center_x - cur_x
+                dy = center_y - cur_y
+                distance = math.hypot(dx, dy)
+                reached_target = True
+                if distance > _MAX_STEP_TELEPORT_M and distance > 0.0:
+                    scale = _MAX_STEP_TELEPORT_M / distance
+                    center_x = cur_x + dx * scale
+                    center_y = cur_y + dy * scale
+                    reached_target = False
                 try:
-                    self._latest_four_cable_lengths = self._compute_four_cable_lengths(center_x, center_y)
+                    self._latest_four_cable_lengths = self._compute_four_cable_lengths(
+                        center_x, center_y,
+                    )
                 except ValueError:
                     self._set_status('error')
                 else:
                     self._apply_target_pose(center_x, center_y)
                     self._set_status('tracking')
+                    if not reached_target:
+                        # Push the original target back so the next step keeps
+                        # advancing toward it instead of dropping it.
+                        self._pending_setpoints.insert(0, active_setpoint)
 
         self._publish_robot_pose(self._current_center[0], self._current_center[1])
         self._update_cable_visuals(self._current_center[0], self._current_center[1])
         self._update_pen_state()
         self._cleanup_trail_if_disabled()
+
+    def cleanup(self):
+        """Release the rclpy node owned by this plugin.
+
+        Webots calls this when the controller shuts down. Mirrors the pattern
+        used by ``CableRobotPlugin.cleanup`` so the plugin does not leak an
+        rclpy node across Webots restarts.
+        """
+        node = getattr(self, '_node', None)
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+            self._node = None
+
+    def __del__(self):
+        try:
+            self.cleanup()
+        except Exception:
+            pass

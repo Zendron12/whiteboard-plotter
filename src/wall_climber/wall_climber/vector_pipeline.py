@@ -47,6 +47,9 @@ from wall_climber.canonical_path import (
     QuadraticBezier,
     TravelMove,
 )
+from wall_climber import _geometry_helpers as _geom
+from wall_climber import _stroke_helpers as _strokes
+from wall_climber import _svg_helpers as _svg
 from wall_climber.shared_config import load_shared_config
 from wall_climber.text_vector_font import get_glyph as get_legacy_glyph
 
@@ -405,63 +408,31 @@ def _measure_text_token_width(
 
 
 def _distance(a: _Point, b: _Point) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+    return _geom.distance(a, b)
 
 
 def _midpoint(a: _Point, b: _Point) -> _Point:
-    return (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+    return _geom.midpoint(a, b)
 
 
 def _point_line_distance(point: _Point, start: _Point, end: _Point) -> float:
-    if _distance(start, end) <= _EPS:
-        return _distance(point, start)
-    px, py = point
-    x1, y1 = start
-    x2, y2 = end
-    dx = x2 - x1
-    dy = y2 - y1
-    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-    proj = (x1 + t * dx, y1 + t * dy)
-    return _distance(point, proj)
+    return _geom.point_line_distance(point, start, end)
 
 
 def _rdp(points: list[_Point], epsilon: float) -> list[_Point]:
-    if len(points) <= 2:
-        return points
-    start = points[0]
-    end = points[-1]
-    max_dist = -1.0
-    split_index = -1
-    for index in range(1, len(points) - 1):
-        dist = _point_line_distance(points[index], start, end)
-        if dist > max_dist:
-            max_dist = dist
-            split_index = index
-    if max_dist <= epsilon or split_index < 0:
-        return [start, end]
-    left = _rdp(points[: split_index + 1], epsilon)
-    right = _rdp(points[split_index:], epsilon)
-    return left[:-1] + right
+    return _geom.rdp(points, epsilon)
 
 
 def _quadratic_flatness(p0: _Point, p1: _Point, p2: _Point) -> float:
-    return _point_line_distance(p1, p0, p2)
+    return _geom.quadratic_flatness(p0, p1, p2)
 
 
 def _cubic_flatness(p0: _Point, p1: _Point, p2: _Point, p3: _Point) -> float:
-    return max(_point_line_distance(p1, p0, p3), _point_line_distance(p2, p0, p3))
+    return _geom.cubic_flatness(p0, p1, p2, p3)
 
 
 def _flatten_quadratic(p0: _Point, p1: _Point, p2: _Point, tol: float, depth: int = 0) -> list[_Point]:
-    if depth >= 12 or _quadratic_flatness(p0, p1, p2) <= tol:
-        return [p0, p2]
-    p01 = _midpoint(p0, p1)
-    p12 = _midpoint(p1, p2)
-    p012 = _midpoint(p01, p12)
-    left = _flatten_quadratic(p0, p01, p012, tol, depth + 1)
-    right = _flatten_quadratic(p012, p12, p2, tol, depth + 1)
-    return left[:-1] + right
+    return _geom.flatten_quadratic(p0, p1, p2, tol, depth)
 
 
 def _flatten_cubic(
@@ -472,31 +443,11 @@ def _flatten_cubic(
     tol: float,
     depth: int = 0,
 ) -> list[_Point]:
-    if depth >= 12 or _cubic_flatness(p0, p1, p2, p3) <= tol:
-        return [p0, p3]
-    p01 = _midpoint(p0, p1)
-    p12 = _midpoint(p1, p2)
-    p23 = _midpoint(p2, p3)
-    p012 = _midpoint(p01, p12)
-    p123 = _midpoint(p12, p23)
-    p0123 = _midpoint(p012, p123)
-    left = _flatten_cubic(p0, p01, p012, p0123, tol, depth + 1)
-    right = _flatten_cubic(p0123, p123, p23, p3, tol, depth + 1)
-    return left[:-1] + right
+    return _geom.flatten_cubic(p0, p1, p2, p3, tol, depth)
 
 
 def _sanitize_stroke(points: list[_Point]) -> tuple[_Point, ...] | None:
-    deduped: list[_Point] = []
-    for point in points:
-        if not deduped:
-            deduped.append(point)
-            continue
-        if _distance(deduped[-1], point) <= _EPS:
-            continue
-        deduped.append(point)
-    if len(deduped) < 2:
-        return None
-    return tuple(deduped)
+    return _geom.sanitize_stroke(points)
 
 
 def _strokes_bounds(strokes: tuple[tuple[_Point, ...], ...]) -> VectorBounds:
@@ -510,42 +461,23 @@ def _strokes_bounds(strokes: tuple[tuple[_Point, ...], ...]) -> VectorBounds:
 
 
 def _stroke_length(points: tuple[_Point, ...]) -> float:
-    return sum(_distance(points[index - 1], points[index]) for index in range(1, len(points)))
+    return _strokes.stroke_length(points)
 
 
 def _stroke_heading(points: tuple[_Point, ...], *, from_start: bool) -> float | None:
-    if len(points) < 2:
-        return None
-    pairs = zip(points[:-1], points[1:]) if from_start else zip(reversed(points[1:]), reversed(points[:-1]))
-    for start, end in pairs:
-        if _distance(start, end) <= _EPS:
-            continue
-        return math.atan2(end[1] - start[1], end[0] - start[0])
-    return None
+    return _strokes.stroke_heading(points, from_start=from_start)
 
 
 def _heading_delta_deg(first: float | None, second: float | None) -> float:
-    if first is None or second is None:
-        return 0.0
-    delta = math.atan2(math.sin(second - first), math.cos(second - first))
-    return abs(math.degrees(delta))
+    return _strokes.heading_delta_deg(first, second)
 
 
 def _heading_change_deg(prev_point: _Point, point: _Point, next_point: _Point) -> float:
-    before = math.atan2(point[1] - prev_point[1], point[0] - prev_point[0])
-    after = math.atan2(next_point[1] - point[1], next_point[0] - point[0])
-    delta = math.atan2(math.sin(after - before), math.cos(after - before))
-    return abs(math.degrees(delta))
+    return _strokes.heading_change_deg(prev_point, point, next_point)
 
 
 def _stroke_has_preserved_short_feature(points: tuple[_Point, ...], min_feature_len: float) -> bool:
-    if len(points) <= 2:
-        return True
-    if _stroke_length(points) <= max(min_feature_len * 3.0, 1.0e-6):
-        return True
-    first_seg = _distance(points[0], points[1])
-    last_seg = _distance(points[-2], points[-1])
-    return first_seg <= min_feature_len or last_seg <= min_feature_len
+    return _strokes.stroke_has_preserved_short_feature(points, min_feature_len)
 
 
 def _protected_stroke_indices(
@@ -554,20 +486,9 @@ def _protected_stroke_indices(
     *,
     corner_threshold_deg: float = 22.0,
 ) -> tuple[int, ...]:
-    if len(points) <= 2:
-        return tuple(range(len(points)))
-    protected = {0, len(points) - 1}
-    if _stroke_has_preserved_short_feature(points, min_feature_len):
-        protected.update(range(len(points)))
-        return tuple(sorted(protected))
-    for index in range(1, len(points) - 1):
-        if _heading_change_deg(points[index - 1], points[index], points[index + 1]) >= corner_threshold_deg:
-            protected.add(index)
-    for index in range(1, len(points)):
-        if _distance(points[index - 1], points[index]) <= min_feature_len:
-            protected.add(index - 1)
-            protected.add(index)
-    return tuple(sorted(protected))
+    return _strokes.protected_stroke_indices(
+        points, min_feature_len, corner_threshold_deg=corner_threshold_deg,
+    )
 
 
 def _simplify_stroke_preserving_features(
@@ -575,42 +496,13 @@ def _simplify_stroke_preserving_features(
     simplify_epsilon: float,
     min_feature_len: float,
 ) -> tuple[_Point, ...]:
-    if simplify_epsilon <= 0.0 or len(points) <= 2:
-        return points
-    protected = _protected_stroke_indices(points, min_feature_len)
-    if len(protected) >= len(points):
-        return points
-    simplified: list[_Point] = [points[0]]
-    for start_index, end_index in zip(protected[:-1], protected[1:]):
-        span = list(points[start_index:end_index + 1])
-        if len(span) <= 2:
-            reduced = span
-        else:
-            reduced = _rdp(span, simplify_epsilon)
-        simplified.extend(reduced[1:])
-    sanitized = _sanitize_stroke(simplified)
-    return sanitized if sanitized is not None else points
+    return _strokes.simplify_stroke_preserving_features(
+        points, simplify_epsilon, min_feature_len,
+    )
 
 
 def _interpolate_along_stroke(points: tuple[_Point, ...], distance_along: float) -> _Point:
-    if distance_along <= 0.0:
-        return points[0]
-    traveled = 0.0
-    for index in range(1, len(points)):
-        start = points[index - 1]
-        end = points[index]
-        segment_length = _distance(start, end)
-        if segment_length <= _EPS:
-            continue
-        next_traveled = traveled + segment_length
-        if distance_along <= next_traveled + _EPS:
-            ratio = (distance_along - traveled) / segment_length
-            return (
-                start[0] + (end[0] - start[0]) * ratio,
-                start[1] + (end[1] - start[1]) * ratio,
-            )
-        traveled = next_traveled
-    return points[-1]
+    return _strokes.interpolate_along_stroke(points, distance_along)
 
 
 def _resample_stroke_preserving_features(
@@ -618,31 +510,9 @@ def _resample_stroke_preserving_features(
     resample_step_m: float,
     min_feature_len: float,
 ) -> tuple[_Point, ...]:
-    if resample_step_m <= 0.0 or len(points) <= 2:
-        return points
-    if _stroke_has_preserved_short_feature(points, min_feature_len):
-        return points
-    protected = _protected_stroke_indices(points, min_feature_len)
-    if len(protected) >= len(points):
-        return points
-    resampled: list[_Point] = [points[0]]
-    for start_index, end_index in zip(protected[:-1], protected[1:]):
-        span = points[start_index:end_index + 1]
-        span_length = _stroke_length(span)
-        if span_length <= resample_step_m + _EPS:
-            if _distance(resampled[-1], span[-1]) > _EPS:
-                resampled.append(span[-1])
-            continue
-        target = resample_step_m
-        while target < span_length - _EPS:
-            point = _interpolate_along_stroke(span, target)
-            if _distance(resampled[-1], point) > _EPS:
-                resampled.append(point)
-            target += resample_step_m
-        if _distance(resampled[-1], span[-1]) > _EPS:
-            resampled.append(span[-1])
-    sanitized = _sanitize_stroke(resampled)
-    return sanitized if sanitized is not None else points
+    return _strokes.resample_stroke_preserving_features(
+        points, resample_step_m, min_feature_len,
+    )
 
 
 def _apply_text_vector_cleanup(
@@ -840,21 +710,11 @@ def _svg_stroke_font_candidates(
 
 
 def _svg_tag_name(tag: str) -> str:
-    if '}' in tag:
-        return tag.split('}', 1)[1]
-    return tag
+    return _svg.svg_tag_name(tag)
 
 
 def _parse_svg_float(value: str | None, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    cleaned = value.strip()
-    if not cleaned:
-        return default
-    cleaned = re.sub(r'[^0-9eE+\-.]', '', cleaned)
-    if not cleaned:
-        return default
-    return float(cleaned)
+    return _svg.parse_float(value, default)
 
 
 @lru_cache(maxsize=4)
@@ -1712,32 +1572,12 @@ def vectorize_text(
     return all_strokes
 
 
-def _svg_tag_name(tag: str) -> str:
-    if '}' in tag:
-        return tag.split('}', 1)[1]
-    return tag
-
-
 def _parse_float(value: str | None, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    cleaned = value.strip()
-    if not cleaned:
-        return default
-    cleaned = re.sub(r'[^0-9eE+\-.]', '', cleaned)
-    if not cleaned:
-        return default
-    return float(cleaned)
+    return _svg.parse_float(value, default)
 
 
 def _parse_points_attr(raw: str) -> list[_Point]:
-    values = re.findall(r'[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?', raw)
-    if len(values) < 4 or len(values) % 2 != 0:
-        raise ValueError('Invalid SVG points attribute.')
-    points: list[_Point] = []
-    for index in range(0, len(values), 2):
-        points.append((float(values[index]), float(values[index + 1])))
-    return points
+    return _svg.parse_points_attr(raw)
 
 
 def _parse_svg_path_d(
@@ -1918,8 +1758,7 @@ def _parse_svg_path_d(
 
 
 def _has_svg_transform(element: ET.Element) -> bool:
-    transform = element.attrib.get('transform')
-    return isinstance(transform, str) and bool(transform.strip())
+    return _svg.has_svg_transform(element)
 
 
 def vectorize_svg(

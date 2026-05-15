@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from wall_climber import _optimizer_geometry as _geom
+from wall_climber import _optimizer_merge as _merge
 from wall_climber.canonical_path import (
     ArcSegment,
     CanonicalCommand,
@@ -18,7 +20,7 @@ from wall_climber.canonical_path import (
 )
 
 
-_EPS = 1.0e-9
+_EPS = _geom.EPS
 
 
 @dataclass(frozen=True)
@@ -108,99 +110,35 @@ class _DrawUnit:
 
 
 def _distance(a: Point2D, b: Point2D) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+    return _geom.distance(a, b)
 
 
 def _approximately_equal(a: Point2D, b: Point2D, *, eps: float = _EPS) -> bool:
-    return _distance(a, b) <= eps
+    return _geom.approximately_equal(a, b, eps=eps)
 
 
 def _angle_delta_deg(first: float, second: float) -> float:
-    delta = math.atan2(math.sin(second - first), math.cos(second - first))
-    return abs(math.degrees(delta))
+    return _geom.angle_delta_deg(first, second)
 
 
 def _primitive_start(command: CanonicalCommand) -> Point2D:
-    if isinstance(command, TravelMove):
-        return command.start
-    if isinstance(command, LineSegment):
-        return command.start
-    if isinstance(command, QuadraticBezier):
-        return command.start
-    if isinstance(command, CubicBezier):
-        return command.start
-    if isinstance(command, ArcSegment):
-        return (
-            command.center[0] + command.radius * math.cos(command.start_angle_rad),
-            command.center[1] + command.radius * math.sin(command.start_angle_rad),
-        )
-    raise ValueError(f'Unsupported primitive {type(command)!r}.')
+    return _geom.primitive_start(command)
 
 
 def _primitive_end(command: CanonicalCommand) -> Point2D:
-    if isinstance(command, TravelMove):
-        return command.end
-    if isinstance(command, LineSegment):
-        return command.end
-    if isinstance(command, QuadraticBezier):
-        return command.end
-    if isinstance(command, CubicBezier):
-        return command.end
-    if isinstance(command, ArcSegment):
-        angle = command.start_angle_rad + command.sweep_angle_rad
-        return (
-            command.center[0] + command.radius * math.cos(angle),
-            command.center[1] + command.radius * math.sin(angle),
-        )
-    raise ValueError(f'Unsupported primitive {type(command)!r}.')
+    return _geom.primitive_end(command)
 
 
 def _primitive_length(command: CanonicalCommand) -> float:
-    if isinstance(command, (TravelMove, LineSegment)):
-        return _distance(command.start, command.end)
-    if isinstance(command, ArcSegment):
-        return abs(command.radius * command.sweep_angle_rad)
-    if isinstance(command, QuadraticBezier):
-        return (
-            _distance(command.start, command.control)
-            + _distance(command.control, command.end)
-        )
-    if isinstance(command, CubicBezier):
-        return (
-            _distance(command.start, command.control1)
-            + _distance(command.control1, command.control2)
-            + _distance(command.control2, command.end)
-        )
-    raise ValueError(f'Unsupported primitive {type(command)!r}.')
+    return _geom.primitive_length(command)
 
 
 def _is_draw_primitive(command: CanonicalCommand) -> bool:
-    return isinstance(
-        command,
-        (LineSegment, ArcSegment, QuadraticBezier, CubicBezier),
-    )
+    return _geom.is_draw_primitive(command)
 
 
 def _reverse_draw_command(command: CanonicalCommand) -> CanonicalCommand:
-    if isinstance(command, LineSegment):
-        return LineSegment(start=command.end, end=command.start)
-    if isinstance(command, QuadraticBezier):
-        return QuadraticBezier(start=command.end, control=command.control, end=command.start)
-    if isinstance(command, CubicBezier):
-        return CubicBezier(
-            start=command.end,
-            control1=command.control2,
-            control2=command.control1,
-            end=command.start,
-        )
-    if isinstance(command, ArcSegment):
-        return ArcSegment(
-            center=command.center,
-            radius=command.radius,
-            start_angle_rad=command.start_angle_rad + command.sweep_angle_rad,
-            sweep_angle_rad=-command.sweep_angle_rad,
-        )
-    raise ValueError(f'Unsupported draw command {type(command)!r}.')
+    return _geom.reverse_draw_command(command)
 
 
 def _reverse_unit(unit: _DrawUnit) -> _DrawUnit:
@@ -211,7 +149,7 @@ def _reverse_unit(unit: _DrawUnit) -> _DrawUnit:
 
 
 def _line_heading(line: LineSegment) -> float:
-    return math.atan2(line.end[1] - line.start[1], line.end[0] - line.start[0])
+    return _geom.line_heading(line)
 
 
 def _can_merge_lines(
@@ -221,32 +159,24 @@ def _can_merge_lines(
     angle_tolerance_deg: float,
     distance_tolerance_m: float,
 ) -> bool:
-    if not _approximately_equal(first.end, second.start, eps=distance_tolerance_m):
-        return False
-    if _distance(first.start, first.end) <= distance_tolerance_m:
-        return False
-    if _distance(second.start, second.end) <= distance_tolerance_m:
-        return False
-    return _angle_delta_deg(_line_heading(first), _line_heading(second)) <= angle_tolerance_deg
+    return _merge.can_merge_lines(
+        first,
+        second,
+        angle_tolerance_deg=angle_tolerance_deg,
+        distance_tolerance_m=distance_tolerance_m,
+    )
 
 
 def _merge_lines(first: LineSegment, second: LineSegment) -> LineSegment:
-    return LineSegment(start=first.start, end=second.end)
+    return _merge.merge_lines(first, second)
 
 
 def _arc_start(command: ArcSegment) -> Point2D:
-    return (
-        command.center[0] + command.radius * math.cos(command.start_angle_rad),
-        command.center[1] + command.radius * math.sin(command.start_angle_rad),
-    )
+    return _geom.arc_start(command)
 
 
 def _arc_end(command: ArcSegment) -> Point2D:
-    angle = command.start_angle_rad + command.sweep_angle_rad
-    return (
-        command.center[0] + command.radius * math.cos(angle),
-        command.center[1] + command.radius * math.sin(angle),
-    )
+    return _geom.arc_end(command)
 
 
 def _can_merge_arcs(
@@ -256,126 +186,48 @@ def _can_merge_arcs(
     angle_tolerance_deg: float,
     distance_tolerance_m: float,
 ) -> bool:
-    if not _approximately_equal(first.center, second.center, eps=distance_tolerance_m):
-        return False
-    if abs(first.radius - second.radius) > distance_tolerance_m:
-        return False
-    if not _approximately_equal(_arc_end(first), _arc_start(second), eps=distance_tolerance_m):
-        return False
-    if (first.sweep_angle_rad >= 0.0) != (second.sweep_angle_rad >= 0.0):
-        return False
-    tangent_first = first.start_angle_rad + first.sweep_angle_rad + (math.pi / 2.0 if first.sweep_angle_rad >= 0.0 else -math.pi / 2.0)
-    tangent_second = second.start_angle_rad + (math.pi / 2.0 if second.sweep_angle_rad >= 0.0 else -math.pi / 2.0)
-    return _angle_delta_deg(tangent_first, tangent_second) <= angle_tolerance_deg
+    return _merge.can_merge_arcs(
+        first,
+        second,
+        angle_tolerance_deg=angle_tolerance_deg,
+        distance_tolerance_m=distance_tolerance_m,
+    )
 
 
 def _merge_arcs(first: ArcSegment, second: ArcSegment) -> ArcSegment:
-    return ArcSegment(
-        center=first.center,
-        radius=first.radius,
-        start_angle_rad=first.start_angle_rad,
-        sweep_angle_rad=first.sweep_angle_rad + second.sweep_angle_rad,
-    )
+    return _merge.merge_arcs(first, second)
 
 
 def _vector_angle(vector: Point2D) -> float:
-    return math.atan2(vector[1], vector[0])
+    return _geom.vector_angle(vector)
 
 
 def _quadratic_derivative(command: QuadraticBezier, t: float) -> Point2D:
-    omt = 1.0 - t
-    return (
-        2.0 * omt * (command.control[0] - command.start[0]) + 2.0 * t * (command.end[0] - command.control[0]),
-        2.0 * omt * (command.control[1] - command.start[1]) + 2.0 * t * (command.end[1] - command.control[1]),
-    )
+    return _geom.quadratic_derivative(command, t)
 
 
 def _cubic_derivative(command: CubicBezier, t: float) -> Point2D:
-    omt = 1.0 - t
-    return (
-        3.0 * omt * omt * (command.control1[0] - command.start[0])
-        + 6.0 * omt * t * (command.control2[0] - command.control1[0])
-        + 3.0 * t * t * (command.end[0] - command.control2[0]),
-        3.0 * omt * omt * (command.control1[1] - command.start[1])
-        + 6.0 * omt * t * (command.control2[1] - command.control1[1])
-        + 3.0 * t * t * (command.end[1] - command.control2[1]),
-    )
+    return _geom.cubic_derivative(command, t)
 
 
 def _tangent_angle(command: CanonicalCommand, *, at_end: bool) -> float | None:
-    derivative: Point2D | None = None
-    if isinstance(command, LineSegment):
-        derivative = (
-            command.end[0] - command.start[0],
-            command.end[1] - command.start[1],
-        )
-    elif isinstance(command, ArcSegment):
-        angle = command.start_angle_rad + (command.sweep_angle_rad if at_end else 0.0)
-        offset = math.pi / 2.0 if command.sweep_angle_rad >= 0.0 else -math.pi / 2.0
-        derivative = (math.cos(angle + offset), math.sin(angle + offset))
-    elif isinstance(command, QuadraticBezier):
-        derivative = _quadratic_derivative(command, 1.0 if at_end else 0.0)
-    elif isinstance(command, CubicBezier):
-        derivative = _cubic_derivative(command, 1.0 if at_end else 0.0)
-    if derivative is None or math.hypot(*derivative) <= _EPS:
-        return None
-    return _vector_angle(derivative)
+    return _geom.tangent_angle(command, at_end=at_end)
 
 
 def _evaluate_quadratic(command: QuadraticBezier, t: float) -> Point2D:
-    omt = 1.0 - t
-    return (
-        (omt * omt * command.start[0]) + (2.0 * omt * t * command.control[0]) + (t * t * command.end[0]),
-        (omt * omt * command.start[1]) + (2.0 * omt * t * command.control[1]) + (t * t * command.end[1]),
-    )
+    return _geom.evaluate_quadratic(command, t)
 
 
 def _evaluate_cubic(command: CubicBezier, t: float) -> Point2D:
-    omt = 1.0 - t
-    return (
-        (omt ** 3 * command.start[0])
-        + (3.0 * omt * omt * t * command.control1[0])
-        + (3.0 * omt * t * t * command.control2[0])
-        + (t ** 3 * command.end[0]),
-        (omt ** 3 * command.start[1])
-        + (3.0 * omt * omt * t * command.control1[1])
-        + (3.0 * omt * t * t * command.control2[1])
-        + (t ** 3 * command.end[1]),
-    )
+    return _geom.evaluate_cubic(command, t)
 
 
 def _sample_curve_command(command: CanonicalCommand, *, segments: int) -> tuple[Point2D, ...]:
-    segments = max(2, int(segments))
-    if isinstance(command, LineSegment):
-        return (
-            command.start,
-            command.end,
-        )
-    if isinstance(command, ArcSegment):
-        return tuple(
-            (
-                command.center[0] + command.radius * math.cos(command.start_angle_rad + (command.sweep_angle_rad * (index / segments))),
-                command.center[1] + command.radius * math.sin(command.start_angle_rad + (command.sweep_angle_rad * (index / segments))),
-            )
-            for index in range(segments + 1)
-        )
-    if isinstance(command, QuadraticBezier):
-        return tuple(_evaluate_quadratic(command, index / segments) for index in range(segments + 1))
-    if isinstance(command, CubicBezier):
-        return tuple(_evaluate_cubic(command, index / segments) for index in range(segments + 1))
-    raise ValueError(f'Unsupported curve command {type(command)!r}.')
+    return _geom.sample_curve_command(command, segments=segments)
 
 
 def _chord_length_parameters(points: tuple[Point2D, ...]) -> tuple[float, ...]:
-    if len(points) <= 1:
-        return (0.0,)
-    distances = [0.0]
-    for index in range(1, len(points)):
-        distances.append(distances[-1] + _distance(points[index - 1], points[index]))
-    total = distances[-1]
-    if total <= _EPS:
-        return tuple(index / max(1, len(points) - 1) for index in range(len(points)))
-    return tuple(distance / total for distance in distances)
+    return _geom.chord_length_parameters(points)
 
 
 def _solve_cubic_controls(
@@ -383,65 +235,7 @@ def _solve_cubic_controls(
     *,
     parameters: tuple[float, ...] | None = None,
 ) -> CubicBezier | None:
-    if len(points) < 4:
-        return None
-    start = points[0]
-    end = points[-1]
-    if parameters is None or len(parameters) != len(points):
-        parameters = _chord_length_parameters(points)
-    rows: list[list[float]] = []
-    rhs_x: list[float] = []
-    rhs_y: list[float] = []
-    for point, t in zip(points[1:-1], parameters[1:-1]):
-        omt = 1.0 - t
-        basis0 = omt ** 3
-        basis1 = 3.0 * omt * omt * t
-        basis2 = 3.0 * omt * t * t
-        basis3 = t ** 3
-        rows.append([basis1, basis2])
-        rhs_x.append(point[0] - ((basis0 * start[0]) + (basis3 * end[0])))
-        rhs_y.append(point[1] - ((basis0 * start[1]) + (basis3 * end[1])))
-    if len(rows) < 2:
-        return None
-
-    matrix_a = (
-        (0.0, 0.0),
-        (0.0, 0.0),
-    )
-    vec_x = [0.0, 0.0]
-    vec_y = [0.0, 0.0]
-    for (basis1, basis2), x_value, y_value in zip(rows, rhs_x, rhs_y):
-        matrix_a = (
-            (matrix_a[0][0] + (basis1 * basis1), matrix_a[0][1] + (basis1 * basis2)),
-            (matrix_a[1][0] + (basis2 * basis1), matrix_a[1][1] + (basis2 * basis2)),
-        )
-        vec_x[0] += basis1 * x_value
-        vec_x[1] += basis2 * x_value
-        vec_y[0] += basis1 * y_value
-        vec_y[1] += basis2 * y_value
-
-    determinant = (matrix_a[0][0] * matrix_a[1][1]) - (matrix_a[0][1] * matrix_a[1][0])
-    if abs(determinant) <= _EPS:
-        return None
-
-    def solve(rhs: list[float]) -> tuple[float, float]:
-        return (
-            ((rhs[0] * matrix_a[1][1]) - (matrix_a[0][1] * rhs[1])) / determinant,
-            ((matrix_a[0][0] * rhs[1]) - (rhs[0] * matrix_a[1][0])) / determinant,
-        )
-
-    control_x = solve(vec_x)
-    control_y = solve(vec_y)
-    control1 = (float(control_x[0]), float(control_y[0]))
-    control2 = (float(control_x[1]), float(control_y[1]))
-    if not all(math.isfinite(value) for value in (*control1, *control2)):
-        return None
-    return CubicBezier(
-        start=start,
-        control1=control1,
-        control2=control2,
-        end=end,
-    )
+    return _merge.solve_cubic_controls(points, parameters=parameters)
 
 
 def _reduce_cubic_to_quadratic(
@@ -450,28 +244,11 @@ def _reduce_cubic_to_quadratic(
     fit_tolerance_m: float,
     sampled_points: tuple[Point2D, ...],
 ) -> QuadraticBezier | None:
-    q1 = (
-        (3.0 * cubic.control1[0] - cubic.start[0]) * 0.5,
-        (3.0 * cubic.control1[1] - cubic.start[1]) * 0.5,
+    return _merge.reduce_cubic_to_quadratic(
+        cubic,
+        fit_tolerance_m=fit_tolerance_m,
+        sampled_points=sampled_points,
     )
-    q2 = (
-        (3.0 * cubic.control2[0] - cubic.end[0]) * 0.5,
-        (3.0 * cubic.control2[1] - cubic.end[1]) * 0.5,
-    )
-    if _distance(q1, q2) > max(fit_tolerance_m * 0.6, 1.0e-4):
-        return None
-    quadratic = QuadraticBezier(
-        start=cubic.start,
-        control=((q1[0] + q2[0]) * 0.5, (q1[1] + q2[1]) * 0.5),
-        end=cubic.end,
-    )
-    parameters = _chord_length_parameters(sampled_points)
-    max_error = 0.0
-    for point, t in zip(sampled_points, parameters):
-        max_error = max(max_error, _distance(_evaluate_quadratic(quadratic, t), point))
-    if max_error > fit_tolerance_m * 0.6:
-        return None
-    return quadratic
 
 
 def _can_merge_curve_pair(
@@ -481,13 +258,12 @@ def _can_merge_curve_pair(
     angle_tolerance_deg: float,
     distance_tolerance_m: float,
 ) -> bool:
-    if not _approximately_equal(_primitive_end(first), _primitive_start(second), eps=distance_tolerance_m):
-        return False
-    first_tangent = _tangent_angle(first, at_end=True)
-    second_tangent = _tangent_angle(second, at_end=False)
-    if first_tangent is None or second_tangent is None:
-        return False
-    return _angle_delta_deg(first_tangent, second_tangent) <= angle_tolerance_deg
+    return _merge.can_merge_curve_pair(
+        first,
+        second,
+        angle_tolerance_deg=angle_tolerance_deg,
+        distance_tolerance_m=distance_tolerance_m,
+    )
 
 
 def _merge_curve_pair(
@@ -498,57 +274,13 @@ def _merge_curve_pair(
     angle_tolerance_deg: float,
     distance_tolerance_m: float,
 ) -> CanonicalCommand | None:
-    if not isinstance(first, (QuadraticBezier, CubicBezier)) or not isinstance(second, (QuadraticBezier, CubicBezier)):
-        return None
-    if not _can_merge_curve_pair(
+    return _merge.merge_curve_pair(
         first,
         second,
+        fit_tolerance_m=fit_tolerance_m,
         angle_tolerance_deg=angle_tolerance_deg,
         distance_tolerance_m=distance_tolerance_m,
-    ):
-        return None
-
-    sampled = list(_sample_curve_command(first, segments=12))
-    second_sampled = _sample_curve_command(second, segments=12)
-    sampled.extend(second_sampled[1:])
-    sampled_points = tuple(sampled)
-    first_length = max(_primitive_length(first), distance_tolerance_m)
-    second_length = max(_primitive_length(second), distance_tolerance_m)
-    split_ratio = first_length / (first_length + second_length)
-    sampled_parameters = tuple(
-        (split_ratio * (index / 12.0)) for index in range(13)
-    ) + tuple(
-        split_ratio + ((1.0 - split_ratio) * (index / 12.0)) for index in range(1, 13)
     )
-    cubic = _solve_cubic_controls(sampled_points, parameters=sampled_parameters)
-    if cubic is None:
-        return None
-    max_error = 0.0
-    for point, t in zip(sampled_points, sampled_parameters):
-        max_error = max(max_error, _distance(_evaluate_cubic(cubic, t), point))
-    if max_error > fit_tolerance_m:
-        return None
-
-    start_tangent = _tangent_angle(cubic, at_end=False)
-    end_tangent = _tangent_angle(cubic, at_end=True)
-    first_outer = _tangent_angle(first, at_end=False)
-    second_outer = _tangent_angle(second, at_end=True)
-    if (
-        start_tangent is None
-        or end_tangent is None
-        or first_outer is None
-        or second_outer is None
-        or _angle_delta_deg(start_tangent, first_outer) > angle_tolerance_deg
-        or _angle_delta_deg(end_tangent, second_outer) > angle_tolerance_deg
-    ):
-        return None
-
-    quadratic = _reduce_cubic_to_quadratic(
-        cubic,
-        fit_tolerance_m=fit_tolerance_m,
-        sampled_points=sampled_points,
-    )
-    return quadratic or cubic
 
 
 def _circle_from_points(
@@ -556,34 +288,7 @@ def _circle_from_points(
     middle: Point2D,
     last: Point2D,
 ) -> tuple[Point2D, float] | None:
-    ax, ay = first
-    bx, by = middle
-    cx, cy = last
-    determinant = 2.0 * (
-        ax * (by - cy)
-        + bx * (cy - ay)
-        + cx * (ay - by)
-    )
-    if abs(determinant) <= _EPS:
-        return None
-    first_sq = (ax * ax) + (ay * ay)
-    middle_sq = (bx * bx) + (by * by)
-    last_sq = (cx * cx) + (cy * cy)
-    center_x = (
-        first_sq * (by - cy)
-        + middle_sq * (cy - ay)
-        + last_sq * (ay - by)
-    ) / determinant
-    center_y = (
-        first_sq * (cx - bx)
-        + middle_sq * (ax - cx)
-        + last_sq * (bx - ax)
-    ) / determinant
-    center = (center_x, center_y)
-    radius = _distance(center, first)
-    if not math.isfinite(radius) or radius <= _EPS:
-        return None
-    return center, radius
+    return _geom.circle_from_points(first, middle, last)
 
 
 def _unwrap_angles(
@@ -592,31 +297,11 @@ def _unwrap_angles(
     center: Point2D,
     clockwise: bool,
 ) -> tuple[float, ...] | None:
-    if len(points) < 2:
-        return None
-    angles = [math.atan2(point[1] - center[1], point[0] - center[0]) for point in points]
-    unwrapped = [angles[0]]
-    for angle in angles[1:]:
-        candidate = angle
-        if clockwise:
-            while candidate >= unwrapped[-1]:
-                candidate -= 2.0 * math.pi
-        else:
-            while candidate <= unwrapped[-1]:
-                candidate += 2.0 * math.pi
-        if abs(candidate - unwrapped[-1]) <= _EPS:
-            return None
-        unwrapped.append(candidate)
-    return tuple(unwrapped)
+    return _geom.unwrap_angles(points, center=center, clockwise=clockwise)
 
 
 def _polyline_points_from_lines(lines: tuple[LineSegment, ...]) -> tuple[Point2D, ...]:
-    points: list[Point2D] = [lines[0].start]
-    for line in lines:
-        if not _approximately_equal(points[-1], line.start, eps=1.0e-5):
-            return ()
-        points.append(line.end)
-    return tuple(points)
+    return _geom.polyline_points_from_lines(lines)
 
 
 def _fit_arc_from_line_chain(
@@ -624,61 +309,7 @@ def _fit_arc_from_line_chain(
     *,
     tolerance_m: float,
 ) -> ArcSegment | None:
-    if len(lines) < 3:
-        return None
-    polyline = _polyline_points_from_lines(lines)
-    if len(polyline) < 4:
-        return None
-
-    midpoint = polyline[len(polyline) // 2]
-    circle = _circle_from_points(polyline[0], midpoint, polyline[-1])
-    if circle is None:
-        return None
-    center, radius = circle
-
-    radial_error = max(abs(_distance(point, center) - radius) for point in polyline)
-    if radial_error > tolerance_m:
-        return None
-
-    signed_turn = 0.0
-    for index in range(1, len(polyline) - 1):
-        first = (
-            polyline[index][0] - polyline[index - 1][0],
-            polyline[index][1] - polyline[index - 1][1],
-        )
-        second = (
-            polyline[index + 1][0] - polyline[index][0],
-            polyline[index + 1][1] - polyline[index][1],
-        )
-        signed_turn += math.atan2(
-            (first[0] * second[1]) - (first[1] * second[0]),
-            (first[0] * second[0]) + (first[1] * second[1]),
-        )
-    if abs(signed_turn) <= math.radians(10.0):
-        return None
-
-    clockwise = signed_turn < 0.0
-    unwrapped_angles = _unwrap_angles(polyline, center=center, clockwise=clockwise)
-    if unwrapped_angles is None:
-        return None
-
-    sweep = unwrapped_angles[-1] - unwrapped_angles[0]
-    if clockwise and sweep >= -_EPS:
-        return None
-    if not clockwise and sweep <= _EPS:
-        return None
-
-    arc_length = abs(radius * sweep)
-    polyline_length = sum(_distance(polyline[index - 1], polyline[index]) for index in range(1, len(polyline)))
-    if abs(polyline_length - arc_length) > max(tolerance_m * len(polyline), tolerance_m * 2.0):
-        return None
-
-    return ArcSegment(
-        center=center,
-        radius=radius,
-        start_angle_rad=unwrapped_angles[0],
-        sweep_angle_rad=sweep,
-    )
+    return _merge.fit_arc_from_line_chain(lines, tolerance_m=tolerance_m)
 
 
 def _primitive_descriptor(command: CanonicalCommand, *, precision_m: float) -> tuple[Any, ...]:

@@ -32,8 +32,7 @@
             <blink_period_sec>3.8</blink_period_sec>
             <blink_duration_sec>0.14</blink_duration_sec>
         </plugin>
-        <device reference="screen_link" type="Display">
-            <name>face_display</name>
+        <device reference="face_display" type="Display">
             <width>256</width>
             <height>128</height>
         </device>

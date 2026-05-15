@@ -5,7 +5,7 @@
 The existing Webots supervisor flow remains integrated into the same project structure:
 
 - `cable_draw_executor.cpp` publishes `CableSetpoint` messages.
-- `CableSetpoint.carriage_pose.x/y` are the carriage center in board coordinates. This was verified in `make_setpoint()`: the executor computes `carriage_center = pen_point - pen_offset`, assigns it to `carriage_pose.x/y`, and separately fills legacy `left_cable_length` and `right_cable_length`.
+- `CableSetpoint.carriage_pose.x/y` are the carriage center in board coordinates. This was verified in `make_setpoint()`: the executor computes `carriage_center = pen_point - pen_offset`, assigns it to `carriage_pose.x/y`, and fills `cable_lengths[0]` (top-left) and `cable_lengths[1]` (top-right) from the two top anchors it knows about. The bottom slots (`cable_lengths[2..3]`) stay as NaN because the executor does not carry the full four-anchor layout; the supervisor re-derives all four lengths from `carriage_pose`.
 - `CableSupervisorPlugin` receives the setpoint and applies the Webots carriage pose.
 - `cable_robot.yaml` remains the shared source for board, anchor, carriage, pen, execution, and visual defaults.
 - `cable_supervisor.urdf.xacro` passes the shared config into the existing supervisor plugin.

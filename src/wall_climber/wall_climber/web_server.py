@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import base64
 import hashlib
 import io
 import json
+import socket
 import threading
 import time
 import uuid
 import webbrowser
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -70,6 +69,16 @@ except ImportError as exc:
 else:
     _ROS_IMPORT_ERROR = None
 
+from wall_climber import _http_helpers as _http
+from wall_climber._debug_snapshots import DebugSnapshotStore
+from wall_climber._ttl_cache import TTLCache
+from wall_climber._uploads_store import (
+    DEFAULT_IMAGE_PREP_OPTIONS as _DEFAULT_IMAGE_PREP_OPTIONS,
+    PreparedImageArtifact,
+    UPLOAD_GC_MIN_INTERVAL_SECONDS as _UPLOAD_GC_MIN_INTERVAL_SECONDS,
+    UPLOAD_RETENTION_SECONDS as _UPLOAD_RETENTION_SECONDS,
+    UploadStore,
+)
 from wall_climber import canonical_adapters as _canonical_adapters
 from wall_climber.canonical_adapters import (
     SamplingPolicy,
@@ -207,18 +216,6 @@ _FACE_VALID_EXPRESSIONS = {
     'error',
 }
 _FACE_MAX_TEXT_CHARS = 18
-_DEFAULT_IMAGE_PREP_OPTIONS = {
-    'min_perimeter_px': 8.0,
-    'contour_simplify_ratio': 0.001,
-    'max_strokes': 4096,
-}
-
-
-@dataclass(frozen=True)
-class PreparedImageArtifact:
-    image_result: Any
-    defaults: dict[str, Any]
-    timings_ms: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -547,23 +544,17 @@ class BackendRuntime:
         self._executor = SingleThreadedExecutor()
         self._executor_thread: threading.Thread | None = None
         self._shutdown_lock = threading.Lock()
-        self._debug_lock = threading.Lock()
-        self._upload_lock = threading.Lock()
         self._started = False
         self._stopped = False
         self._server: uvicorn.Server | None = None
         self._share_dir = Path(get_package_share_directory('wall_climber'))
         self._web_dir = self._share_dir / 'web'
-        self._uploads_dir = Path.home() / '.ros' / 'wall_climber' / 'uploads'
-        self._uploads_dir.mkdir(parents=True, exist_ok=True)
-        self._image_prepare_pool = ThreadPoolExecutor(
+        self._uploads = UploadStore(
+            Path.home() / '.ros' / 'wall_climber' / 'uploads',
+            theta_ref_provider=lambda: node._shared.draw_execution.fixed_draw_theta_rad,
             max_workers=1,
-            thread_name_prefix='wall_climber_image_prepare',
         )
-        self._upload_processing: dict[str, dict[str, Any]] = {}
-        self._last_plan_debug: dict[str, Any] | None = None
-        self._last_execution_debug: dict[str, Any] | None = None
-        self._last_curve_fit_debug: dict[str, Any] | None = None
+        self._debug = DebugSnapshotStore()
 
     @property
     def node(self) -> WebBackendNode:
@@ -614,11 +605,15 @@ class BackendRuntime:
             except Exception:
                 pass
             try:
-                self._image_prepare_pool.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                self._image_prepare_pool.shutdown(wait=False)
+                self._uploads.shutdown()
+            except Exception:
+                pass
             if rclpy.ok():
                 rclpy.shutdown()
+
+    # ------------------------------------------------------------------
+    # Uploads (façade over UploadStore)
+    # ------------------------------------------------------------------
 
     def store_upload(
         self,
@@ -627,99 +622,10 @@ class BackendRuntime:
         *,
         upload_details: UploadedVectorFile,
     ) -> dict[str, Any]:
-        upload_id = uuid.uuid4().hex
-        extension = upload_details.extension
-        payload_path = self._uploads_dir / f'{upload_id}{extension}'
-        metadata_path = self._uploads_dir / f'{upload_id}.json'
-        payload_path.write_bytes(content)
-        metadata = {
-            'upload_id': upload_id,
-            'stored_filename': payload_path.name,
-            'metadata_filename': metadata_path.name,
-            'original_filename': upload.filename,
-            'content_type': upload.content_type,
-            'normalized_content_type': upload_details.normalized_content_type,
-            'source_type': upload_details.source_type,
-            'size_bytes': len(content),
-            'stored_only': True,
-            'created_at': datetime.now(timezone.utc).isoformat(),
-        }
-        if upload_details.image_size is not None:
-            metadata['image_size'] = {
-                'width_px': int(upload_details.image_size[0]),
-                'height_px': int(upload_details.image_size[1]),
-            }
-        metadata_path.write_text(json.dumps(metadata, separators=(',', ':'), indent=2), encoding='utf-8')
-        self._remember_upload(metadata)
-        if metadata['source_type'] == 'image':
-            self.ensure_upload_processing(upload_id, metadata=metadata, payload=content)
-        return metadata
+        return self._uploads.store_upload(upload, content, upload_details=upload_details)
 
     def load_upload(self, upload_id: str) -> tuple[dict[str, Any], bytes]:
-        metadata_path = self._uploads_dir / f'{upload_id}.json'
-        if not metadata_path.is_file():
-            raise HTTPException(status_code=404, detail='upload_id was not found')
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f'failed to read upload metadata: {exc}')
-        if not isinstance(metadata, dict):
-            raise HTTPException(status_code=500, detail='upload metadata is invalid')
-        metadata['source_type'] = infer_uploaded_source_type(
-            stored_filename=metadata.get('stored_filename'),
-            original_filename=metadata.get('original_filename'),
-            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
-            source_type=metadata.get('source_type'),
-        )
-        stored_filename = metadata.get('stored_filename')
-        if not isinstance(stored_filename, str) or not stored_filename:
-            raise HTTPException(status_code=500, detail='upload metadata is missing stored filename')
-        payload_path = self._uploads_dir / stored_filename
-        if not payload_path.is_file():
-            raise HTTPException(status_code=404, detail='stored upload payload is missing')
-        try:
-            payload = payload_path.read_bytes()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f'failed to read upload payload: {exc}')
-        return metadata, payload
-
-    def _default_processing_entry(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        source_type = infer_uploaded_source_type(
-            stored_filename=metadata.get('stored_filename'),
-            original_filename=metadata.get('original_filename'),
-            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
-            source_type=metadata.get('source_type'),
-        )
-        image_size = metadata.get('image_size') if isinstance(metadata.get('image_size'), dict) else None
-        entry = {
-            'upload_id': metadata.get('upload_id'),
-            'source_type': source_type,
-            'state': 'ready' if source_type == 'svg' else 'uploaded',
-            'stage': 'ready' if source_type == 'svg' else 'uploaded',
-            'progress': 1.0 if source_type == 'svg' else 0.0,
-            'message': 'SVG upload is ready.' if source_type == 'svg' else 'Upload stored and waiting for preprocessing.',
-            'image_size': dict(image_size) if image_size else None,
-            'route': None,
-            'timings_ms': {},
-            'curve_fit_summary': None,
-            'artifact': None,
-            'future': None,
-        }
-        return entry
-
-    def _remember_upload(self, metadata: dict[str, Any]) -> None:
-        upload_id = metadata.get('upload_id')
-        if not isinstance(upload_id, str) or not upload_id:
-            return
-        with self._upload_lock:
-            existing = self._upload_processing.get(upload_id)
-            if existing is None:
-                self._upload_processing[upload_id] = self._default_processing_entry(metadata)
-                return
-            if existing.get('image_size') is None and isinstance(metadata.get('image_size'), dict):
-                existing['image_size'] = dict(metadata['image_size'])
-            if existing.get('source_type') is None:
-                existing['source_type'] = metadata.get('source_type')
+        return self._uploads.load_upload(upload_id)
 
     def ensure_upload_processing(
         self,
@@ -728,87 +634,7 @@ class BackendRuntime:
         metadata: dict[str, Any] | None = None,
         payload: bytes | None = None,
     ) -> None:
-        if metadata is None:
-            metadata, payload = self.load_upload(upload_id)
-        self._remember_upload(metadata)
-        source_type = infer_uploaded_source_type(
-            stored_filename=metadata.get('stored_filename'),
-            original_filename=metadata.get('original_filename'),
-            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
-            source_type=metadata.get('source_type'),
-        )
-        if source_type != 'image':
-            return
-
-        with self._upload_lock:
-            entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
-            if entry.get('artifact') is not None and entry.get('state') == 'ready':
-                return
-            if entry.get('state') == 'error':
-                return
-            future = entry.get('future')
-            if isinstance(future, Future) and not future.done():
-                return
-            entry['state'] = 'processing'
-            entry['stage'] = 'vectorizing'
-            entry['progress'] = 0.15
-            entry['message'] = 'Preprocessing image in background.'
-            future = self._image_prepare_pool.submit(
-                self._prepare_image_upload_worker,
-                upload_id,
-                payload,
-            )
-            entry['future'] = future
-
-    def _prepare_image_upload_worker(self, upload_id: str, payload: bytes | None) -> None:
-        try:
-            if payload is None:
-                metadata, payload = self.load_upload(upload_id)
-            else:
-                metadata, _ = self.load_upload(upload_id)
-            defaults = dict(_DEFAULT_IMAGE_PREP_OPTIONS)
-            with self._upload_lock:
-                entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
-                entry['state'] = 'processing'
-                entry['stage'] = 'vectorizing'
-                entry['progress'] = 0.35
-                entry['message'] = 'Tracing and fitting image geometry.'
-            ingest_start = time.perf_counter()
-            image_result = vectorize_image_to_canonical_plan(
-                payload,
-                theta_ref=self._node._shared.draw_execution.fixed_draw_theta_rad,
-                **defaults,
-            )
-            timings_ms = {
-                'ingest_ms': max(0.0, (time.perf_counter() - ingest_start) * 1000.0),
-            }
-            artifact = PreparedImageArtifact(
-                image_result=image_result,
-                defaults=defaults,
-                timings_ms=timings_ms,
-            )
-            with self._upload_lock:
-                entry = self._upload_processing.setdefault(upload_id, self._default_processing_entry(metadata))
-                entry['state'] = 'ready'
-                entry['stage'] = 'ready'
-                entry['progress'] = 1.0
-                entry['message'] = 'Vector preview is ready.'
-                entry['route'] = image_result.route_decision.to_dict()
-                entry['timings_ms'] = dict(timings_ms)
-                entry['curve_fit_summary'] = dict(image_result.to_metadata().get('pipeline', {}).get('curve_fit_summary') or {})
-                entry['artifact'] = artifact
-                entry['future'] = None
-        except Exception as exc:
-            with self._upload_lock:
-                entry = self._upload_processing.setdefault(upload_id, {
-                    'upload_id': upload_id,
-                })
-                entry['state'] = 'error'
-                entry['stage'] = 'error'
-                entry['progress'] = 1.0
-                entry['message'] = str(exc)
-                entry['artifact'] = None
-                entry['future'] = None
+        self._uploads.ensure_processing(upload_id, metadata=metadata, payload=payload)
 
     def upload_processing_snapshot(
         self,
@@ -817,31 +643,9 @@ class BackendRuntime:
         metadata: dict[str, Any] | None = None,
         payload: bytes | None = None,
     ) -> dict[str, Any]:
-        if metadata is None:
-            metadata, payload = self.load_upload(upload_id)
-        self._remember_upload(metadata)
-        source_type = infer_uploaded_source_type(
-            stored_filename=metadata.get('stored_filename'),
-            original_filename=metadata.get('original_filename'),
-            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
-            source_type=metadata.get('source_type'),
+        return self._uploads.processing_snapshot(
+            upload_id, metadata=metadata, payload=payload,
         )
-        if source_type == 'image':
-            self.ensure_upload_processing(upload_id, metadata=metadata, payload=payload)
-        with self._upload_lock:
-            entry = dict(self._upload_processing.get(upload_id) or self._default_processing_entry(metadata))
-        return {
-            'upload_id': upload_id,
-            'source_type': source_type,
-            'state': str(entry.get('state') or 'uploaded'),
-            'stage': str(entry.get('stage') or 'uploaded'),
-            'progress': float(entry.get('progress') or 0.0),
-            'message': str(entry.get('message') or ''),
-            'image_size': dict(entry['image_size']) if isinstance(entry.get('image_size'), dict) else None,
-            'route': dict(entry['route']) if isinstance(entry.get('route'), dict) else None,
-            'timings_ms': dict(entry.get('timings_ms') or {}),
-            'curve_fit_summary': dict(entry.get('curve_fit_summary') or {}),
-        }
 
     def prepared_image_artifact(
         self,
@@ -850,49 +654,31 @@ class BackendRuntime:
         metadata: dict[str, Any] | None = None,
         payload: bytes | None = None,
     ) -> PreparedImageArtifact:
-        if metadata is None:
-            metadata, payload = self.load_upload(upload_id)
-        self.ensure_upload_processing(upload_id, metadata=metadata, payload=payload)
-        with self._upload_lock:
-            entry = self._upload_processing.get(upload_id)
-            artifact = entry.get('artifact') if entry else None
-            state = entry.get('state') if entry else None
-            message = str(entry.get('message') or '') if entry else ''
-        if isinstance(artifact, PreparedImageArtifact):
-            return artifact
-        if state == 'error':
-            raise HTTPException(status_code=422, detail=message or 'image preprocessing failed')
-        raise HTTPException(status_code=409, detail='image preprocessing is still running')
+        return self._uploads.prepared_image_artifact(
+            upload_id, metadata=metadata, payload=payload,
+        )
 
     def record_last_plan_debug(self, payload: dict[str, Any]) -> None:
-        with self._debug_lock:
-            self._last_plan_debug = dict(payload)
+        self._debug.record_plan(payload)
 
     def record_last_execution_debug(self, payload: dict[str, Any]) -> None:
-        with self._debug_lock:
-            self._last_execution_debug = dict(payload)
+        self._debug.record_execution(payload)
 
     def record_last_curve_fit_debug(self, payload: dict[str, Any]) -> None:
-        with self._debug_lock:
-            self._last_curve_fit_debug = dict(payload)
+        self._debug.record_curve_fit(payload)
 
     def last_plan_debug_snapshot(self) -> dict[str, Any] | None:
-        with self._debug_lock:
-            return dict(self._last_plan_debug) if self._last_plan_debug is not None else None
+        return self._debug.plan_snapshot()
 
     def last_execution_debug_snapshot(self) -> dict[str, Any] | None:
-        with self._debug_lock:
-            return dict(self._last_execution_debug) if self._last_execution_debug is not None else None
+        return self._debug.execution_snapshot()
 
     def last_curve_fit_debug_snapshot(self) -> dict[str, Any] | None:
-        with self._debug_lock:
-            return dict(self._last_curve_fit_debug) if self._last_curve_fit_debug is not None else None
+        return self._debug.curve_fit_snapshot()
 
 
 def _require_json_object(raw: Any, name: str) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=422, detail=f'{name} body must be a JSON object')
-    return raw
+    return _http.require_json_object(raw, name)
 
 
 async def _load_json_request(
@@ -901,30 +687,20 @@ async def _load_json_request(
     name: str,
     max_bytes: int,
 ) -> dict[str, Any]:
-    raw_body = await request.body()
-    if len(raw_body) > max_bytes:
-        raise HTTPException(status_code=413, detail=f'{name} exceeds the maximum allowed payload size')
-    try:
-        raw_json = json.loads(raw_body.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f'invalid {name} JSON: {exc}')
-    return _require_json_object(raw_json, name)
+    return await _http.load_json_request(request, name=name, max_bytes=max_bytes)
 
 
 def _reject_extra_fields(payload: dict[str, Any], allowed: set[str], name: str) -> None:
-    extras = sorted(set(payload.keys()) - allowed)
-    if extras:
-        raise HTTPException(status_code=422, detail=f'{name} contains unsupported fields: {extras}')
+    _http.reject_extra_fields(payload, allowed, name)
 
 
 def _validate_text_value(value: Any, field_name: str) -> str:
-    if not isinstance(value, str):
-        raise HTTPException(status_code=422, detail=f'{field_name} must be a string')
-    if not value.strip():
-        raise HTTPException(status_code=422, detail=f'{field_name} must not be empty')
-    if len(value) > _MAX_TEXT_CHARS or len(value.encode('utf-8')) > _MAX_TEXT_BYTES:
-        raise HTTPException(status_code=413, detail=f'{field_name} exceeds the maximum allowed size')
-    return value
+    return _http.validate_text_value(
+        value,
+        field_name,
+        max_chars=_MAX_TEXT_CHARS,
+        max_bytes=_MAX_TEXT_BYTES,
+    )
 
 
 def _validate_text_request(raw: Any) -> str:
@@ -940,17 +716,9 @@ def _coerce_float(
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail=f'{field_name} must be numeric')
-    if not numpy.isfinite(numeric):
-        raise HTTPException(status_code=422, detail=f'{field_name} must be finite')
-    if minimum is not None and numeric < minimum:
-        raise HTTPException(status_code=422, detail=f'{field_name} must be >= {minimum}')
-    if maximum is not None and numeric > maximum:
-        raise HTTPException(status_code=422, detail=f'{field_name} must be <= {maximum}')
-    return numeric
+    return _http.coerce_float(
+        value, field_name=field_name, minimum=minimum, maximum=maximum,
+    )
 
 
 def _coerce_int(
@@ -960,95 +728,41 @@ def _coerce_int(
     minimum: int | None = None,
     maximum: int | None = None,
 ) -> int:
-    try:
-        numeric = int(value)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail=f'{field_name} must be an integer')
-    if minimum is not None and numeric < minimum:
-        raise HTTPException(status_code=422, detail=f'{field_name} must be >= {minimum}')
-    if maximum is not None and numeric > maximum:
-        raise HTTPException(status_code=422, detail=f'{field_name} must be <= {maximum}')
-    return numeric
+    return _http.coerce_int(
+        value, field_name=field_name, minimum=minimum, maximum=maximum,
+    )
 
 
 def _coerce_bool(value: Any, *, field_name: str, default: bool | None = None) -> bool:
-    if value is None:
-        if default is None:
-            raise HTTPException(status_code=422, detail=f'{field_name} is required')
-        return bool(default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {'1', 'true', 'yes', 'on'}:
-            return True
-        if normalized in {'0', 'false', 'no', 'off'}:
-            return False
-    raise HTTPException(status_code=422, detail=f'{field_name} must be boolean')
+    return _http.coerce_bool(value, field_name=field_name, default=default)
 
 
 def _validate_upload_id(raw_upload_id: Any) -> str:
-    if not isinstance(raw_upload_id, str):
-        raise HTTPException(status_code=422, detail='upload_id must be a string')
-    upload_id = raw_upload_id.strip().lower()
-    if len(upload_id) != 32 or any(ch not in '0123456789abcdef' for ch in upload_id):
-        raise HTTPException(status_code=422, detail='upload_id must be a 32-char lowercase hex string')
-    return upload_id
+    return _http.validate_upload_id(raw_upload_id)
 
 
 def _validate_preview_id(raw_preview_id: Any) -> str:
-    if not isinstance(raw_preview_id, str):
-        raise HTTPException(status_code=422, detail='preview_id must be a string')
-    preview_id = raw_preview_id.strip().lower()
-    if len(preview_id) != 32 or any(ch not in '0123456789abcdef' for ch in preview_id):
-        raise HTTPException(status_code=422, detail='preview_id must be a 32-char lowercase hex string')
-    return preview_id
+    return _http.validate_preview_id(raw_preview_id)
 
 
 def _stable_float(value: float, *, precision: int = 7) -> float:
-    rounded = round(float(value), precision)
-    return 0.0 if abs(rounded) < (10.0 ** -precision) else rounded
+    return _http.stable_float(value, precision=precision)
 
 
 def _stable_point_payload(point: tuple[float, float]) -> list[float]:
-    return [_stable_float(point[0]), _stable_float(point[1])]
+    return _http.stable_point_payload(point)
 
 
 def _stable_payload(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return _stable_float(value)
-    if isinstance(value, numpy.generic):
-        return _stable_payload(value.item())
-    if isinstance(value, (list, tuple)):
-        return [_stable_payload(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(key): _stable_payload(value[key])
-            for key in sorted(value.keys(), key=lambda item: str(item))
-        }
-    if hasattr(value, '__dict__'):
-        return _stable_payload(vars(value))
-    return str(value)
+    return _http.stable_payload(value)
 
 
 def _stable_hash(value: Any) -> str:
-    payload = _stable_payload(value)
-    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    return hashlib.sha256(encoded).hexdigest()
+    return _http.stable_hash(value)
 
 
 def settings_hash(settings: dict[str, Any]) -> str:
-    excluded = {'preview_id', 'created_at', 'created_at_unix', 'expires_at_unix', 'ttl_seconds'}
-    filtered = {
-        key: value
-        for key, value in settings.items()
-        if key not in excluded
-    }
-    return _stable_hash(filtered)
+    return _http.settings_hash(settings)
 
 
 def _canonical_command_payload(command: CanonicalCommand) -> dict[str, Any]:
@@ -2029,11 +1743,17 @@ def _resolve_web_asset_path(web_dir: Path, asset_path: str) -> Path:
     candidate = web_dir / rel_path
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail='asset not found')
+    # Defence in depth: ensure the candidate path itself never contains traversal
+    # parts after lexical normalisation. We intentionally do NOT call
+    # ``candidate.resolve()`` because colcon installs Webots/web assets as
+    # symlinks pointing back into ``src/``; resolving and checking against
+    # web_dir would reject those legitimate symlinks. The ``..``/``.`` parts
+    # check above is what stops path traversal regardless of symlinks.
     return candidate
 
 
 def create_app(runtime: BackendRuntime) -> FastAPI:
-    app = FastAPI(title='Two-Cable Drawing Robot UI Backend', version='1.0.0')
+    app = FastAPI(title='Four-Cable Drawing Robot UI Backend', version='1.0.0')
     shared = load_shared_config()
     text_layout_defaults = shared.text_layout
     draw_execution_defaults = shared.draw_execution
@@ -2054,8 +1774,14 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         cluster_units=True,
     )
     sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
-    preview_cache: OrderedDict[str, PreviewCacheEntry] = OrderedDict()
-    sketch_preview_cache: OrderedDict[str, SketchPreviewCacheEntry] = OrderedDict()
+    preview_cache: TTLCache[PreviewCacheEntry] = TTLCache(
+        max_entries=int(_PREVIEW_CACHE_MAX_ENTRIES),
+        ttl_seconds=float(_PREVIEW_CACHE_TTL_SECONDS),
+    )
+    sketch_preview_cache: TTLCache[SketchPreviewCacheEntry] = TTLCache(
+        max_entries=int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES),
+        ttl_seconds=float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS),
+    )
 
     def _preview_optimization_policy(source_type: str) -> CanonicalOptimizationPolicy:
         if source_type == 'sketch_centerline':
@@ -2352,19 +2078,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         }
 
     def _preview_cache_expired(entry: PreviewCacheEntry, *, now: float) -> bool:
-        return (now - float(entry.created_at_unix)) > float(_PREVIEW_CACHE_TTL_SECONDS)
+        return preview_cache.is_expired(entry, now=now)
 
     def _cleanup_preview_cache(*, now: float | None = None) -> None:
-        current = time.time() if now is None else float(now)
-        expired_ids = [
-            preview_id
-            for preview_id, entry in preview_cache.items()
-            if _preview_cache_expired(entry, now=current)
-        ]
-        for preview_id in expired_ids:
-            preview_cache.pop(preview_id, None)
-        while len(preview_cache) > int(_PREVIEW_CACHE_MAX_ENTRIES):
-            preview_cache.popitem(last=False)
+        preview_cache.prune(now=now)
 
     def _store_preview(
         *,
@@ -2449,23 +2166,16 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             route_metadata=dict(route_metadata or {}),
             curve_fit_payload=dict(curve_fit_payload or {}),
         )
-        preview_cache[normalized_id] = entry
-        preview_cache.move_to_end(normalized_id)
-        while len(preview_cache) > int(_PREVIEW_CACHE_MAX_ENTRIES):
-            preview_cache.popitem(last=False)
+        preview_cache.store(normalized_id, entry)
         return entry
 
     def _load_preview(preview_id: Any) -> PreviewCacheEntry:
         normalized_id = _validate_preview_id(preview_id)
-        entry = preview_cache.get(normalized_id)
+        entry = preview_cache.load(normalized_id)
         if entry is None:
+            if normalized_id in preview_cache.entries():
+                raise HTTPException(status_code=410, detail='preview_id has expired')
             raise HTTPException(status_code=404, detail='preview_id is unknown')
-        now = time.time()
-        if _preview_cache_expired(entry, now=now):
-            preview_cache.pop(normalized_id, None)
-            raise HTTPException(status_code=410, detail='preview_id has expired')
-        _cleanup_preview_cache(now=now)
-        preview_cache.move_to_end(normalized_id)
         return entry
 
     def _preview_contract_payload(entry: PreviewCacheEntry) -> dict[str, Any]:
@@ -2511,19 +2221,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         return enriched
 
     def _sketch_preview_expired(entry: SketchPreviewCacheEntry, *, now: float) -> bool:
-        return (now - float(entry.created_at_unix)) > float(_SKETCH_PREVIEW_CACHE_TTL_SECONDS)
+        return sketch_preview_cache.is_expired(entry, now=now)
 
     def _cleanup_sketch_preview_cache(*, now: float | None = None) -> None:
-        current = time.time() if now is None else float(now)
-        expired_ids = [
-            preview_id
-            for preview_id, entry in sketch_preview_cache.items()
-            if _sketch_preview_expired(entry, now=current)
-        ]
-        for preview_id in expired_ids:
-            sketch_preview_cache.pop(preview_id, None)
-        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
-            sketch_preview_cache.popitem(last=False)
+        sketch_preview_cache.prune(now=now)
 
     def _store_sketch_preview(
         *,
@@ -2536,11 +2237,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         source_filename: str,
         parameters: dict[str, Any],
     ) -> str:
-        _cleanup_sketch_preview_cache()
         preview_id = uuid.uuid4().hex if preview_id is None else str(preview_id)
         created_at = time.time()
         sketch_canonical_hash = canonical_plan_hash(canonical_plan)
-        sketch_preview_cache[preview_id] = SketchPreviewCacheEntry(
+        entry = SketchPreviewCacheEntry(
             preview_id=preview_id,
             drawing_plan=drawing_plan,
             canonical_plan=canonical_plan,
@@ -2555,24 +2255,22 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             point_count=sum(len(stroke.points) for stroke in drawing_plan.strokes),
             canonical_command_count=len(canonical_plan.commands),
         )
-        sketch_preview_cache.move_to_end(preview_id)
-        while len(sketch_preview_cache) > int(_SKETCH_PREVIEW_CACHE_MAX_ENTRIES):
-            sketch_preview_cache.popitem(last=False)
+        sketch_preview_cache.store(preview_id, entry)
         return preview_id
 
     def _load_sketch_preview(preview_id: Any) -> SketchPreviewCacheEntry:
         if not isinstance(preview_id, str) or not preview_id.strip():
             raise HTTPException(status_code=422, detail='preview_id is required')
         normalized_id = preview_id.strip()
-        entry = sketch_preview_cache.get(normalized_id)
+        entry = sketch_preview_cache.load(normalized_id)
         if entry is None:
-            raise HTTPException(status_code=404, detail='sketch preview_id is unknown')
-        now = time.time()
-        if _sketch_preview_expired(entry, now=now):
-            sketch_preview_cache.pop(normalized_id, None)
-            raise HTTPException(status_code=410, detail='sketch preview_id has expired')
-        _cleanup_sketch_preview_cache(now=now)
-        sketch_preview_cache.move_to_end(normalized_id)
+            if normalized_id in sketch_preview_cache.entries():
+                raise HTTPException(
+                    status_code=410, detail='sketch preview_id has expired',
+                )
+            raise HTTPException(
+                status_code=404, detail='sketch preview_id is unknown',
+            )
         return entry
 
     @app.get('/assets/{asset_path:path}')
@@ -4104,86 +3802,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             build_timings,
         )
 
-    def _text_clusters_payload(
-        text_clusters: tuple[TextGlyphOutline, ...],
-        normalized_strokes: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        cluster_payload: list[dict[str, Any]] = []
-        stroke_index = 0
-        for cluster in text_clusters:
-            stroke_count = len(cluster.strokes)
-            cluster_payload.append(
-                {
-                    'line_index': int(cluster.line_index),
-                    'word_index': int(cluster.word_index),
-                    'text': cluster.text,
-                    'strokes': normalized_strokes[
-                        stroke_index:stroke_index + stroke_count
-                    ],
-                }
-            )
-            stroke_index += stroke_count
-        return cluster_payload
-
-    def _normalize_text_plan(
-        text_clusters: tuple[TextGlyphOutline, ...],
-        writable_bounds: dict[str, float],
-        canonical_plan: CanonicalPathPlan,
-        *,
-        sampling_policy: SamplingPolicy,
-    ) -> str:
-        draw_strokes_payload = canonical_plan_to_legacy_strokes(
-            canonical_plan,
-            sampling_policy=sampling_policy,
-        )
-        normalized = json.loads(_normalize_stroke_payload(draw_strokes_payload, writable_bounds))
-        normalized['text_clusters'] = _text_clusters_payload(
-            text_clusters,
-            normalized['strokes'],
-        )
-        return json.dumps(normalized, separators=(',', ':'))
-
-    def _normalized_text_plan_or_summary(
-        text_clusters: tuple[TextGlyphOutline, ...],
-        writable_bounds: dict[str, float],
-        canonical_plan: CanonicalPathPlan,
-        *,
-        sampling_policy: SamplingPolicy,
-    ) -> dict[str, Any]:
-        omit_reason: str | None = None
-        try:
-            return json.loads(
-                _normalize_text_plan(
-                    text_clusters,
-                    writable_bounds,
-                    canonical_plan,
-                    sampling_policy=sampling_policy,
-                )
-            )
-        except HTTPException as exc:
-            if exc.status_code != 413:
-                raise
-            omit_reason = str(exc.detail)
-        glyph_stroke_count = sum(len(cluster.strokes) for cluster in text_clusters)
-        glyph_point_count = sum(
-            len(stroke)
-            for cluster in text_clusters
-            for stroke in cluster.strokes
-        )
-        return {
-            'frame': 'board',
-            'strokes': [],
-            'text_clusters': [],
-            'normalized_plan_omitted': True,
-            'omit_reason': omit_reason or 'legacy stroke normalized_plan exceeded limits',
-            'transport': 'primitive_path_plan',
-            'source_type': 'text',
-            'text_cluster_count': len(text_clusters),
-            'glyph_stroke_count': glyph_stroke_count,
-            'glyph_point_count': glyph_point_count,
-            'canonical_command_count': len(canonical_plan.commands),
-        }
-
     def _build_svg_vector(
         raw: dict[str, Any],
         *,
@@ -4529,67 +4147,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         payload['upload_id'] = upload_id
         return payload
 
-    async def submit_text(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='text request',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_text_vector(
-            raw,
-            request_name='text request',
-        )
-        normalized_plan = _normalized_text_plan_or_summary(
-            placed_groups,
-            writable_bounds,
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        publish_start = time.perf_counter()
-        transport = runtime.node.publish_execution_plan(
-            primitive_plan_msg,
-            allowed_modes=(MODE_TEXT,),
-        )
-        build_timings['publish_ms'] = _elapsed_ms(publish_start)
-        _record_last_plan_debug(
-            source_type='text',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            transport=transport,
-            committed=True,
-        )
-        _record_last_execution_debug(
-            source_type='text',
-            preview_payload=preview_payload,
-            transport=transport,
-            timings=build_timings,
-        )
-        return JSONResponse(
-            {
-                'ok': True,
-                'published': True,
-                'active_mode': MODE_TEXT,
-                'source_type': 'text',
-                'canonical_hash': canonical_plan_hash(canonical_plan),
-                'transport': transport,
-                'preview': preview_payload,
-                'commit_request': commit_request,
-                'normalized_plan': normalized_plan,
-            }
-        )
-
     @app.post('/api/draw/plan')
     async def submit_draw_plan(request: Request) -> JSONResponse:
         raise HTTPException(
@@ -4597,781 +4154,33 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             detail='raw /api/draw/plan has been removed; use /api/preview then /api/draw with preview_id',
         )
 
-    async def preview_text_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector text request',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        _, placed_strokes, canonical_plan, placement_result, _, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
-            raw,
-            request_name='vector text request',
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        build_timings['publish_ms'] = 0.0
-        _record_last_plan_debug(
-            source_type='text',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            committed=False,
-        )
-        preview_entry = _store_preview(
-            source_type='text',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            commit_request=commit_request,
-            input_type='text',
-            pipeline_mode='text_vector',
-            source_hash=_content_hash(raw),
-            settings=commit_request,
-        )
-        response_payload = _attach_preview_contract(
-            {
-                'ok': True,
-                'source_type': 'text',
-                'preview': preview_payload,
-                'commit_request': commit_request,
-            },
-            preview_entry,
-        )
-        return JSONResponse(
-            response_payload
-        )
-
-    async def commit_text_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector text commit',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        if raw.get('preview_id') is not None:
-            entry = _load_preview(raw.get('preview_id'))
-            if entry.source_type != 'text':
-                raise HTTPException(status_code=409, detail='preview_id does not reference a text preview')
-            return JSONResponse(_draw_cached_preview_response(entry))
-        placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_text_vector(
-            raw,
-            request_name='vector text commit',
-        )
-        normalized_plan = _normalized_text_plan_or_summary(
-            placed_groups,
-            writable_bounds,
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        publish_start = time.perf_counter()
-        transport = runtime.node.publish_execution_plan(
-            primitive_plan_msg,
-            allowed_modes=(MODE_TEXT,),
-        )
-        build_timings['publish_ms'] = _elapsed_ms(publish_start)
-        _record_last_plan_debug(
-            source_type='text',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            transport=transport,
-            committed=True,
-        )
-        _record_last_execution_debug(
-            source_type='text',
-            preview_payload=preview_payload,
-            transport=transport,
-            timings=build_timings,
-        )
-        return JSONResponse(
-            {
-                'ok': True,
-                'published': True,
-                'active_mode': MODE_TEXT,
-                'source_type': 'text',
-                'canonical_hash': canonical_plan_hash(canonical_plan),
-                'transport': transport,
-                'preview': preview_payload,
-                'commit_request': commit_request,
-                'normalized_plan': normalized_plan,
-            }
-        )
-
-    async def preview_svg_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector svg request',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        placed_strokes, canonical_plan, placement_result, _, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
-            raw,
-            request_name='vector svg request',
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        build_timings['publish_ms'] = 0.0
-        _record_last_plan_debug(
-            source_type='svg',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            committed=False,
-        )
-        _record_curve_fit_unavailable('svg')
-        preview_entry = _store_preview(
-            source_type='svg',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            commit_request=commit_request,
-            input_type='svg',
-            pipeline_mode='svg_vector',
-            source_hash=_content_hash(raw.get('svg')),
-            settings={
-                key: value
-                for key, value in commit_request.items()
-                if key != 'svg'
-            },
-        )
-        response_payload = _attach_preview_contract(
-            {
-                'ok': True,
-                'source_type': 'svg',
-                'preview': preview_payload,
-                'commit_request': commit_request,
-            },
-            preview_entry,
-        )
-        return JSONResponse(
-            response_payload
-        )
-
-    async def commit_svg_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector svg commit',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        if raw.get('preview_id') is not None:
-            entry = _load_preview(raw.get('preview_id'))
-            if entry.source_type != 'svg':
-                raise HTTPException(status_code=409, detail='preview_id does not reference an SVG preview')
-            return JSONResponse(_draw_cached_preview_response(entry))
-        placed_strokes, canonical_plan, placement_result, _, commit_request, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
-            raw,
-            request_name='vector svg commit',
-        )
-        runtime_plan = canonical_plan_to_legacy_strokes(
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        publish_start = time.perf_counter()
-        transport = runtime.node.publish_execution_plan(
-            primitive_plan_msg,
-            allowed_modes=(MODE_DRAW,),
-        )
-        build_timings['publish_ms'] = _elapsed_ms(publish_start)
-        _record_last_plan_debug(
-            source_type='svg',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            committed=True,
-            transport=transport,
-        )
-        _record_last_execution_debug(
-            source_type='svg',
-            preview_payload=preview_payload,
-            transport=transport,
-            timings=build_timings,
-        )
-        _record_curve_fit_unavailable('svg')
-        return JSONResponse(
-            {
-                'ok': True,
-                'published': True,
-                'active_mode': MODE_DRAW,
-                'source_type': 'svg',
-                'canonical_hash': canonical_plan_hash(canonical_plan),
-                'transport': transport,
-                'preview': preview_payload,
-                'commit_request': commit_request,
-                'normalized_plan': runtime_plan,
-            }
-        )
-
-    async def preview_uploaded_file_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector file request',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        _reject_extra_fields(
-            raw,
-            {
-                'upload_id',
-                'preview_id',
-                'optimize_stroke_order',
-                'placement',
-                'curve_tolerance',
-                'simplify_epsilon',
-                'min_perimeter_px',
-                'contour_simplify_ratio',
-                'max_strokes',
-            },
-            'vector file request',
-        )
-        upload_id = _validate_upload_id(raw.get('upload_id'))
-        metadata, payload = runtime.load_upload(upload_id)
-        source_type = _uploaded_source_type(metadata)
-        file_raw = dict(raw)
-        file_raw.pop('upload_id', None)
-        file_raw.pop('preview_id', None)
-        file_raw.pop('optimize_stroke_order', None)
-
-        if source_type == 'svg':
-            svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file request')
-            svg_raw = {'svg': svg_text, **file_raw}
-            placed_strokes, canonical_plan, placement_result, _, commit_tail, _, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
-                svg_raw,
-                request_name='vector file request',
-            )
-            preview_start = time.perf_counter()
-            preview_payload = _preview_payload_from_strokes(
-                placed_strokes,
-                placement_result,
-                outside_safe_points=outside_safe_points,
-                normalized_plan=plan_preview,
-                canonical_plan=canonical_plan,
-                preview_sampling_policy=preview_sampling_policy,
-                runtime_sampling_policy=runtime_sampling_policy,
-            )
-            build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-            build_timings['publish_ms'] = 0.0
-            _record_last_plan_debug(
-                source_type='svg',
-                canonical_plan=canonical_plan,
-                preview_payload=preview_payload,
-                timings=build_timings,
-                committed=False,
-            )
-            _record_curve_fit_unavailable('svg')
-            commit_request = _uploaded_commit_request(upload_id, commit_tail)
-            preview_entry = _store_preview(
-                source_type='svg',
-                canonical_plan=canonical_plan,
-                preview_payload=preview_payload,
-                commit_request=commit_request,
-                input_type='svg',
-                pipeline_mode='svg_vector',
-                source_hash=_content_hash(payload),
-                settings={
-                    key: value
-                    for key, value in commit_request.items()
-                    if key not in {'svg', 'upload_id'}
-                },
-                metadata={'upload': metadata},
-                source_filename=str(metadata.get('original_filename') or ''),
-            )
-            response_payload = _attach_preview_contract(
-                {
-                    'ok': True,
-                    'source_type': 'svg',
-                    'upload': metadata,
-                    'preview': preview_payload,
-                    'commit_request': commit_request,
-                },
-                preview_entry,
-            )
-            return JSONResponse(
-                response_payload
-            )
-
-        prepared_artifact = runtime.prepared_image_artifact(
-            upload_id,
-            metadata=metadata,
-            payload=payload,
-        )
-        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, _, plan_preview, outside_safe_points, build_timings = _build_image_vector(
-            payload,
-            file_raw,
-            request_name='vector file request',
-            prepared_artifact=prepared_artifact,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        build_timings['publish_ms'] = 0.0
-        preview_payload.setdefault('diagnostics', {})
-        if isinstance(preview_payload['diagnostics'], dict):
-            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
-        _record_last_plan_debug(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            committed=False,
-            command_metadata=command_metadata,
-        )
-        _record_last_curve_fit_debug(curve_fit_payload)
-        commit_request = {'upload_id': upload_id, **commit_tail}
-        preview_entry = _store_preview(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            commit_request=commit_request,
-            input_type='image',
-            pipeline_mode=str(image_info.get('pipeline', {}).get('route') or 'image_vector'),
-            source_hash=_content_hash(payload),
-            settings=commit_request,
-            metadata={'upload': metadata, 'image_info': image_info},
-            source_filename=str(metadata.get('original_filename') or ''),
-            command_metadata=command_metadata,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            curve_fit_payload=curve_fit_payload,
-        )
-        response_payload = _attach_preview_contract(
-            {
-                'ok': True,
-                'source_type': 'image',
-                'upload': metadata,
-                'image_info': image_info,
-                'preview': preview_payload,
-                'commit_request': commit_request,
-            },
-            preview_entry,
-        )
-        return JSONResponse(
-            response_payload
-        )
-
-    async def commit_uploaded_file_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector file commit',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        _reject_extra_fields(
-            raw,
-            {
-                'upload_id',
-                'preview_id',
-                'optimize_stroke_order',
-                'placement',
-                'curve_tolerance',
-                'simplify_epsilon',
-                'min_perimeter_px',
-                'contour_simplify_ratio',
-                'max_strokes',
-            },
-            'vector file commit',
-        )
-        if raw.get('preview_id') is not None:
-            entry = _load_preview(raw.get('preview_id'))
-            if entry.source_type not in {'svg', 'image'}:
-                raise HTTPException(status_code=409, detail='preview_id does not reference a file preview')
-            return JSONResponse(_draw_cached_preview_response(entry))
-        upload_id = _validate_upload_id(raw.get('upload_id'))
-        metadata, payload = runtime.load_upload(upload_id)
-        source_type = _uploaded_source_type(metadata)
-        file_raw = dict(raw)
-        file_raw.pop('upload_id', None)
-        file_raw.pop('preview_id', None)
-        file_raw.pop('optimize_stroke_order', None)
-
-        if source_type == 'svg':
-            svg_text = _uploaded_svg_text(metadata, payload, request_name='vector file commit')
-            svg_raw = {'svg': svg_text, **file_raw}
-            placed_strokes, canonical_plan, placement_result, _, commit_tail, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_svg_vector(
-                svg_raw,
-                request_name='vector file commit',
-            )
-            runtime_plan = canonical_plan_to_legacy_strokes(
-                canonical_plan,
-                sampling_policy=runtime_sampling_policy,
-            )
-            preview_start = time.perf_counter()
-            preview_payload = _preview_payload_from_strokes(
-                placed_strokes,
-                placement_result,
-                outside_safe_points=outside_safe_points,
-                normalized_plan=plan_preview,
-                canonical_plan=canonical_plan,
-                preview_sampling_policy=preview_sampling_policy,
-                runtime_sampling_policy=runtime_sampling_policy,
-            )
-            build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-            publish_start = time.perf_counter()
-            transport = runtime.node.publish_execution_plan(
-                primitive_plan_msg,
-                allowed_modes=(MODE_DRAW,),
-            )
-            build_timings['publish_ms'] = _elapsed_ms(publish_start)
-            _record_last_plan_debug(
-                source_type='svg',
-                canonical_plan=canonical_plan,
-                preview_payload=preview_payload,
-                timings=build_timings,
-                committed=True,
-                transport=transport,
-            )
-            _record_last_execution_debug(
-                source_type='svg',
-                preview_payload=preview_payload,
-                transport=transport,
-                timings=build_timings,
-            )
-            _record_curve_fit_unavailable('svg')
-            return JSONResponse(
-                {
-                    'ok': True,
-                    'published': True,
-                    'active_mode': MODE_DRAW,
-                    'source_type': 'svg',
-                    'canonical_hash': canonical_plan_hash(canonical_plan),
-                    'transport': transport,
-                    'upload': metadata,
-                    'preview': preview_payload,
-                    'commit_request': _uploaded_commit_request(upload_id, commit_tail),
-                    'normalized_plan': runtime_plan,
-                }
-            )
-
-        prepared_artifact = runtime.prepared_image_artifact(
-            upload_id,
-            metadata=metadata,
-            payload=payload,
-        )
-        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_image_vector(
-            payload,
-            file_raw,
-            request_name='vector file commit',
-            prepared_artifact=prepared_artifact,
-        )
-        runtime_plan = canonical_plan_to_legacy_strokes(
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        preview_payload.setdefault('diagnostics', {})
-        if isinstance(preview_payload['diagnostics'], dict):
-            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
-        publish_start = time.perf_counter()
-        transport = runtime.node.publish_execution_plan(
-            primitive_plan_msg,
-            allowed_modes=(MODE_DRAW,),
-        )
-        build_timings['publish_ms'] = _elapsed_ms(publish_start)
-        _record_last_plan_debug(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            transport=transport,
-            committed=True,
-            command_metadata=command_metadata,
-        )
-        _record_last_execution_debug(
-            source_type='image',
-            preview_payload=preview_payload,
-            transport=transport,
-            timings=build_timings,
-        )
-        _record_last_curve_fit_debug(curve_fit_payload)
-        return JSONResponse(
-            {
-                'ok': True,
-                'published': True,
-                'active_mode': MODE_DRAW,
-                'source_type': 'image',
-                'canonical_hash': canonical_plan_hash(canonical_plan),
-                'transport': transport,
-                'upload': metadata,
-                'image_info': image_info,
-                'preview': preview_payload,
-                'commit_request': {'upload_id': upload_id, **commit_tail},
-                'normalized_plan': runtime_plan,
-            }
-        )
-
-    async def preview_uploaded_image_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector image request',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        _reject_extra_fields(
-            raw,
-            {
-                'upload_id',
-                'preview_id',
-                'optimize_stroke_order',
-                'placement',
-                'min_perimeter_px',
-                'contour_simplify_ratio',
-                'max_strokes',
-            },
-            'vector image request',
-        )
-        upload_id = _validate_upload_id(raw.get('upload_id'))
-        metadata, payload = runtime.load_upload(upload_id)
-        image_raw = dict(raw)
-        image_raw.pop('upload_id', None)
-        image_raw.pop('preview_id', None)
-        image_raw.pop('optimize_stroke_order', None)
-        prepared_artifact = runtime.prepared_image_artifact(
-            upload_id,
-            metadata=metadata,
-            payload=payload,
-        )
-        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, _, plan_preview, outside_safe_points, build_timings = _build_image_vector(
-            payload,
-            image_raw,
-            request_name='vector image request',
-            prepared_artifact=prepared_artifact,
-        )
-        commit_request = {'upload_id': upload_id, **commit_tail}
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        build_timings['publish_ms'] = 0.0
-        preview_payload.setdefault('diagnostics', {})
-        if isinstance(preview_payload['diagnostics'], dict):
-            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
-        _record_last_plan_debug(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            committed=False,
-            command_metadata=command_metadata,
-        )
-        _record_last_curve_fit_debug(curve_fit_payload)
-        preview_entry = _store_preview(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            commit_request=commit_request,
-            input_type='image',
-            pipeline_mode=str(image_info.get('pipeline', {}).get('route') or 'image_vector'),
-            source_hash=_content_hash(payload),
-            settings=commit_request,
-            metadata={'upload': metadata, 'image_info': image_info},
-            source_filename=str(metadata.get('original_filename') or ''),
-            command_metadata=command_metadata,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            curve_fit_payload=curve_fit_payload,
-        )
-        response_payload = _attach_preview_contract(
-            {
-                'ok': True,
-                'source_type': 'image',
-                'upload': metadata,
-                'image_info': image_info,
-                'preview': preview_payload,
-                'commit_request': commit_request,
-            },
-            preview_entry,
-        )
-        return JSONResponse(
-            response_payload
-        )
-
-    async def commit_uploaded_image_vector(request: Request) -> JSONResponse:
-        raw = await _load_json_request(
-            request,
-            name='vector image commit',
-            max_bytes=_MAX_VECTOR_REQUEST_BYTES,
-        )
-        _reject_extra_fields(
-            raw,
-            {
-                'upload_id',
-                'preview_id',
-                'optimize_stroke_order',
-                'placement',
-                'min_perimeter_px',
-                'contour_simplify_ratio',
-                'max_strokes',
-            },
-            'vector image commit',
-        )
-        if raw.get('preview_id') is not None:
-            entry = _load_preview(raw.get('preview_id'))
-            if entry.source_type != 'image':
-                raise HTTPException(status_code=409, detail='preview_id does not reference an image preview')
-            return JSONResponse(_draw_cached_preview_response(entry))
-        upload_id = _validate_upload_id(raw.get('upload_id'))
-        metadata, payload = runtime.load_upload(upload_id)
-        image_raw = dict(raw)
-        image_raw.pop('upload_id', None)
-        image_raw.pop('preview_id', None)
-        image_raw.pop('optimize_stroke_order', None)
-        prepared_artifact = runtime.prepared_image_artifact(
-            upload_id,
-            metadata=metadata,
-            payload=payload,
-        )
-        placed_strokes, canonical_plan, placement_result, _, commit_tail, image_info, command_metadata, curve_fit_payload, primitive_plan_msg, plan_preview, outside_safe_points, build_timings = _build_image_vector(
-            payload,
-            image_raw,
-            request_name='vector image commit',
-            prepared_artifact=prepared_artifact,
-        )
-        runtime_plan = canonical_plan_to_legacy_strokes(
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        preview_start = time.perf_counter()
-        preview_payload = _preview_payload_from_strokes(
-            placed_strokes,
-            placement_result,
-            outside_safe_points=outside_safe_points,
-            normalized_plan=plan_preview,
-            canonical_plan=canonical_plan,
-            preview_sampling_policy=preview_sampling_policy,
-            runtime_sampling_policy=runtime_sampling_policy,
-        )
-        build_timings['preview_sample_ms'] = _elapsed_ms(preview_start)
-        preview_payload.setdefault('diagnostics', {})
-        if isinstance(preview_payload['diagnostics'], dict):
-            preview_payload['diagnostics']['curve_fit_summary'] = image_info.get('pipeline', {}).get('curve_fit_summary')
-        publish_start = time.perf_counter()
-        transport = runtime.node.publish_execution_plan(
-            primitive_plan_msg,
-            allowed_modes=(MODE_DRAW,),
-        )
-        build_timings['publish_ms'] = _elapsed_ms(publish_start)
-        _record_last_plan_debug(
-            source_type='image',
-            canonical_plan=canonical_plan,
-            preview_payload=preview_payload,
-            timings=build_timings,
-            optimizer_stats=image_info.get('optimization'),
-            route_metadata=image_info.get('pipeline'),
-            transport=transport,
-            committed=True,
-            command_metadata=command_metadata,
-        )
-        _record_last_execution_debug(
-            source_type='image',
-            preview_payload=preview_payload,
-            transport=transport,
-            timings=build_timings,
-        )
-        _record_last_curve_fit_debug(curve_fit_payload)
-        return JSONResponse(
-            {
-                'ok': True,
-                'published': True,
-                'active_mode': MODE_DRAW,
-                'source_type': 'image',
-                'canonical_hash': canonical_plan_hash(canonical_plan),
-                'transport': transport,
-                'upload': metadata,
-                'image_info': image_info,
-                'preview': preview_payload,
-                'commit_request': {'upload_id': upload_id, **commit_tail},
-                'normalized_plan': runtime_plan,
-            }
-        )
-
-    async def uploaded_file_status(upload_id: str) -> JSONResponse:
-        validated_upload_id = _validate_upload_id(upload_id)
-        metadata, payload = runtime.load_upload(validated_upload_id)
-        return JSONResponse(
-            _upload_file_status_payload(
-                metadata,
-                payload=payload,
-            )
-        )
-
-    async def upload_draw_file(file: UploadFile = File(...)) -> JSONResponse:
-        try:
-            content = await file.read(_MAX_UPLOAD_BYTES + 1)
-            upload_details = _validate_upload(file, content)
-            metadata = runtime.store_upload(file, content, upload_details=upload_details)
-            return JSONResponse(
-                _upload_file_status_payload(
-                    metadata,
-                    payload=content,
-                )
-            )
-        finally:
-            await file.close()
-
     return app
+
+
+def _select_free_port(preferred: int, *, attempts: int = 32) -> int:
+    """Return ``preferred`` if free, otherwise the next available TCP port.
+
+    Some hosts (e.g. VS Code dev containers) keep ``preferred`` permanently
+    bound for port-forwarding; in that case binding the FastAPI server to it
+    fails with ``Address already in use`` even though no project process is
+    holding the port. We probe a small window to find a usable alternative
+    instead of crashing the launch.
+    """
+    base = max(1024, int(preferred))
+    for offset in range(attempts):
+        candidate = base + offset
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(('0.0.0.0', candidate))
+            return candidate
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    raise RuntimeError(
+        f'Unable to find a free TCP port starting at {base} '
+        f'(checked {attempts} ports).',
+    )
 
 
 def main(args=None) -> None:
@@ -5381,12 +4190,18 @@ def main(args=None) -> None:
     node = WebBackendNode()
     runtime = BackendRuntime(node)
     app = create_app(runtime)
-    config = uvicorn.Config(app, host='0.0.0.0', port=node.port, log_level='info')
+    selected_port = _select_free_port(node.port)
+    if selected_port != node.port:
+        node.get_logger().warn(
+            f'Requested port {node.port} is busy; using {selected_port} instead. '
+            f'Open http://localhost:{selected_port} in the browser.',
+        )
+    config = uvicorn.Config(app, host='0.0.0.0', port=selected_port, log_level='info')
     server = uvicorn.Server(config)
     runtime.attach_server(server)
 
     if node.open_browser:
-        threading.Timer(0.75, lambda: webbrowser.open(f'http://localhost:{node.port}')).start()
+        threading.Timer(0.75, lambda: webbrowser.open(f'http://localhost:{selected_port}')).start()
 
     runtime.start()
     try:
