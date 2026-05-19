@@ -42,7 +42,7 @@ _SETPOINT_STREAM_QOS = QoSProfile(
 # fixed at the publisher and sampler level; this clamp now acts purely as a
 # defence-in-depth so a buggy plan cannot warp the simulator. The cap is set
 # well above any expected per-sample step (travel_resample_step_m today is
-# 30mm; this leaves headroom for users who tune the resample step higher).
+# 50mm; this leaves headroom for users who tune the resample step higher).
 _MAX_STEP_TELEPORT_M = 0.120
 
 

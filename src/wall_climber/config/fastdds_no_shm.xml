@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS profile that disables the shared-memory transport.
+
+  In the dev container the host's /dev/shm is small/unavailable, so every
+  ROS 2 node logs a stack of "Failed to create segment" errors before
+  silently falling back to UDP. This XML pre-registers a UDPv4 transport
+  and disables the default builtin transports, eliminating the noise
+  while preserving normal pub/sub behaviour over the loopback network.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="participant_default" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

@@ -122,7 +122,48 @@ def _resolve_webots_display_environment() -> dict[str, str]:
     return environment
 
 
+def _cleanup_stale_launch_processes() -> None:
+    """Kill any leftover ROS / Webots / web_server processes from a previous
+    launch that did not exit cleanly.
+
+    A crashed web_server or a tab that kept its WebSocket alive past the
+    launcher's grace period can leave the listening socket in TIME_WAIT,
+    which forces the next launch to fall back to port 8081 / 8082 and
+    breaks the VS Code Ports panel auto-forward (we only forward 8080 and
+    9090). Clearing those stragglers up front makes "ros2 launch" feel
+    deterministic again.
+
+    This is a best-effort cleanup; failures are silently ignored so a
+    fresh first launch still works. We deliberately do NOT match the
+    word "ros2 launch wall_climber" itself because that would kill the
+    invocation that just started.
+    """
+    patterns = (
+        # Long-lived sub-processes started by my_robot.launch.py
+        'wall_climber/web_server',
+        'rosbridge_websocket',
+        'webots-controller',
+        'cable_draw_executor',
+        'ros2_supervisor',
+        # Webots renderer + binary (only if a previous launch left them)
+        '/.ros/webotsR2025a/webots/bin/webots',
+    )
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ['pkill', '-9', '-f', pattern],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # pkill missing in some minimal images; nothing to do.
+            pass
+
+
 def generate_launch_description():
+    _cleanup_stale_launch_processes()
     package_name = 'wall_climber'
     pkg_dir = get_package_share_directory(package_name)
     shared = load_shared_config()
@@ -213,6 +254,15 @@ def generate_launch_description():
         executable='rosbridge_websocket',
         name='rosbridge_websocket',
         output='screen',
+        # Explicitly set the parameters that rosbridge warns about under
+        # Humble: it tells us "the defaults will change in Jazzy". Setting
+        # them explicitly here picks the future-default behaviour now and
+        # silences the warnings.
+        parameters=[{
+            'default_call_service_timeout': 5.0,
+            'call_services_in_new_thread': True,
+            'send_action_goals_in_new_thread': True,
+        }],
     )
     web_server = Node(
         package='wall_climber',
@@ -253,6 +303,15 @@ def generate_launch_description():
         SetEnvironmentVariable('ALSOFT_DRIVERS', 'null'),
         SetEnvironmentVariable('WEBOTS_TMPDIR', '/tmp'),
         SetEnvironmentVariable('TMPDIR', '/tmp'),
+        # Tell FastDDS to skip the shared-memory transport. /dev/shm is
+        # restricted in the dev container, so SHM allocation always fails
+        # and floods the logs with "Failed to create segment" errors
+        # before silently falling back to UDP. Pointing at our XML config
+        # makes UDP the only transport and removes the noise.
+        SetEnvironmentVariable(
+            'FASTRTPS_DEFAULT_PROFILES_FILE',
+            os.path.join(pkg_dir, 'config', 'fastdds_no_shm.xml'),
+        ),
         *[
             SetEnvironmentVariable(name, value)
             for name, value in display_environment.items()

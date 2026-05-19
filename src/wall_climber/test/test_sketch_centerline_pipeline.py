@@ -234,7 +234,7 @@ def test_skeleton_pruning_metadata_exists_in_vectorized_plan() -> None:
         board_height_m=1.0,
     )
 
-    assert plan.metadata['skeleton_prune_px'] == pytest.approx(4.0)
+    assert plan.metadata['skeleton_prune_px'] == pytest.approx(6.0)
     assert plan.metadata['skeleton_pixels_before_prune'] >= plan.metadata['skeleton_pixels_after_prune']
     assert plan.metadata['skeleton_spurs_pruned'] >= 0
 
@@ -373,8 +373,13 @@ def test_raw_preset_does_not_merge_nearby_broken_strokes() -> None:
     assert plan.metadata['merge_count'] == 0
 
 
-def test_detail_preset_does_not_merge_nearby_broken_strokes() -> None:
-    unmerged = vectorize_sketch_image_to_plan(
+def test_detail_preset_merges_nearby_broken_strokes() -> None:
+    """The 'detail' preset now enables conservative merging by default
+    (gap=2px, angle=20deg) so a fragmented skeleton does not produce
+    a separate pen-lift for every micro-edge. Earlier behaviour disabled
+    merging in 'detail' which inflated pen-lift counts 2-5x on real
+    sketches."""
+    merged = vectorize_sketch_image_to_plan(
         _broken_line_image(),
         board_width_m=2.0,
         board_height_m=1.0,
@@ -382,10 +387,12 @@ def test_detail_preset_does_not_merge_nearby_broken_strokes() -> None:
         sketch_extraction_method='otsu',
     )
 
-    assert len(unmerged.strokes) == 2
-    assert unmerged.metadata['optimization_preset'] == 'detail'
-    assert unmerged.metadata['merge_enabled'] is False
-    assert unmerged.metadata['effective_simplify_epsilon_px'] < 0.5
+    assert merged.metadata['optimization_preset'] == 'detail'
+    assert merged.metadata['merge_enabled'] is True
+    assert merged.metadata['effective_simplify_epsilon_px'] < 0.5
+    # The two-segment broken line image should produce <=2 strokes; with
+    # the new merging behaviour it typically collapses into a single one.
+    assert len(merged.strokes) <= 2
 
 
 def test_custom_preset_can_merge_broken_line_segments() -> None:

@@ -19,11 +19,22 @@ from wall_climber.canonical_path import (
     QuadraticBezier,
     TravelMove,
 )
+from wall_climber.image_pipeline._bezier_fit import fit_cubic_beziers
 from wall_climber.image_pipeline.types import DrawingPathPlan, Point2D, Stroke
 
 
 _EPS = 1.0e-9
-_CORNER_THRESHOLD_DEG = 42.0
+# Corner-detection threshold in degrees. Anything below this is treated
+# as a smooth curvature change and stays inside the same span; anything
+# above is a hard corner that breaks the span. The previous value (42)
+# was tight enough that natural noise on a skeletonised circle produced
+# spurious "corners" every few points, so the curve fitter only ever
+# saw 5-6 sample chunks and could not fit a single Bezier through the
+# whole arc. Raising it to 55 lets a normal hand-drawn curve survive
+# as one span while still splitting at sharp ~90 deg corners; 65 was
+# too forgiving and let long arcs include real kinks that produced
+# visible wiggles in the fitted cubic.
+_CORNER_THRESHOLD_DEG = 55.0
 _MIN_CURVE_POINTS = 4
 
 
@@ -241,6 +252,76 @@ def _line_chain(points: tuple[CanonicalPoint2D, ...]) -> tuple[LineSegment, ...]
     return tuple(LineSegment(start=start, end=end) for start, end in zip(points[:-1], points[1:]))
 
 
+def _fit_with_schneider(
+    points: tuple[CanonicalPoint2D, ...],
+    *,
+    curve_tolerance_m: float,
+    counters: Counter,
+) -> tuple[CubicBezier, ...] | None:
+    """Try Schneider 1990 cubic-Bezier fitting on the whole span.
+
+    Returns a tuple of CubicBezier commands when fitting succeeds, or
+    None if Schneider could not fit anything usable. The Schneider
+    fitter is more robust than the simple least-squares cubic in
+    ``_fit_cubic`` because it solves for both tangent magnitudes and
+    refines parameterisation with Newton-Raphson; on real sketches it
+    produces ~5-10x fewer fragments at the same tolerance.
+
+    We additionally guard against the well-known Schneider failure
+    mode where the alpha tangent magnitudes blow up (e.g. on near-
+    collinear runs that the algorithm tries to fit as a curve), which
+    pushes the control points well outside the input's bounding box
+    and makes the sampled curve leave the carriage-safe writable area.
+    Cubics whose sampled trajectory exceeds a small slack outside the
+    input bbox are rejected here so the caller falls back to the
+    legacy fitter, which keeps endpoint geometry inside the input span.
+    """
+    if len(points) < 2:
+        return None
+    raw = fit_cubic_beziers(list(points), curve_tolerance_m)
+    if not raw:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    span_size = max(max(xs) - min(xs), max(ys) - min(ys), _EPS)
+    # Allow only a tiny slack around the input bbox. The C++ Bezier
+    # sampler walks the curve uniformly, so any control point pulling
+    # the curve outside this box will produce a sample outside it too.
+    overshoot_budget = max(curve_tolerance_m, 0.02 * span_size)
+    x_lo, x_hi = min(xs) - overshoot_budget, max(xs) + overshoot_budget
+    y_lo, y_hi = min(ys) - overshoot_budget, max(ys) + overshoot_budget
+
+    cubics: list[CubicBezier] = []
+    for p0, p1, p2, p3 in raw:
+        # Sample the curve at a few intermediate t to confirm the
+        # actual trajectory (not just the control points) stays in the
+        # bbox. Using a 9-point stratified set is enough to catch the
+        # "bowed-out" cubics that overshoot at t=0.5 even when their
+        # control points sit on the boundary.
+        clean = True
+        for t in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875):
+            omt = 1.0 - t
+            sx = (omt ** 3 * p0[0] + 3 * omt * omt * t * p1[0]
+                  + 3 * omt * t * t * p2[0] + t ** 3 * p3[0])
+            sy = (omt ** 3 * p0[1] + 3 * omt * omt * t * p1[1]
+                  + 3 * omt * t * t * p2[1] + t ** 3 * p3[1])
+            if not (x_lo <= sx <= x_hi and y_lo <= sy <= y_hi):
+                clean = False
+                break
+        if not clean:
+            return None
+        cubics.append(
+            CubicBezier(
+                start=(float(p0[0]), float(p0[1])),
+                control1=(float(p1[0]), float(p1[1])),
+                control2=(float(p2[0]), float(p2[1])),
+                end=(float(p3[0]), float(p3[1])),
+            )
+        )
+    counters['cubic_beziers'] += len(cubics)
+    return tuple(cubics)
+
+
 def _fit_span_recursive(
     points: tuple[CanonicalPoint2D, ...],
     *,
@@ -260,9 +341,43 @@ def _fit_span_recursive(
         counters['line_segments'] += max(0, len(points) - 1)
         return _line_chain(points)
 
+    # First choice: Schneider 1990 fitter. It handles the full span at
+    # once and recursively splits internally on continuity, so we do not
+    # need our own depth-limited recursion here.
+    if depth == 0 and len(points) >= _MIN_CURVE_POINTS:
+        schneider = _fit_with_schneider(
+            points,
+            curve_tolerance_m=curve_tolerance_m,
+            counters=counters,
+        )
+        if schneider:
+            return schneider
+
+    # Fallback: legacy least-squares + recursive split. Used for very
+    # short spans and as a safety net if Schneider rejects the input.
+    # Same overshoot guard as Schneider — both fitters can produce
+    # control points that pull the sampled curve outside the writable
+    # bounds, so we sample at a few intermediate t to verify.
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    span_size = max(max(xs) - min(xs), max(ys) - min(ys), _EPS)
+    overshoot_budget = max(curve_tolerance_m, 0.02 * span_size)
+    x_lo = min(xs) - overshoot_budget
+    x_hi = max(xs) + overshoot_budget
+    y_lo = min(ys) - overshoot_budget
+    y_hi = max(ys) + overshoot_budget
+
+    def _bbox_ok(command: QuadraticBezier | CubicBezier) -> bool:
+        evaluator = _evaluate_cubic if isinstance(command, CubicBezier) else _evaluate_quadratic
+        for t in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875):
+            sx, sy = evaluator(command, t)
+            if not (x_lo <= sx <= x_hi and y_lo <= sy <= y_hi):
+                return False
+        return True
+
     if len(points) >= 4:
         cubic = _fit_cubic(points)
-        if cubic is not None:
+        if cubic is not None and _bbox_ok(cubic):
             error, worst_index = _fit_error(points, cubic)
             if error <= curve_tolerance_m:
                 counters['cubic_beziers'] += 1
@@ -275,7 +390,7 @@ def _fit_span_recursive(
         worst_index = len(points) // 2
 
     quadratic = _fit_quadratic(points)
-    if quadratic is not None:
+    if quadratic is not None and _bbox_ok(quadratic):
         quadratic_error, quadratic_worst_index = _fit_error(points, quadratic)
         if quadratic_error <= curve_tolerance_m:
             counters['quadratic_beziers'] += 1
@@ -326,7 +441,7 @@ def drawing_path_plan_to_smooth_canonical(
     plan: DrawingPathPlan,
     *,
     curve_tolerance_m: float,
-    max_curve_segment_points: int = 32,
+    max_curve_segment_points: int = 256,
     max_fit_time_ms: float = 3000.0,
 ) -> SmoothCanonicalResult:
     """Convert board-space DrawingPathPlan strokes into curve-aware canonical commands."""

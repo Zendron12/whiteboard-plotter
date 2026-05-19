@@ -64,8 +64,8 @@ pen:
   up_position: 0.0000
   down_position: -0.0064
   settle_sec: 0.02
-  contact_engage_gap: 0.0012
-  contact_release_gap: 0.0022
+  contact_engage_gap: 0.0060
+  contact_release_gap: 0.0080
 
 text_layout:
   left_margin: 0.020
@@ -91,15 +91,28 @@ draw_execution:
   draw_path_simplify_tolerance_m: 0.0004
   # Resample steps drive the visible drawing speed:
   #   speed_m_per_s = resample_step_m / publish_period_sec
-  # With period=0.02s these defaults give ~0.45 m/s draw, ~1.5 m/s travel.
+  # With period=0.02s these defaults give ~0.45 m/s draw, ~2.5 m/s travel.
   # The C++ sampler enforces ``chord <= resample_step_m`` between consecutive
   # samples (see geometry_sampling.cpp), so increasing these values speeds up
   # motion without re-introducing the warp jumps that the smaller defaults
   # were originally chosen to avoid.
   draw_resample_step_m: 0.009
-  travel_resample_step_m: 0.030
-  text_draw_resample_step_m: 0.0038
-  text_travel_resample_step_m: 0.012
+  travel_resample_step_m: 0.080
+  # Text writing speed: 6.4mm step at 50Hz publish gives 0.32 m/s.
+  # Earlier 3.8mm step (0.19 m/s) felt sluggish for normal writing;
+  # this is ~70% faster while still slow enough that letter strokes
+  # render cleanly without warp.
+  text_draw_resample_step_m: 0.0064
+  # Travel between/around letters in text mode. Single step covers three
+  # different motions:
+  #   - home → first letter: ~1m, where slow travel is annoying.
+  #   - inter-letter: 50-200mm gaps that should feel natural.
+  #   - intra-glyph: 5-30mm hops between strokes of the same letter.
+  # 14mm (= 0.7 m/s at publish_period=0.02s) is a good compromise:
+  # the long pre-write move feels brisk, inter-letter moves look like
+  # smooth glides, and intra-glyph hops are short enough that they do
+  # not read as warp.
+  text_travel_resample_step_m: 0.014
   publish_period_sec: 0.02
   chunk_max_paths: 48
   chunk_max_samples: 2400

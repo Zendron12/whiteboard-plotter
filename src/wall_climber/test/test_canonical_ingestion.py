@@ -158,15 +158,6 @@ def test_web_server_main_path_no_longer_uses_legacy_pen_stroke_helper() -> None:
     assert 'canonical_plan_from_pen_strokes(' not in source
 
 
-def test_web_server_image_path_uses_dual_pipeline_builder() -> None:
-    source = (
-        Path(__file__).resolve().parents[1] / 'wall_climber' / 'web_server.py'
-    ).read_text(encoding='utf-8')
-    assert 'vectorize_image_to_canonical_plan(' in source
-    assert 'optimize_canonical_plan(' in source
-    assert 'from wall_climber.ingestion.image import vectorize_image_to_canonical_plan' in source
-
-
 def test_web_server_uses_split_ingestion_and_canonical_ops_modules() -> None:
     source = (
         Path(__file__).resolve().parents[1] / 'wall_climber' / 'web_server.py'

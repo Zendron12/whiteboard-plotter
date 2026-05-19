@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
-import base64
 import hashlib
 import io
 import json
@@ -16,8 +17,22 @@ from typing import Any, Optional
 
 import numpy
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse
+
+try:
+    import websockets
+except ImportError:
+    websockets = None
 
 try:
     import rclpy
@@ -73,8 +88,6 @@ from wall_climber import _http_helpers as _http
 from wall_climber._debug_snapshots import DebugSnapshotStore
 from wall_climber._ttl_cache import TTLCache
 from wall_climber._uploads_store import (
-    DEFAULT_IMAGE_PREP_OPTIONS as _DEFAULT_IMAGE_PREP_OPTIONS,
-    PreparedImageArtifact,
     UPLOAD_GC_MIN_INTERVAL_SECONDS as _UPLOAD_GC_MIN_INTERVAL_SECONDS,
     UPLOAD_RETENTION_SECONDS as _UPLOAD_RETENTION_SECONDS,
     UploadStore,
@@ -117,11 +130,6 @@ from wall_climber.canonical_ops import (
     place_grouped_text_on_board,
     stroke_stats,
 )
-from wall_climber.ingestion.image import vectorize_image_to_canonical_plan
-from wall_climber.ingestion.image_curve_fitting import (
-    curve_fit_debug_to_board,
-    map_curve_fit_command_metadata,
-)
 from wall_climber.ingestion.svg import vectorize_svg
 from wall_climber.ingestion.text import (
     TextGlyphOutline,
@@ -131,20 +139,11 @@ from wall_climber.ingestion.text import (
 from wall_climber.ingestion.upload_routing import (
     UploadedVectorFile,
     classify_uploaded_vector_file,
-    infer_uploaded_source_type,
 )
 from wall_climber.image_pipeline.adapters import drawing_path_plan_to_canonical
-from wall_climber.image_pipeline.color_to_lineart import convert_color_image_to_lineart
 from wall_climber.image_pipeline.curve_fit import drawing_path_plan_to_smooth_canonical
-from wall_climber.image_pipeline.input_detection import detect_raster_input_type
 from wall_climber.image_pipeline.sketch_centerline import vectorize_sketch_image_to_plan
 from wall_climber.image_pipeline.types import DrawingPathPlan
-from wall_climber.image_pipeline.vectorizers.autotrace_centerline import (
-    vectorize_autotrace_centerline,
-)
-from wall_climber.image_pipeline.vectorizers.base import VectorizationEngineResult
-from wall_climber.image_pipeline.vectorizers.potrace_backend import vectorize_potrace_bw
-from wall_climber.image_pipeline.vectorizers.vtracer_backend import vectorize_vtracer_svg
 from wall_climber.optimizers import vpype_optimizer
 from wall_climber.runtime_topics import (
     ACTIVE_MODE_TOPIC,
@@ -555,6 +554,34 @@ class BackendRuntime:
             max_workers=1,
         )
         self._debug = DebugSnapshotStore()
+        # Text cursor: tracks the (X, Y) where the next text draw should
+        # continue. Successive drawText calls append on the same line with a
+        # word-spacing gap, just like a typewriter. When the next word does
+        # not fit on the remaining line, the placement layer wraps onto a
+        # new line. Cleared by /api/text/reset_cursor or by switching out
+        # of text mode.
+        self._text_cursor_x: float | None = None
+        self._text_cursor_y: float | None = None
+        self._text_cursor_lock = threading.Lock()
+
+    def get_text_cursor(self) -> tuple[float | None, float | None]:
+        with self._text_cursor_lock:
+            return self._text_cursor_x, self._text_cursor_y
+
+    def set_text_cursor(self, x: float | None, y: float | None) -> None:
+        with self._text_cursor_lock:
+            self._text_cursor_x = x
+            self._text_cursor_y = y
+
+    def get_text_cursor_y(self) -> float | None:
+        with self._text_cursor_lock:
+            return self._text_cursor_y
+
+    def set_text_cursor_y(self, value: float | None) -> None:
+        with self._text_cursor_lock:
+            self._text_cursor_y = value
+            if value is None:
+                self._text_cursor_x = None
 
     @property
     def node(self) -> WebBackendNode:
@@ -626,37 +653,6 @@ class BackendRuntime:
 
     def load_upload(self, upload_id: str) -> tuple[dict[str, Any], bytes]:
         return self._uploads.load_upload(upload_id)
-
-    def ensure_upload_processing(
-        self,
-        upload_id: str,
-        *,
-        metadata: dict[str, Any] | None = None,
-        payload: bytes | None = None,
-    ) -> None:
-        self._uploads.ensure_processing(upload_id, metadata=metadata, payload=payload)
-
-    def upload_processing_snapshot(
-        self,
-        upload_id: str,
-        *,
-        metadata: dict[str, Any] | None = None,
-        payload: bytes | None = None,
-    ) -> dict[str, Any]:
-        return self._uploads.processing_snapshot(
-            upload_id, metadata=metadata, payload=payload,
-        )
-
-    def prepared_image_artifact(
-        self,
-        upload_id: str,
-        *,
-        metadata: dict[str, Any] | None = None,
-        payload: bytes | None = None,
-    ) -> PreparedImageArtifact:
-        return self._uploads.prepared_image_artifact(
-            upload_id, metadata=metadata, payload=payload,
-        )
 
     def record_last_plan_debug(self, payload: dict[str, Any]) -> None:
         self._debug.record_plan(payload)
@@ -844,6 +840,9 @@ def _resolve_text_start_placement(
     writable_bounds: dict[str, float],
     safe_bounds: dict[str, float],
     text_layout_defaults,
+    default_x_override: float | None = None,
+    default_y_override: float | None = None,
+    use_continuation_cursor: bool = False,
 ) -> VectorPlacement:
     min_x = safe_bounds['x_min'] + float(text_layout_defaults.left_margin)
 
@@ -853,8 +852,20 @@ def _resolve_text_start_placement(
     min_y = safe_bounds['y_min'] + float(text_layout_defaults.top_margin)
     max_y = safe_bounds['y_max'] - float(text_layout_defaults.bottom_margin)
 
-    default_x = min_x
-    default_y = min_y
+    if default_x_override is not None and min_x <= default_x_override <= max_x:
+        # Continuation cursor: caller wants the next text to continue on the
+        # same line at the X where the previous text ended (with a small gap
+        # already baked in by the publish handler).
+        default_x = float(default_x_override)
+    else:
+        default_x = min_x
+    if default_y_override is not None and min_y <= default_y_override <= max_y:
+        # Continuation cursor: caller wants the next text to continue at the
+        # baseline Y of the previous text (or wrapped to the next line if it
+        # would overflow the writable width).
+        default_y = float(default_y_override)
+    else:
+        default_y = min_y
     default_scale = 1.0
 
     if raw_placement is None:
@@ -867,6 +878,20 @@ def _resolve_text_start_placement(
         )
 
     _reject_extra_fields(raw_placement, {'x', 'y', 'scale'}, f'{request_name}.placement')
+
+    if use_continuation_cursor:
+        # The caller has opted in to cursor-driven placement. The UI still
+        # sends its (X, Y) defaults from the placement panel, but those are
+        # implicit defaults — not an explicit user override — so we ignore
+        # them and use the runtime cursor instead. The scale is still taken
+        # from the request because that is a real user setting.
+        scale = _coerce_float(
+            raw_placement.get('scale', default_scale),
+            field_name=f'{request_name}.placement.scale',
+            minimum=0.05,
+            maximum=10.0,
+        )
+        return VectorPlacement(x=default_x, y=default_y, scale=scale)
 
     x = _coerce_float(
         raw_placement.get('x', default_x),
@@ -1765,14 +1790,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         reorder_units=True,
         fit_arcs=True,
     )
-    image_optimization_policy = _draw_optimization_policy(
-        shared,
-        label='image',
-        reorder_units=True,
-        fit_arcs=True,
-        enable_hatch_ordering=True,
-        cluster_units=True,
-    )
     sketch_draw_optimization_policy = _sketch_draw_optimization_policy(shared)
     preview_cache: TTLCache[PreviewCacheEntry] = TTLCache(
         max_entries=int(_PREVIEW_CACHE_MAX_ENTRIES),
@@ -1786,8 +1803,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     def _preview_optimization_policy(source_type: str) -> CanonicalOptimizationPolicy:
         if source_type == 'sketch_centerline':
             return sketch_draw_optimization_policy
-        if source_type == 'image':
-            return image_optimization_policy
         if source_type == 'svg':
             return svg_optimization_policy
         return _draw_optimization_policy(
@@ -2288,6 +2303,56 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     async def index() -> FileResponse:
         return FileResponse(runtime.web_dir / 'index.html')
 
+    @app.websocket('/rosbridge')
+    async def rosbridge_proxy(websocket: WebSocket) -> None:
+        await websocket.accept()
+        if websockets is None:
+            await websocket.close(code=1011, reason='websockets package unavailable')
+            return
+
+        try:
+            async with websockets.connect('ws://127.0.0.1:9090', max_size=None) as upstream:
+                async def client_to_upstream() -> None:
+                    try:
+                        while True:
+                            message = await websocket.receive()
+                            if message.get('type') == 'websocket.disconnect':
+                                break
+                            text = message.get('text')
+                            data = message.get('bytes')
+                            if text is not None:
+                                await upstream.send(text)
+                            elif data is not None:
+                                await upstream.send(data)
+                    except WebSocketDisconnect:
+                        pass
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await upstream.close()
+
+                async def upstream_to_client() -> None:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                tasks = {
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                }
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                for task in pending:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                for task in done:
+                    task.result()
+        except Exception:
+            with contextlib.suppress(RuntimeError):
+                await websocket.close(code=1011, reason='rosbridge upstream unavailable')
+
     @app.get('/api/health')
     async def health() -> JSONResponse:
         snapshot = runtime.node.runtime_snapshot()
@@ -2321,19 +2386,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         payload = runtime.last_curve_fit_debug_snapshot()
         return JSONResponse(payload or {'available': False})
 
-    def _run_raster_vectorization_engine(engine_name: str, content: bytes) -> VectorizationEngineResult:
-        if engine_name == 'autotrace_centerline':
-            return vectorize_autotrace_centerline(content)
-        if engine_name == 'potrace_bw':
-            return vectorize_potrace_bw(content)
-        if engine_name == 'vtracer_svg':
-            return vectorize_vtracer_svg(content)
-        return VectorizationEngineResult(
-            engine_name=engine_name,
-            available=engine_name == 'internal_centerline',
-            warnings=(f'{engine_name} is handled by the internal preview path.' if engine_name == 'internal_centerline' else f'Unknown vectorization engine {engine_name}.',),
-        )
-
     async def preview_sketch_centerline(
         file: UploadFile = File(...),
         margin_m: Optional[float] = Form(None),
@@ -2344,7 +2396,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         line_sensitivity: Optional[float] = Form(None),
         sketch_extraction_method: Optional[str] = Form(None),
         skeleton_prune_px: Optional[float] = Form(None),
-        vectorization_engine: Optional[str] = Form(None),
         merge_gap_px: Optional[float] = Form(None),
         merge_max_angle_deg: Optional[float] = Form(None),
         optimization_preset: Optional[str] = Form(None),
@@ -2363,17 +2414,15 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         tiny_detail_expand_mode: Optional[str] = Form(None),
         tiny_detail_max_expansions: Optional[int] = Form(None),
         requested_input_type: Optional[str] = None,
-        color_lineart_method: Optional[str] = None,
-        color_to_sketch_method: Optional[str] = None,
     ) -> JSONResponse:
         try:
             content = await file.read(_MAX_UPLOAD_BYTES + 1)
             _validate_sketch_upload(file, content)
             normalized_requested_input_type = str(requested_input_type or 'auto').strip().lower()
-            if normalized_requested_input_type not in {'auto', 'sketch_image', 'colored_image', 'image'}:
+            if normalized_requested_input_type not in {'auto', 'sketch_image', 'sketch'}:
                 raise HTTPException(
                     status_code=422,
-                    detail='input_type must be one of: auto, sketch_image, colored_image, image',
+                    detail='input_type must be one of: auto, sketch_image, sketch',
                 )
             sketch_fit_to_safe_area = _coerce_bool(
                 True if fit_to_safe_area is None else fit_to_safe_area,
@@ -2393,7 +2442,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 1000 if max_image_dim is None else max_image_dim,
                 field_name='max_image_dim',
                 minimum=500,
-                maximum=1600,
+                maximum=1500,
             )
             sketch_min_component_area_px = _coerce_int(
                 2 if min_component_area_px is None else min_component_area_px,
@@ -2420,7 +2469,10 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 maximum=0.95,
             )
             sketch_skeleton_prune_px = _coerce_float(
-                4.0 if skeleton_prune_px is None else skeleton_prune_px,
+                # Match the new sketch_centerline default of 6 px (was 4).
+                # Higher prune length means fewer spurious "wiggles" at
+                # stroke tips on hatched / inked source images.
+                6.0 if skeleton_prune_px is None else skeleton_prune_px,
                 field_name='skeleton_prune_px',
                 minimum=0.0,
                 maximum=100.0,
@@ -2430,31 +2482,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 raise HTTPException(
                     status_code=422,
                     detail='sketch_extraction_method must be one of: hysteresis_ink, otsu, adaptive',
-                )
-            sketch_vectorization_engine = str(vectorization_engine or 'internal_centerline').strip().lower()
-            if sketch_vectorization_engine not in {
-                'internal_centerline',
-                'autotrace_centerline',
-                'potrace_bw',
-                'vtracer_svg',
-                'direct_svg',
-            }:
-                raise HTTPException(
-                    status_code=422,
-                    detail='vectorization_engine must be one of: internal_centerline, autotrace_centerline, potrace_bw, vtracer_svg, direct_svg',
-                )
-            if sketch_vectorization_engine == 'direct_svg':
-                raise HTTPException(
-                    status_code=422,
-                    detail='direct_svg is only valid for SVG input; raster uploads use internal_centerline or optional raster vectorizers',
-                )
-            sketch_color_method = str(color_lineart_method or color_to_sketch_method or 'auto_outline').strip().lower()
-            if sketch_color_method in {'opencv_pencil', 'opencv_edge'}:
-                sketch_color_method = 'opencv_edge_diagnostic'
-            if sketch_color_method not in {'auto_outline', 'photo_diagram_edges', 'simple_cartoon', 'opencv_edge_diagnostic'}:
-                raise HTTPException(
-                    status_code=422,
-                    detail='color_lineart_method must be one of: auto_outline, photo_diagram_edges, simple_cartoon, opencv_edge_diagnostic',
                 )
             sketch_merge_gap_px = _coerce_float(
                 0.0 if merge_gap_px is None else merge_gap_px,
@@ -2482,7 +2509,15 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             )
             sketch_path_optimizer = _normalize_path_optimizer(path_optimizer)
             sketch_curve_tolerance_px = _coerce_float(
-                1.0 if curve_tolerance_px is None else curve_tolerance_px,
+                # 0.6 px (~4mm at 1000px / 6m board) is a tight enough
+                # tolerance to keep the fit visually faithful while still
+                # letting Schneider collapse smooth arcs into a few
+                # cubics. Note that the dominant geometric deviation on
+                # rasters is skeletonisation noise (3-7mm on a 3px-thick
+                # stroke); reducing the curve tolerance below that does
+                # not improve fidelity, only inflates the canonical plan
+                # back into hundreds of line segments.
+                0.6 if curve_tolerance_px is None else curve_tolerance_px,
                 field_name='curve_tolerance_px',
                 minimum=0.05,
                 maximum=50.0,
@@ -2529,7 +2564,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'line_sensitivity': sketch_line_sensitivity,
                 'skeleton_prune_px': sketch_skeleton_prune_px,
                 'sketch_extraction_method': sketch_extraction,
-                'vectorization_engine': sketch_vectorization_engine,
                 'merge_gap_px': sketch_merge_gap_px,
                 'merge_max_angle_deg': sketch_merge_max_angle_deg,
                 'optimization_preset': sketch_optimization_preset,
@@ -2543,7 +2577,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'optimize_stroke_order': sketch_optimize_stroke_order,
                 'path_optimizer': sketch_path_optimizer,
                 'requested_input_type': normalized_requested_input_type,
-                'color_lineart_method': sketch_color_method,
                 'preserve_tiny_details': preserve_tiny_details,
                 'minimum_drawable_feature_m': minimum_drawable_feature_m,
                 'tiny_detail_candidate_max_feature_m': tiny_detail_candidate_max_feature_m,
@@ -2551,75 +2584,17 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 'tiny_detail_max_expansions': tiny_detail_max_expansions,
             }
             try:
-                detection = detect_raster_input_type(
-                    content,
-                    filename=str(file.filename or ''),
-                    content_type=str(file.content_type or ''),
-                    requested_input_type=normalized_requested_input_type,
-                )
-                effective_input_type = detection.input_type
-                pipeline_mode = (
-                    'local_outline_adaptive_centerline'
-                    if effective_input_type == 'colored_image'
-                    else 'sketch_centerline'
-                )
+                # Every uploaded raster is treated as a sketch. Colored
+                # images are unsupported in this build (the AI-driven
+                # color->lineart converter will handle them in a future
+                # iteration); we keep the metadata key shapes that the UI
+                # already expects so existing clients continue to render
+                # the preview without changes.
+                effective_input_type = 'sketch_image'
+                pipeline_mode = 'sketch_centerline'
                 vectorization_content = content
-                color_lineart_metadata: dict[str, Any] = {}
-                color_lineart_preview: dict[str, Any] | None = None
-                color_lineart_warnings: tuple[str, ...] = ()
-                if effective_input_type == 'colored_image' and sketch_vectorization_engine == 'internal_centerline':
-                    color_lineart_result = convert_color_image_to_lineart(
-                        content,
-                        method=sketch_color_method,
-                        max_image_dim=sketch_max_image_dim,
-                    )
-                    vectorization_content = color_lineart_result.line_art_png
-                    color_lineart_metadata = dict(color_lineart_result.metadata)
-                    color_lineart_warnings = tuple(color_lineart_result.warnings)
-                    encoded_preview = base64.b64encode(color_lineart_result.line_art_png).decode('ascii')
-                    color_lineart_preview = {
-                        'mime_type': 'image/png',
-                        'data_url': f'data:image/png;base64,{encoded_preview}',
-                        'quality': color_lineart_metadata.get('color_lineart_quality'),
-                        'profile': color_lineart_metadata.get('color_lineart_profile'),
-                        'foreground_ratio': color_lineart_metadata.get('foreground_ratio'),
-                        'method': color_lineart_metadata.get('color_lineart_method'),
-                        'metadata': color_lineart_metadata,
-                        'warnings': list(color_lineart_warnings),
-                    }
                 sketch_parameters['input_type'] = effective_input_type
                 sketch_parameters['pipeline_mode'] = pipeline_mode
-                sketch_parameters['input_detection'] = detection.to_dict()
-                if sketch_vectorization_engine != 'internal_centerline':
-                    engine_result = _run_raster_vectorization_engine(sketch_vectorization_engine, content)
-                    if not engine_result.available:
-                        raise HTTPException(
-                            status_code=422,
-                            detail={
-                                'engine_name': engine_result.engine_name,
-                                'available': False,
-                                'warnings': list(engine_result.warnings),
-                            },
-                        )
-                    if engine_result.canonical_plan is None:
-                        raise HTTPException(
-                            status_code=422,
-                            detail={
-                                'engine_name': engine_result.engine_name,
-                                'available': True,
-                                'warnings': list(engine_result.warnings) or ['Vectorization engine did not return a CanonicalPathPlan.'],
-                            },
-                        )
-                    raise HTTPException(
-                        status_code=422,
-                        detail={
-                            'engine_name': engine_result.engine_name,
-                            'available': True,
-                            'warnings': list(engine_result.warnings) or [
-                                'External raster vectorizer is available, but board placement is not active for this engine yet.'
-                            ],
-                        },
-                    )
                 preview_started = time.perf_counter()
                 plan = vectorize_sketch_image_to_plan(
                     vectorization_content,
@@ -2646,18 +2621,9 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     {
                         'requested_input_type': normalized_requested_input_type,
                         'detected_input_type': effective_input_type,
-                        'input_detection_confidence': float(detection.confidence),
-                        'input_detection_reason': str(detection.reason),
-                        'input_detection': detection.to_dict(),
                         'pipeline_mode': pipeline_mode,
                     }
                 )
-                if color_lineart_metadata:
-                    plan.metadata['color_lineart'] = color_lineart_metadata
-                    plan.metadata.update(color_lineart_metadata)
-                    if color_lineart_warnings:
-                        existing_warnings = tuple(str(item) for item in plan.metadata.get('warnings') or ())
-                        plan.metadata['warnings'] = existing_warnings + color_lineart_warnings
                 curve_metadata: dict[str, Any] = {
                     'preview_geometry_mode': sketch_preview_geometry_mode,
                     'curve_tolerance_px': float(sketch_curve_tolerance_px),
@@ -2683,7 +2649,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                     smooth_result = drawing_path_plan_to_smooth_canonical(
                         plan,
                         curve_tolerance_m=effective_curve_tolerance_m,
-                        max_curve_segment_points=32,
+                        max_curve_segment_points=96,
                         max_fit_time_ms=3000.0,
                     )
                     canonical_plan = smooth_result.plan
@@ -2722,9 +2688,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 curve_metadata=curve_metadata,
             )
             response_payload['detected_input_type'] = effective_input_type
-            response_payload['input_detection'] = detection.to_dict()
-            if color_lineart_preview:
-                response_payload['converted_lineart_preview'] = color_lineart_preview
             generic_entry = _store_preview(
                 preview_id=preview_id,
                 source_type='sketch_centerline',
@@ -2749,8 +2712,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 optimize_stroke_order=sketch_optimize_stroke_order,
                 path_optimizer=sketch_path_optimizer,
             )
-            if color_lineart_metadata:
-                generic_entry.metrics['color_lineart'] = dict(color_lineart_metadata)
             _store_sketch_preview(
                 preview_id=preview_id,
                 drawing_plan=plan,
@@ -2954,6 +2915,22 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         primitive_descriptor_bytes = len(
             json.dumps(entry.primitive_descriptor, separators=(',', ':'), sort_keys=True).encode('utf-8')
         )
+        # Advance the text continuation cursor so the next text submission
+        # resumes on the same line (with a word-spacing gap), or wraps onto
+        # a new line if it would overflow the writable width. The preview
+        # handler pre-computed the next (X, Y) and stored it in metadata.
+        if entry.source_type == 'text':
+            try:
+                next_cursor = (entry.metadata or {}).get('text_next_cursor')
+                if isinstance(next_cursor, dict):
+                    runtime.set_text_cursor(
+                        float(next_cursor.get('x')),
+                        float(next_cursor.get('y')),
+                    )
+                else:
+                    runtime.set_text_cursor(None, None)
+            except (TypeError, ValueError):
+                runtime.set_text_cursor(None, None)
         return {
             'ok': True,
             'published': True,
@@ -3051,10 +3028,68 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             default=path_optimizer != 'none',
         )
         builder_raw = _preview_json_builder_raw(raw, required_key='text')
-        _, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
+        placed_groups, placed_strokes, canonical_plan, placement_result, writable_bounds, commit_request, _, plan_preview, outside_safe_points, build_timings = _build_text_vector(
             builder_raw,
             request_name='preview text request',
         )
+        # Compute the continuation cursor: the (X, Y) where the next text
+        # draw should resume on the same final line, with a word-spacing gap
+        # already added. If that point overflows the writable width, OR if
+        # the remaining space is too narrow to fit even a short word, we
+        # roll the cursor onto a brand-new line at the left margin. This
+        # avoids the failure mode where a partial line of remaining space
+        # would force the vectorizer's internal wrap to land at the same
+        # X (because each wrap starts at cursor_x=0 in glyph-local space,
+        # which translates back to text_start.x in board space) and stack
+        # words on top of each other.
+        next_cursor: dict[str, float] | None = None
+        if placed_groups:
+            try:
+                last_line_index = max(g.line_index for g in placed_groups)
+                last_line_glyphs = [g for g in placed_groups if g.line_index == last_line_index]
+                if last_line_glyphs:
+                    glyph_height_m = float(commit_request.get('glyph_height_m') or 0.0)
+                    safe_bounds_now = runtime.node.carriage_safe_safe_bounds()
+                    # Word-spacing gap between successive draws: equivalent
+                    # to one full glyph width (~0.65 × glyph_height) so the
+                    # gap reads as a single space-bar press, not just a
+                    # cramped letter-spacing gap.
+                    word_gap_m = max(0.025, glyph_height_m * 0.65)
+                    next_x = max(g.bbox.x_max for g in last_line_glyphs) + word_gap_m
+                    last_line_top_y = min(g.bbox.y_min for g in last_line_glyphs)
+                    # Threshold below which we treat the remaining line as
+                    # "effectively full". Set to roughly 4 glyph widths so
+                    # any reasonable next word fits at the left margin of
+                    # a fresh line rather than getting squeezed into the
+                    # tail of the current one.
+                    min_useful_remaining_m = glyph_height_m * 4.0
+                    remaining_m = safe_bounds_now['x_max'] - next_x
+                    line_overflows = (
+                        next_x > safe_bounds_now['x_max']
+                        or remaining_m < min_useful_remaining_m
+                    )
+                    if line_overflows:
+                        next_x = (
+                            safe_bounds_now['x_min']
+                            + float(text_layout_defaults.left_margin)
+                        )
+                        # Use a generous line gap (1.6x glyph height) so the
+                        # new line clears the descenders ('g', 'p', 'y') of
+                        # the previous line. With glyph_height=86mm this
+                        # gives a 138mm baseline-to-baseline distance.
+                        next_y = last_line_top_y + glyph_height_m * 1.6
+                    else:
+                        next_y = last_line_top_y
+                    safe_max_y = (
+                        safe_bounds_now['y_max']
+                        - float(text_layout_defaults.bottom_margin)
+                    )
+                    if next_y >= safe_max_y:
+                        next_cursor = None  # no room for another line
+                    else:
+                        next_cursor = {'x': float(next_x), 'y': float(next_y)}
+            except (TypeError, ValueError):
+                next_cursor = None
         preview_start = time.perf_counter()
         preview_payload = _preview_payload_from_strokes(
             placed_strokes,
@@ -3083,6 +3118,7 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             pipeline_mode='text_vector',
             source_hash=_content_hash({'text': builder_raw.get('text'), 'settings': commit_request}),
             settings={**commit_request, 'path_optimizer': path_optimizer, 'optimize_stroke_order': optimize_stroke_order},
+            metadata={'text_next_cursor': next_cursor} if next_cursor is not None else None,
             optimize_stroke_order=optimize_stroke_order,
             path_optimizer=path_optimizer,
             writable_bounds=writable_bounds,
@@ -3172,8 +3208,8 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             if upload is None or not hasattr(upload, 'read'):
                 raise HTTPException(status_code=422, detail='preview file upload requires a file field')
             requested_input_type = str(form.get('input_type') or 'auto').strip().lower()
-            if requested_input_type not in {'auto', 'sketch_image', 'colored_image', 'image', 'svg'}:
-                raise HTTPException(status_code=422, detail='input_type must be one of: auto, sketch_image, colored_image, image, svg')
+            if requested_input_type not in {'auto', 'sketch_image', 'sketch', 'svg'}:
+                raise HTTPException(status_code=422, detail='input_type must be one of: auto, sketch_image, sketch, svg')
             settings_json = form.get('settings_json')
             if settings_json in (None, ''):
                 settings = {}
@@ -3219,7 +3255,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 line_sensitivity=settings.get('line_sensitivity'),
                 sketch_extraction_method=settings.get('sketch_extraction_method'),
                 skeleton_prune_px=settings.get('skeleton_prune_px'),
-                vectorization_engine=settings.get('vectorization_engine'),
                 merge_gap_px=settings.get('merge_gap_px'),
                 merge_max_angle_deg=settings.get('merge_max_angle_deg'),
                 optimization_preset=settings.get('optimization_preset'),
@@ -3238,8 +3273,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
                 tiny_detail_expand_mode=settings.get('tiny_detail_expand_mode'),
                 tiny_detail_max_expansions=settings.get('tiny_detail_max_expansions'),
                 requested_input_type=requested_input_type,
-                color_lineart_method=settings.get('color_lineart_method'),
-                color_to_sketch_method=settings.get('color_to_sketch_method'),
             )
 
         raw = await _load_json_request(
@@ -3255,125 +3288,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             return _json_svg_preview_response(raw)
         raise HTTPException(status_code=422, detail='JSON preview input_type must be text or svg')
 
-    @app.post('/api/preview/compare')
-    async def compare_preview_methods(request: Request) -> JSONResponse:
-        content_type = str(request.headers.get('content-type') or '').lower()
-        if 'multipart/form-data' not in content_type:
-            raise HTTPException(status_code=415, detail='compare methods requires multipart/form-data')
-        form = await request.form()
-        upload = form.get('file')
-        if upload is None or not hasattr(upload, 'read'):
-            raise HTTPException(status_code=422, detail='compare methods requires a file field')
-        settings_json = form.get('settings_json')
-        settings: dict[str, Any] = {}
-        if settings_json not in (None, ''):
-            try:
-                settings = json.loads(str(settings_json))
-            except json.JSONDecodeError as exc:
-                raise HTTPException(status_code=422, detail=f'settings_json is invalid JSON: {exc}')
-            settings = _preview_settings(settings, name='compare methods request')
-        engines_raw = form.get('engines_json') or form.get('engines')
-        if engines_raw in (None, ''):
-            engines = ['internal_centerline', 'autotrace_centerline', 'potrace_bw', 'vtracer_svg']
-        else:
-            try:
-                parsed_engines = json.loads(str(engines_raw))
-            except json.JSONDecodeError:
-                parsed_engines = [item.strip() for item in str(engines_raw).split(',') if item.strip()]
-            if not isinstance(parsed_engines, list):
-                raise HTTPException(status_code=422, detail='engines must be a JSON list or comma-separated string')
-            engines = [str(item).strip().lower() for item in parsed_engines if str(item).strip()]
-        allowed_engines = {'internal_centerline', 'autotrace_centerline', 'potrace_bw', 'vtracer_svg'}
-        unknown = [engine for engine in engines if engine not in allowed_engines]
-        if unknown:
-            raise HTTPException(status_code=422, detail=f'unknown vectorization engines: {", ".join(unknown)}')
-        content = await upload.read(_MAX_UPLOAD_BYTES + 1)
-        _validate_sketch_upload(upload, content)
-        results: list[dict[str, Any]] = []
-        for engine in engines:
-            if engine == 'internal_centerline':
-                upload_copy = UploadFile(
-                    filename=str(getattr(upload, 'filename', '') or 'compare.png'),
-                    file=io.BytesIO(content),
-                    content_type=str(getattr(upload, 'content_type', '') or 'image/png'),
-                )
-                try:
-                    response = await preview_sketch_centerline(
-                        file=upload_copy,
-                        margin_m=settings.get('margin_m'),
-                        max_image_dim=settings.get('max_image_dim'),
-                        min_component_area_px=settings.get('min_component_area_px'),
-                        min_stroke_length_px=settings.get('min_stroke_length_px'),
-                        simplify_epsilon_px=settings.get('simplify_epsilon_px'),
-                        line_sensitivity=settings.get('line_sensitivity'),
-                        sketch_extraction_method=settings.get('sketch_extraction_method'),
-                        skeleton_prune_px=settings.get('skeleton_prune_px'),
-                        vectorization_engine='internal_centerline',
-                        merge_gap_px=settings.get('merge_gap_px'),
-                        merge_max_angle_deg=settings.get('merge_max_angle_deg'),
-                        optimization_preset=settings.get('optimization_preset'),
-                        preview_geometry_mode=settings.get('preview_geometry_mode'),
-                        curve_tolerance_px=settings.get('curve_tolerance_px'),
-                        curve_tolerance_m=settings.get('curve_tolerance_m'),
-                        scale_percent=settings.get('scale_percent'),
-                        center_x_m=settings.get('center_x_m'),
-                        center_y_m=settings.get('center_y_m'),
-                        fit_to_safe_area=settings.get('fit_to_safe_area'),
-                        optimize_stroke_order=settings.get('optimize_stroke_order'),
-                        path_optimizer=settings.get('path_optimizer'),
-                        preserve_tiny_details=settings.get('preserve_tiny_details'),
-                        minimum_drawable_feature_m=settings.get('minimum_drawable_feature_m'),
-                        tiny_detail_candidate_max_feature_m=settings.get('tiny_detail_candidate_max_feature_m'),
-                        tiny_detail_expand_mode=settings.get('tiny_detail_expand_mode'),
-                        tiny_detail_max_expansions=settings.get('tiny_detail_max_expansions'),
-                        requested_input_type=settings.get('input_type', 'auto'),
-                        color_lineart_method=settings.get('color_lineart_method'),
-                        color_to_sketch_method=settings.get('color_to_sketch_method'),
-                    )
-                except HTTPException as exc:
-                    results.append(
-                        {
-                            'engine_name': engine,
-                            'available': True,
-                            'warnings': [str(exc.detail)],
-                            'error': exc.detail,
-                        }
-                    )
-                    continue
-                payload = json.loads(response.body.decode('utf-8'))
-                metrics = dict(payload.get('metrics') or {})
-                results.append(
-                    {
-                        'engine_name': engine,
-                        'available': True,
-                        'warnings': list(payload.get('warnings') or ()),
-                        'preview_id': payload.get('preview_id'),
-                        'execution_preview_svg': payload.get('execution_preview_svg'),
-                        'primitive_hash': payload.get('primitive_hash'),
-                        'execution_hash': payload.get('execution_hash'),
-                        'canonical_geometry': metrics.get('canonical_geometry') or {},
-                        'executable_geometry': metrics.get('executable_geometry') or {},
-                        'draw_length_m': metrics.get('draw_length_m'),
-                        'travel_length_m': metrics.get('travel_length_m'),
-                        'estimated_draw_time_ms': metrics.get('estimated_draw_time_ms'),
-                        'metrics': metrics,
-                        'payload': payload,
-                    }
-                )
-                continue
-            engine_result = _run_raster_vectorization_engine(engine, content)
-            results.append(
-                {
-                    'engine_name': engine_result.engine_name,
-                    'available': bool(engine_result.available),
-                    'warnings': list(engine_result.warnings),
-                    'metrics': dict(engine_result.metrics),
-                    'has_canonical_plan': engine_result.canonical_plan is not None,
-                    'has_svg_output': bool(engine_result.svg_output),
-                }
-            )
-        return JSONResponse({'ok': True, 'results': results, 'active_preview_mutated': False})
-
     @app.post('/api/mode')
     async def set_mode(request: Request) -> JSONResponse:
         raw = await _load_json_request(
@@ -3386,7 +3300,20 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         if mode not in VALID_MODES:
             raise HTTPException(status_code=422, detail=f'mode must be one of {VALID_MODES}')
         snapshot = runtime.node.switch_mode(mode)
+        # Switching out of text mode discards the continuation cursor so the
+        # next time the user comes back to text mode they start at the top
+        # of the board again.
+        if mode != MODE_TEXT:
+            runtime.set_text_cursor(None, None)
         return JSONResponse({'ok': True, 'active_mode': snapshot['active_mode'], 'runtime': snapshot})
+
+    @app.post('/api/text/reset_cursor')
+    async def reset_text_cursor() -> JSONResponse:
+        """Reset the text continuation cursor so the next text draw starts
+        at the top of the board. Lets the user wipe the slate without
+        leaving text mode."""
+        runtime.set_text_cursor(None, None)
+        return JSONResponse({'ok': True, 'text_cursor': None})
 
     @app.post('/api/manual/pen')
     async def set_manual_pen_mode(request: Request) -> JSONResponse:
@@ -3492,135 +3419,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             }
         )
 
-    def _image_processing_defaults() -> dict[str, Any]:
-        return dict(_DEFAULT_IMAGE_PREP_OPTIONS)
-
-    def _default_uploaded_file_commit_request(
-        source_type: str,
-        *,
-        upload_id: str,
-        placement: VectorPlacement | None,
-    ) -> dict[str, Any] | None:
-        if placement is None:
-            return None
-        payload: dict[str, Any] = {
-            'upload_id': upload_id,
-            'placement': {
-                'x': float(placement.x),
-                'y': float(placement.y),
-                'scale': float(placement.scale),
-            },
-        }
-        if source_type == 'image':
-            payload.update(_image_processing_defaults())
-        return payload
-
-    def _shrink_bounds_local(bounds: dict[str, float], margin_m: float) -> dict[str, float]:
-        shrink = max(0.0, float(margin_m))
-        shrunk = {
-            'x_min': float(bounds['x_min']) + shrink,
-            'x_max': float(bounds['x_max']) - shrink,
-            'y_min': float(bounds['y_min']) + shrink,
-            'y_max': float(bounds['y_max']) - shrink,
-        }
-        if shrunk['x_max'] <= shrunk['x_min'] or shrunk['y_max'] <= shrunk['y_min']:
-            raise ValueError('Writable bounds are too small after applying draw fit margin.')
-        return shrunk
-
-    def _raster_overlay_payload(
-        *,
-        image_size: dict[str, Any] | None,
-        writable_bounds: dict[str, float] | None,
-        placement: VectorPlacement | None,
-    ) -> dict[str, Any] | None:
-        if not isinstance(image_size, dict) or writable_bounds is None or placement is None:
-            return None
-        width_px = int(image_size.get('width_px') or 0)
-        height_px = int(image_size.get('height_px') or 0)
-        if width_px <= 0 or height_px <= 0:
-            return None
-        fit_bounds = _shrink_bounds_local(
-            writable_bounds,
-            draw_execution_defaults.draw_scale_fit_margin_m,
-        )
-        fit_width = float(fit_bounds['x_max']) - float(fit_bounds['x_min'])
-        fit_height = float(fit_bounds['y_max']) - float(fit_bounds['y_min'])
-        fit_scale = min(fit_width / float(width_px), fit_height / float(height_px))
-        final_scale = fit_scale * float(placement.scale)
-        half_width = 0.5 * float(width_px) * final_scale
-        half_height = 0.5 * float(height_px) * final_scale
-        return {
-            'kind': 'raster',
-            'image_size': {
-                'width_px': width_px,
-                'height_px': height_px,
-            },
-            'bounds': {
-                'x_min': float(placement.x) - half_width,
-                'x_max': float(placement.x) + half_width,
-                'y_min': float(placement.y) - half_height,
-                'y_max': float(placement.y) + half_height,
-                'width': half_width * 2.0,
-                'height': half_height * 2.0,
-            },
-        }
-
-    def _upload_file_status_payload(
-        metadata: dict[str, Any],
-        *,
-        payload: bytes | None = None,
-    ) -> dict[str, Any]:
-        upload_id = _validate_upload_id(metadata.get('upload_id'))
-        source_type = _uploaded_source_type(metadata)
-        processing = runtime.upload_processing_snapshot(
-            upload_id,
-            metadata=metadata,
-            payload=payload,
-        )
-        try:
-            writable_bounds = runtime.node.carriage_safe_writable_bounds()
-            safe_bounds = runtime.node.carriage_safe_safe_bounds()
-            placement = default_image_placement(
-                writable_bounds,
-                safe_bounds=safe_bounds,
-            )
-        except HTTPException:
-            writable_bounds = None
-            placement = None
-        except ValueError:
-            writable_bounds = None
-            placement = None
-
-        commit_request = _default_uploaded_file_commit_request(
-            source_type,
-            upload_id=upload_id,
-            placement=placement,
-        )
-        response_payload = {
-            'ok': True,
-            'stored_only': True,
-            'source_type': source_type,
-            'upload': metadata,
-            'status': processing,
-            'commit_request': commit_request,
-        }
-        if source_type == 'image':
-            image_size = processing.get('image_size') if isinstance(processing, dict) else None
-            response_payload['image_info'] = {
-                'width_px': int(image_size.get('width_px') or 0) if isinstance(image_size, dict) else 0,
-                'height_px': int(image_size.get('height_px') or 0) if isinstance(image_size, dict) else 0,
-                'pipeline': {
-                    'route': processing.get('route', {}).get('route') if isinstance(processing.get('route'), dict) else None,
-                    'curve_fit_summary': processing.get('curve_fit_summary') or {},
-                },
-            }
-            response_payload['raster_overlay'] = _raster_overlay_payload(
-                image_size=image_size if isinstance(image_size, dict) else None,
-                writable_bounds=writable_bounds,
-                placement=placement,
-            )
-        return response_payload
-
     def _build_text_vector(
         raw: dict[str, Any],
         *,
@@ -3689,12 +3487,25 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
         )
         writable_bounds = runtime.node.carriage_safe_writable_bounds()
         safe_bounds = runtime.node.carriage_safe_safe_bounds()
+        # Continuation cursor: previous text draw saved an (X, Y) where the
+        # next text should resume on the same line, with a word-spacing gap
+        # already added. The placement layer below wraps the new text onto
+        # the next line when it would overflow the writable width.
+        cursor_x, cursor_y = runtime.get_text_cursor()
+        # When we have a live cursor we treat the UI's placement panel as
+        # implicit defaults and override (x, y) with the cursor; the scale
+        # stays as the user picked it. Without a cursor (first draw, or
+        # after reset) we honour the placement payload as-is.
+        use_continuation_cursor = cursor_x is not None and cursor_y is not None
         text_start = _resolve_text_start_placement(
             raw.get('placement'),
             request_name=request_name,
             writable_bounds=writable_bounds,
             safe_bounds=safe_bounds,
             text_layout_defaults=text_layout_defaults,
+            default_x_override=cursor_x,
+            default_y_override=cursor_y,
+            use_continuation_cursor=use_continuation_cursor,
         )
         glyph_scale_m = float(text_layout_defaults.glyph_height) * text_start.scale
         if glyph_scale_m <= 0.0:
@@ -3920,199 +3731,6 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
             build_timings,
         )
 
-    def _build_image_vector(
-        content: bytes,
-        raw: dict[str, Any],
-        *,
-        request_name: str,
-        prepared_artifact: PreparedImageArtifact | None = None,
-    ) -> tuple[
-        tuple[tuple[tuple[float, float], ...], ...],
-        CanonicalPathPlan,
-        Any,
-        dict[str, float],
-        dict[str, Any],
-        dict[str, Any],
-        tuple[dict[str, Any] | None, ...],
-        dict[str, Any],
-        PrimitivePathPlan,
-        dict[str, Any],
-        int,
-        dict[str, float],
-    ]:
-        allowed = {
-            'placement',
-            'min_perimeter_px',
-            'contour_simplify_ratio',
-            'max_strokes',
-        }
-        _reject_extra_fields(raw, allowed, request_name)
-        default_image_options = (
-            dict(prepared_artifact.defaults)
-            if isinstance(prepared_artifact, PreparedImageArtifact)
-            else _image_processing_defaults()
-        )
-        min_perimeter_px = _coerce_float(
-            raw.get('min_perimeter_px', default_image_options['min_perimeter_px']),
-            field_name=f'{request_name}.min_perimeter_px',
-            minimum=1.0,
-            maximum=1000.0,
-        )
-        contour_simplify_ratio = _coerce_float(
-            raw.get('contour_simplify_ratio', default_image_options['contour_simplify_ratio']),
-            field_name=f'{request_name}.contour_simplify_ratio',
-            minimum=0.0001,
-            maximum=0.2,
-        )
-        max_strokes = _coerce_int(
-            raw.get('max_strokes', default_image_options['max_strokes']),
-            field_name=f'{request_name}.max_strokes',
-            minimum=1,
-            maximum=16384,
-        )
-        if isinstance(prepared_artifact, PreparedImageArtifact):
-            expected = prepared_artifact.defaults
-            if (
-                abs(float(min_perimeter_px) - float(expected['min_perimeter_px'])) > 1.0e-9
-                or abs(float(contour_simplify_ratio) - float(expected['contour_simplify_ratio'])) > 1.0e-12
-                or int(max_strokes) != int(expected['max_strokes'])
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail='cached image preprocessing options are fixed after upload; re-upload to change them',
-                )
-        writable_bounds = runtime.node.carriage_safe_writable_bounds()
-        build_timings: dict[str, float] = (
-            dict(prepared_artifact.timings_ms)
-            if isinstance(prepared_artifact, PreparedImageArtifact)
-            else {}
-        )
-        if raw.get('placement') is None:
-            try:
-                placement = default_image_placement(
-                    writable_bounds,
-                    safe_bounds=runtime.node.carriage_safe_safe_bounds(),
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
-        else:
-            try:
-                placement = normalize_placement(raw.get('placement'), writable_bounds)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f'{request_name}.placement invalid: {exc}')
-        try:
-            if isinstance(prepared_artifact, PreparedImageArtifact):
-                image_result = prepared_artifact.image_result
-            else:
-                ingest_start = time.perf_counter()
-                image_result = vectorize_image_to_canonical_plan(
-                    content,
-                    theta_ref=draw_execution_defaults.fixed_draw_theta_rad,
-                    min_perimeter_px=min_perimeter_px,
-                    contour_simplify_ratio=contour_simplify_ratio,
-                    max_strokes=max_strokes,
-                )
-                build_timings['ingest_ms'] = _elapsed_ms(ingest_start)
-            place_start = time.perf_counter()
-            placed_plan, placement_result = place_canonical_plan_on_board(
-                image_result.plan,
-                writable_bounds=writable_bounds,
-                placement=placement,
-                fit_margin_m=draw_execution_defaults.draw_scale_fit_margin_m,
-            )
-            build_timings['place_ms'] = _elapsed_ms(place_start)
-            placed_command_metadata = tuple(
-                dict(item) if item is not None else None
-                for item in image_result.command_metadata
-            )
-            curve_fit_payload = curve_fit_debug_to_board(
-                source_plan=image_result.plan,
-                placed_plan=placed_plan,
-                command_metadata=placed_command_metadata,
-                raw_contours=image_result.raw_contours,
-                curve_fit_debug={
-                    **dict(image_result.curve_fit_debug or {}),
-                    'route': image_result.route_decision.to_dict(),
-                    'image_size': {
-                        'width_px': int(image_result.image_size[0]),
-                        'height_px': int(image_result.image_size[1]),
-                    },
-                },
-                placement=placement,
-                final_scale=placement_result.final_scale,
-                source_type='image',
-            )
-            curve_fit_payload['route'] = image_result.route_decision.to_dict()
-            curve_fit_payload['image_size'] = {
-                'width_px': int(image_result.image_size[0]),
-                'height_px': int(image_result.image_size[1]),
-            }
-            optimize_start = time.perf_counter()
-            canonical_plan = placed_plan
-            optimization_result = optimize_canonical_plan(
-                canonical_plan,
-                policy=image_optimization_policy,
-            )
-            canonical_plan = optimization_result.plan
-            command_metadata = map_curve_fit_command_metadata(
-                placed_plan,
-                placed_command_metadata,
-                canonical_plan,
-            )
-            build_timings['optimize_ms'] = _elapsed_ms(optimize_start)
-            runtime_export_start = time.perf_counter()
-            primitive_plan_msg = _build_execution_transport_message(
-                canonical_plan,
-                writable_bounds=writable_bounds,
-                shared_config=shared,
-                sampling_policy=runtime_sampling_policy,
-            )
-            build_timings['runtime_export_ms'] = _elapsed_ms(runtime_export_start)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f'{request_name} failed: {exc}')
-        cleaned_strokes = canonical_plan_to_draw_strokes(
-            canonical_plan,
-            sampling_policy=runtime_sampling_policy,
-        )
-        outside_safe_points = _interpolated_outside_safe_workspace_count(
-            cleaned_strokes,
-            shared,
-            step_m=_sampling_validation_step_m(runtime_sampling_policy),
-        )
-        plan_preview = canonical_plan_to_legacy_strokes(
-            canonical_plan,
-            sampling_policy=preview_sampling_policy,
-        )
-        commit_tail = {
-            'placement': {'x': placement.x, 'y': placement.y, 'scale': placement.scale},
-            'min_perimeter_px': min_perimeter_px,
-            'contour_simplify_ratio': contour_simplify_ratio,
-            'max_strokes': max_strokes,
-        }
-        image_info = image_result.to_metadata()
-        image_info['optimization'] = optimization_result.stats.to_dict()
-        return (
-            cleaned_strokes,
-            canonical_plan,
-            placement_result,
-            writable_bounds,
-            commit_tail,
-            image_info,
-            command_metadata,
-            curve_fit_payload,
-            primitive_plan_msg,
-            plan_preview,
-            outside_safe_points,
-            build_timings,
-        )
-
-    def _uploaded_source_type(metadata: dict[str, Any]) -> str:
-        return infer_uploaded_source_type(
-            stored_filename=metadata.get('stored_filename'),
-            original_filename=metadata.get('original_filename'),
-            content_type=metadata.get('normalized_content_type') or metadata.get('content_type'),
-            source_type=metadata.get('source_type'),
-        )
 
     def _uploaded_svg_text(
         metadata: dict[str, Any],
@@ -4157,29 +3775,32 @@ def create_app(runtime: BackendRuntime) -> FastAPI:
     return app
 
 
-def _select_free_port(preferred: int, *, attempts: int = 32) -> int:
-    """Return ``preferred`` if free, otherwise the next available TCP port.
+def _bind_listening_socket(preferred: int, *, attempts: int = 32) -> tuple[int, socket.socket]:
+    """Pre-bind a TCP listener with ``SO_REUSEADDR`` so the server survives
+    ``TIME_WAIT`` from a previous crash and only falls back to a different
+    port when ``preferred`` is genuinely held by another process.
 
-    Some hosts (e.g. VS Code dev containers) keep ``preferred`` permanently
-    bound for port-forwarding; in that case binding the FastAPI server to it
-    fails with ``Address already in use`` even though no project process is
-    holding the port. We probe a small window to find a usable alternative
-    instead of crashing the launch.
+    The returned socket is handed directly to uvicorn via
+    ``Server.run(sockets=[...])`` so uvicorn does not try to re-bind it
+    without ``SO_REUSEADDR`` and does not race with another process.
     """
     base = max(1024, int(preferred))
+    last_error: BaseException | None = None
     for offset in range(attempts):
         candidate = base + offset
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(('0.0.0.0', candidate))
-            return candidate
-        except OSError:
-            continue
-        finally:
+            sock.listen(128)
+            return candidate, sock
+        except OSError as exc:
+            last_error = exc
             sock.close()
+            continue
     raise RuntimeError(
-        f'Unable to find a free TCP port starting at {base} '
-        f'(checked {attempts} ports).',
+        f'Unable to bind a listening TCP port starting at {base} '
+        f'(checked {attempts} ports): {last_error}',
     )
 
 
@@ -4190,7 +3811,7 @@ def main(args=None) -> None:
     node = WebBackendNode()
     runtime = BackendRuntime(node)
     app = create_app(runtime)
-    selected_port = _select_free_port(node.port)
+    selected_port, listen_socket = _bind_listening_socket(node.port)
     if selected_port != node.port:
         node.get_logger().warn(
             f'Requested port {node.port} is busy; using {selected_port} instead. '
@@ -4205,10 +3826,16 @@ def main(args=None) -> None:
 
     runtime.start()
     try:
-        server.run()
+        # Hand the pre-bound, SO_REUSEADDR-enabled socket to uvicorn so it
+        # does not silently re-bind without that flag and fail on TIME_WAIT.
+        server.run(sockets=[listen_socket])
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            listen_socket.close()
+        except OSError:
+            pass
         runtime.shutdown()
 
 

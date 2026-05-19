@@ -8,6 +8,12 @@ from typing import Iterable
 import cv2  # type: ignore
 import numpy
 
+from wall_climber.image_pipeline._filled_regions import split_filled_and_thin
+from wall_climber.image_pipeline._preprocess import enhance_for_extraction
+from wall_climber.image_pipeline._stroke_order import (
+    Stroke as _OrderingStroke,
+    optimise_stroke_order,
+)
 from wall_climber.image_pipeline.types import (
     DrawingPathPlan,
     PipelineMetrics,
@@ -26,15 +32,18 @@ _NEIGHBORS = (
     (-1, 0),            (1, 0),
     (-1, 1),  (0, 1),   (1, 1),
 )
-_ORTHOGONAL_NEIGHBORS = (
-    (0, -1),
-    (-1, 0), (1, 0),
-    (0, 1),
-)
 
 
 Pixel = tuple[int, int]
 PixelStroke = tuple[Pixel, ...]
+# Sub-pixel stroke type used after the binomial smoothing pass. The smoothing
+# kernel produces fractional coordinates that we want to preserve all the way
+# through to the board-space scaling stage; rounding back to integer pixels
+# undoes the smoothing's noise reduction. The downstream RDP / merge / scale
+# helpers all coerce coordinates to ``float`` internally so they accept this
+# wider tuple shape without any further change.
+SmoothPixel = tuple[float, float]
+SmoothPixelStroke = tuple[SmoothPixel, ...]
 BoundsM = dict[str, float]
 
 _OPTIMIZATION_PRESETS = {
@@ -45,9 +54,16 @@ _OPTIMIZATION_PRESETS = {
         'min_stroke_length_px': 0.0,
         'simplify_epsilon_px': 0.0,
     },
+    # 'detail' is the user-facing default. We DO enable merging here because
+    # a fragmented skeleton emits hundreds of separate strokes for a typical
+    # sketch (one per skeleton edge between junctions/endpoints), which
+    # translates 1:1 into pen-lifts on the robot. A 2px gap + 20deg angle
+    # gate joins co-linear neighbours without distorting visible geometry.
+    # Earlier behaviour kept merge_enabled=False, which produced 2-5x more
+    # pen-lifts than necessary on real sketches.
     'detail': {
-        'merge_enabled': False,
-        'merge_gap_px': 0.0,
+        'merge_enabled': True,
+        'merge_gap_px': 2.0,
         'merge_max_angle_deg': 20.0,
         'min_stroke_length_px': 1.0,
         'simplify_epsilon_px': 0.25,
@@ -377,8 +393,16 @@ def _prune_skeleton_spurs(
     passes = 0
 
     for _pass_index in range(max(1, int(max_passes))):
+        # Match the skeleton's actual 8-connectivity instead of building a
+        # 4-connected neighbour map. On an 8-connected skeleton, a chain of
+        # diagonal-only pixels has degree zero in 4-conn, so the walk
+        # cannot proceed through it and diagonal-heavy spurs survive
+        # pruning. The branch length stays Euclidean (math.hypot below),
+        # so the threshold semantics are unchanged: a 6 px threshold still
+        # means six pixels of axis-aligned travel or about four diagonal
+        # pixels.
         neighbor_map = {
-            pixel: _pixel_neighbors_with_offsets(pixel, pixels, _ORTHOGONAL_NEIGHBORS)
+            pixel: _pixel_neighbors_with_offsets(pixel, pixels, _NEIGHBORS)
             for pixel in pixels
         }
         endpoints = [pixel for pixel, neighbors in neighbor_map.items() if len(neighbors) == 1]
@@ -548,6 +572,70 @@ def _point_line_distance(point: Pixel, start: Pixel, end: Pixel) -> float:
     proj_x = x1 + (t * dx)
     proj_y = y1 + (t * dy)
     return math.hypot(px - proj_x, py - proj_y)
+
+
+# Binomial 5-tap kernel. Approximates Gaussian with sigma ~= 1.0 px and is
+# stable under integer rounding because the weights sum to 16 (a power of 2).
+# Smoothing is applied as a 1D convolution along each stroke's polyline order
+# (separately on x and y), which is the right space to operate in: the
+# skeleton is a 1-px-wide curve, and consecutive raster pixels along it
+# only ever differ by 1 in chess-distance. Anything wider than this kernel
+# starts to round corners visibly.
+_SMOOTHING_KERNEL_5 = (1.0, 4.0, 6.0, 4.0, 1.0)
+
+
+def _dedupe_smooth_pixels(points: Iterable[SmoothPixel]) -> SmoothPixelStroke:
+    """Same idea as ``_dedupe_pixels`` but for sub-pixel coordinates.
+
+    Two consecutive points are considered duplicates when both coordinates
+    agree to within ``_EPS``; this keeps RDP's recursive identity checks
+    from collapsing on rounding artefacts after the binomial smoothing.
+    """
+    deduped: list[SmoothPixel] = []
+    for point in points:
+        if deduped:
+            last = deduped[-1]
+            if abs(last[0] - point[0]) <= _EPS and abs(last[1] - point[1]) <= _EPS:
+                continue
+        deduped.append((float(point[0]), float(point[1])))
+    return tuple(deduped)
+
+
+def _smooth_pixel_stroke(stroke: PixelStroke) -> SmoothPixelStroke:
+    """Light Gaussian-style smoothing along the stroke order.
+
+    Skeletonization can produce strokes whose pixels jitter by 1 px from the
+    geometric centerline because of binarization noise, especially on long
+    thin lines (hair, thin wisps). Even after RDP simplification this jitter
+    survives as a low-amplitude wobble. Smoothing the raster pixels before
+    simplification lets the simplifier see a cleaner polyline.
+
+    Endpoints are preserved exactly so junctions/corners stay anchored at
+    their original coordinates and adjacent strokes still meet correctly.
+    Coordinates are returned as floats so the smoothing's sub-pixel output
+    is preserved all the way through to board-space scaling; rounding back
+    to integers here would discard most of the noise reduction.
+    """
+    if len(stroke) < 5:
+        return tuple((float(x), float(y)) for x, y in stroke)
+    kernel = _SMOOTHING_KERNEL_5
+    half = len(kernel) // 2
+    weight_sum = sum(kernel)
+    smoothed: list[SmoothPixel] = [(float(stroke[0][0]), float(stroke[0][1]))]
+    last_index = len(stroke) - 1
+    for index in range(1, last_index):
+        if index < half or index > last_index - half:
+            smoothed.append((float(stroke[index][0]), float(stroke[index][1])))
+            continue
+        sx = 0.0
+        sy = 0.0
+        for offset, weight in enumerate(kernel, start=-half):
+            point = stroke[index + offset]
+            sx += float(point[0]) * weight
+            sy += float(point[1]) * weight
+        smoothed.append((sx / weight_sum, sy / weight_sum))
+    smoothed.append((float(stroke[-1][0]), float(stroke[-1][1])))
+    return _dedupe_smooth_pixels(smoothed)
 
 
 def _simplify_pixels(points: PixelStroke, *, epsilon_px: float) -> PixelStroke:
@@ -1002,6 +1090,10 @@ def vectorize_sketch_image_to_plan(
     center_y_m: float | None = None,
     fit_bounds_m: BoundsM | None = None,
     validation_bounds_m: BoundsM | None = None,
+    enable_preprocessing: bool | None = None,
+    enable_filled_outline: bool | None = None,
+    enable_stroke_reorder: bool | None = None,
+    enable_skeleton_smoothing: bool | None = None,
 ) -> DrawingPathPlan:
     """Convert a high-contrast sketch image into a board-space DrawingPathPlan."""
 
@@ -1026,9 +1118,39 @@ def vectorize_sketch_image_to_plan(
     merge_enabled = bool(optimization_settings['merge_enabled'])
     resolved_preset = str(optimization_settings['optimization_preset'])
     if skeleton_prune_px is None:
-        effective_skeleton_prune_px = 0.0 if resolved_preset == 'raw' else 4.0
+        # Skeleton spur length to prune. Bumping from 4 to 6 px removes
+        # the short spurious branches that appear at every stroke
+        # tip / junction in noisy sketches (cross-hatching, anime ink,
+        # textured fills). Without it the curve fitter sees these
+        # spurs as real strokes and emits a "wiggle" right next to
+        # the main line. 6 px is still well below the smallest
+        # intentional feature in a typical sketch (~20 px lines).
+        effective_skeleton_prune_px = 0.0 if resolved_preset == 'raw' else 6.0
     else:
         effective_skeleton_prune_px = max(0.0, float(skeleton_prune_px))
+
+    # Phase-3 quality enhancements (preprocessing, filled-outline detection,
+    # 2-opt stroke reordering) are auto-enabled by every non-raw preset.
+    # They were originally opt-in while we validated end-to-end behaviour
+    # on the live robot; that validation is now done. Callers can still
+    # override individually via the explicit kwargs.
+    preset_enables_phase3 = resolved_preset in {'detail', 'balanced', 'fast'}
+    effective_enable_preprocessing = (
+        preset_enables_phase3 if enable_preprocessing is None
+        else bool(enable_preprocessing)
+    )
+    effective_enable_filled_outline = (
+        preset_enables_phase3 if enable_filled_outline is None
+        else bool(enable_filled_outline)
+    )
+    effective_enable_stroke_reorder = (
+        preset_enables_phase3 if enable_stroke_reorder is None
+        else bool(enable_stroke_reorder)
+    )
+    effective_enable_skeleton_smoothing = (
+        preset_enables_phase3 if enable_skeleton_smoothing is None
+        else bool(enable_skeleton_smoothing)
+    )
 
     stage_started = time.perf_counter()
     gray, original_size, source_path = _decode_grayscale(image_bytes_or_path)
@@ -1039,7 +1161,13 @@ def vectorize_sketch_image_to_plan(
     mark(stage_started, 'resize_time_ms')
 
     stage_started = time.perf_counter()
-    normalized_gray = _normalize_grayscale(processed_gray)
+    if effective_enable_preprocessing:
+        # Full enhancement chain: background flatten + CLAHE + bilateral + unsharp.
+        # This recovers faint scans and removes JPEG noise before thresholding.
+        normalized_gray = enhance_for_extraction(processed_gray)
+    else:
+        # Legacy path: simple percentile-based contrast stretch.
+        normalized_gray = _normalize_grayscale(processed_gray)
     mark(stage_started, 'normalize_time_ms')
 
     stage_started = time.perf_counter()
@@ -1057,8 +1185,35 @@ def vectorize_sketch_image_to_plan(
     )
     mark(stage_started, 'cleanup_time_ms')
 
+    # Optionally split filled regions out and replace them with their outline,
+    # so a black filled circle draws as a circle outline rather than a single
+    # skeletonization point. The thin part still passes through skeletonize
+    # for normal stroke recovery.
+    filled_outline_metadata: dict[str, object] = {
+        'filled_outline_enabled': bool(effective_enable_filled_outline),
+        'filled_component_count': 0,
+        'thin_component_count': 0,
+        'filled_outline_pixel_count': 0,
+    }
+    skeleton_input_binary = cleaned_binary
+    if effective_enable_filled_outline:
+        stage_started = time.perf_counter()
+        split = split_filled_and_thin(cleaned_binary)
+        filled_outline_metadata.update(
+            {
+                'filled_component_count': int(split.filled_component_count),
+                'thin_component_count': int(split.thin_component_count),
+                'filled_outline_pixel_count': int(numpy.count_nonzero(split.outline_mask)),
+            }
+        )
+        # Combine: thin foreground stays as-is, filled regions are replaced
+        # with their 1-px outline. Skeletonize is idempotent on a 1-px curve,
+        # so this is safe to run through the rest of the pipeline.
+        skeleton_input_binary = numpy.maximum(split.thin_mask, split.outline_mask)
+        mark(stage_started, 'filled_outline_time_ms')
+
     stage_started = time.perf_counter()
-    skeleton, skeleton_backend = _skeletonize_foreground(cleaned_binary)
+    skeleton, skeleton_backend = _skeletonize_foreground(skeleton_input_binary)
     mark(stage_started, 'skeleton_time_ms')
 
     stage_started = time.perf_counter()
@@ -1079,10 +1234,31 @@ def vectorize_sketch_image_to_plan(
     points_before_simplification = sum(len(stroke) for stroke in raw_strokes)
 
     stage_started = time.perf_counter()
+    smoothing_metadata: dict[str, object] = {
+        'skeleton_smoothing_enabled': bool(effective_enable_skeleton_smoothing),
+        'skeleton_smoothing_kernel_size': 5 if effective_enable_skeleton_smoothing else 0,
+    }
+    if effective_enable_skeleton_smoothing:
+        smoothed_strokes = tuple(
+            stroke for stroke in (
+                _smooth_pixel_stroke(stroke) for stroke in raw_strokes
+            )
+            if len(stroke) >= 2
+        )
+        if not smoothed_strokes:
+            # Smoothing should never empty the stroke set on a non-empty input,
+            # but keep a safe fallback so tiny pathological strokes don't
+            # break the pipeline.
+            smoothed_strokes = raw_strokes
+    else:
+        smoothed_strokes = raw_strokes
+    mark(stage_started, 'skeleton_smoothing_time_ms')
+
+    stage_started = time.perf_counter()
     simplified_strokes = tuple(
         stroke for stroke in (
             _simplify_pixels(stroke, epsilon_px=effective_simplify_epsilon_px)
-            for stroke in raw_strokes
+            for stroke in smoothed_strokes
         )
         if len(stroke) >= 2
     )
@@ -1111,6 +1287,46 @@ def vectorize_sketch_image_to_plan(
     mark(stage_started, 'filter_time_ms')
     if not filtered_strokes:
         raise ValueError('No drawable centerline strokes remained after stroke filtering.')
+
+    # Optionally reorder strokes (and reverse where helpful) so that
+    # consecutive strokes are spatially close. This minimises pen-up travel
+    # and prevents the robot from criss-crossing the canvas.
+    stroke_reorder_metadata: dict[str, object] = {
+        'stroke_reorder_enabled': bool(effective_enable_stroke_reorder),
+        'stroke_reorder_iterations': 0,
+        'stroke_reorder_travel_before_px': 0.0,
+        'stroke_reorder_travel_after_px': 0.0,
+    }
+    if effective_enable_stroke_reorder and len(filtered_strokes) >= 2:
+        stage_started = time.perf_counter()
+        # Compute pre-reorder travel for metrics. Travel is measured in
+        # pixel space because the reorder runs before scaling to board space.
+        travel_before = 0.0
+        for previous_stroke, next_stroke in zip(filtered_strokes[:-1], filtered_strokes[1:]):
+            travel_before += math.hypot(
+                float(next_stroke[0][0] - previous_stroke[-1][0]),
+                float(next_stroke[0][1] - previous_stroke[-1][1]),
+            )
+        ordering_input = [
+            _OrderingStroke(points=tuple((float(x), float(y)) for x, y in stroke))
+            for stroke in filtered_strokes
+        ]
+        ordering = optimise_stroke_order(ordering_input)
+        # Convert back to integer-pixel strokes; the optimiser only changes
+        # ordering and direction, so coordinates are still on the original
+        # integer pixel grid.
+        filtered_strokes = tuple(
+            tuple((int(round(x)), int(round(y))) for x, y in s.points)
+            for s in ordering.strokes
+        )
+        stroke_reorder_metadata.update(
+            {
+                'stroke_reorder_iterations': int(ordering.iterations),
+                'stroke_reorder_travel_before_px': float(travel_before),
+                'stroke_reorder_travel_after_px': float(ordering.travel_length_m),
+            }
+        )
+        mark(stage_started, 'stroke_reorder_time_ms')
 
     stage_started = time.perf_counter()
     board_strokes, placement_metadata = _scale_strokes_to_board(
@@ -1148,6 +1364,7 @@ def vectorize_sketch_image_to_plan(
         'effective_merge_gap_px': effective_merge_gap_px,
         'effective_merge_max_angle_deg': effective_merge_max_angle_deg,
         'skeleton_prune_px': effective_skeleton_prune_px,
+        'preprocessing_enabled': bool(effective_enable_preprocessing),
         'foreground_pixel_count': int(numpy.count_nonzero(binary)),
         'cleaned_foreground_pixel_count': int(numpy.count_nonzero(cleaned_binary)),
         'skeleton_pixel_count': int(numpy.count_nonzero(skeleton)),
@@ -1166,7 +1383,10 @@ def vectorize_sketch_image_to_plan(
         'warnings': tuple(warnings),
         **threshold_metadata,
         **component_metadata,
+        **filled_outline_metadata,
         **skeleton_prune_metadata,
+        **smoothing_metadata,
+        **stroke_reorder_metadata,
         **placement_metadata,
     }
     return DrawingPathPlan(

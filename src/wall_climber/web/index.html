@@ -1396,6 +1396,16 @@
                       <option value="otsu">Otsu</option>
                     </select>
                   </div>
+                  <div class="field">
+                    <label for="sketch-resolution">
+                      Processing Resolution
+                      <span id="sketch-resolution-readout" class="field-hint">Default (1000 px)</span>
+                    </label>
+                    <input id="sketch-resolution" type="range" min="0" max="3" step="1" value="1">
+                    <div class="field-hint">
+                      Lower&nbsp;= faster &amp; less detail. Higher&nbsp;= preserves thin strokes but slower.
+                    </div>
+                  </div>
                   <div class="field debug-only">
                     <label for="vectorization-engine">Vectorization Engine</label>
                     <select id="vectorization-engine">
@@ -1438,10 +1448,6 @@
                 <details id="advanced-sketch-settings" class="advanced-settings" hidden>
                   <summary>Advanced sketch settings</summary>
                   <div class="field-grid">
-                    <div class="field">
-                      <label for="sketch-max-image-dim">Max Image Dim</label>
-                      <input id="sketch-max-image-dim" type="number" min="500" max="1600" step="100" value="1000">
-                    </div>
                     <div class="field">
                       <label for="sketch-curve-tolerance">Curve Tolerance (px)</label>
                       <input id="sketch-curve-tolerance" type="number" min="0.05" step="0.05" value="1.0">
@@ -1644,8 +1650,11 @@
     (() => {
       'use strict';
 
-      const WS_HOST = location.hostname || '127.0.0.1';
-      const WS_URL = `ws://${WS_HOST}:9090`;
+      // Rosbridge is proxied through the FastAPI backend, so VS Code only
+      // needs to forward the web UI port.
+      const WS_SCHEME = location.protocol === 'https:' ? 'wss' : 'ws';
+      const WS_HOST = location.host || '127.0.0.1:8080';
+      const WS_URL = `${WS_SCHEME}://${WS_HOST}/rosbridge`;
       const DEBUG_MODE = new URLSearchParams(window.location.search).get('debug') === '1'
         || window.localStorage.getItem('debugMode') === 'true';
       document.body.classList.toggle('debug-mode', DEBUG_MODE);
@@ -1755,7 +1764,8 @@
         sketchPreserveTiny: document.getElementById('sketch-preserve-tiny'),
         sketchTinySizeMm: document.getElementById('sketch-tiny-size-mm'),
         sketchTinyCandidateMm: document.getElementById('sketch-tiny-candidate-mm'),
-        sketchMaxImageDim: document.getElementById('sketch-max-image-dim'),
+        sketchResolution: document.getElementById('sketch-resolution'),
+        sketchResolutionReadout: document.getElementById('sketch-resolution-readout'),
         sketchCurveTolerance: document.getElementById('sketch-curve-tolerance'),
         sketchMargin: document.getElementById('sketch-margin'),
         sketchMinComponent: document.getElementById('sketch-min-component'),
@@ -4221,6 +4231,39 @@
         await previewSketchCenterlineFile(file);
       }
 
+      // Maps the resolution slider position (0..3) to an actual max_image_dim
+      // pixel count. Steps were chosen from live measurements:
+      //   0 (Fast)      -> 700  px : ~0.6 s on a typical anime line-art image
+      //   1 (Default)   -> 1000 px : ~1.5 s, best balance for most uploads
+      //   2 (High)      -> 1300 px : ~5  s, recovers thin strokes from low-res scans
+      //   3 (Maximum)   -> 1500 px : ~10 s, last-resort for very faint or detailed scans
+      // The backend caps at 1500 (the knee in our processing-time curve), so
+      // there is no benefit going above this without optimising the pipeline.
+      const SKETCH_RESOLUTION_STEPS = [
+        { value: 700,  label: 'Fast (700 px)',     hint: '~1 s · best for clean line art with thick strokes' },
+        { value: 1000, label: 'Default (1000 px)', hint: '~2 s · balanced for most uploads' },
+        { value: 1300, label: 'High (1300 px)',    hint: '~5 s · recovers thin strokes on low-res scans' },
+        { value: 1500, label: 'Maximum (1500 px)', hint: '~10 s · only for very faint or highly detailed scans' },
+      ];
+
+      function resolveSketchMaxImageDim() {
+        if (!dom.sketchResolution) {
+          return 1000;
+        }
+        const stepIndex = Math.max(0, Math.min(SKETCH_RESOLUTION_STEPS.length - 1, Math.round(Number(dom.sketchResolution.value || 1))));
+        return SKETCH_RESOLUTION_STEPS[stepIndex].value;
+      }
+
+      function syncSketchResolutionReadout() {
+        if (!dom.sketchResolution || !dom.sketchResolutionReadout) {
+          return;
+        }
+        const stepIndex = Math.max(0, Math.min(SKETCH_RESOLUTION_STEPS.length - 1, Math.round(Number(dom.sketchResolution.value || 1))));
+        const step = SKETCH_RESOLUTION_STEPS[stepIndex];
+        dom.sketchResolutionReadout.textContent = step.label;
+        dom.sketchResolutionReadout.title = step.hint;
+      }
+
       function readFilePreviewSettings() {
         const useAdvanced = DEBUG_MODE || String(dom.sketchOptimizationPreset.value || 'detail') === 'custom';
         const settings = {
@@ -4233,7 +4276,7 @@
           fit_to_safe_area: Boolean(dom.sketchFitSafe.checked),
           optimize_stroke_order: Boolean(dom.sketchOptimizeDraw.checked),
           path_optimizer: String(dom.pathOptimizer ? dom.pathOptimizer.value : 'internal'),
-          max_image_dim: Math.max(500, Math.min(1600, Math.round(Number(dom.sketchMaxImageDim.value || 1000)))),
+          max_image_dim: resolveSketchMaxImageDim(),
           margin_m: Number(dom.sketchMargin.value || 0.05),
           line_sensitivity: Math.max(0, Math.min(0.95, Number(dom.sketchLineSensitivity.value || 0.35))),
           scale_percent: Math.max(1, Number(dom.sketchScalePercent.value || 100)),
@@ -4470,7 +4513,7 @@
         dom.sketchPreserveTiny,
         dom.sketchTinySizeMm,
         dom.sketchTinyCandidateMm,
-        dom.sketchMaxImageDim,
+        dom.sketchResolution,
         dom.sketchCurveTolerance,
         dom.sketchMargin,
         dom.sketchMinComponent,
@@ -4489,12 +4532,14 @@
         }
         input.addEventListener('input', () => {
           syncSketchAdvancedVisibility();
+          syncSketchResolutionReadout();
           if (state.currentPipelineMode === 'sketch_centerline' || state.currentPipelineMode === 'local_outline_adaptive_centerline' || state.activeTool === 'file') {
             markPreviewSettingsChanged();
           }
         });
         input.addEventListener('change', () => {
           syncSketchAdvancedVisibility();
+          syncSketchResolutionReadout();
           if (state.currentPipelineMode === 'sketch_centerline' || state.currentPipelineMode === 'local_outline_adaptive_centerline' || state.activeTool === 'file') {
             markPreviewSettingsChanged();
           }
@@ -4778,13 +4823,23 @@
           });
           penContactTopic.subscribe((msg) => {
             const nextContact = Boolean(msg.data);
+            // We always close the previous segment on a true->false
+            // transition. Re-using state.penPose to seed a brand new
+            // segment on a false->true transition is a known race
+            // hazard: pen_pose_board and pen_contact are independent
+            // topics, so the currently-cached pose may still belong
+            // to the *previous* stroke (the pen has moved through the
+            // air to the new starting point but the new pose has not
+            // yet been delivered through rosbridge). Seeding the
+            // segment with that stale pose draws a long visible line
+            // across an "empty" area that does not exist in the
+            // executable plan. Instead we let penPoseTopic.subscribe
+            // start the segment naturally on the next pose tick that
+            // arrives while penContact is True.
             if (state.penContact && !nextContact) {
               endTrailSegment();
             }
             state.penContact = nextContact;
-            if (nextContact && state.penPose && !state.activeTrailSegment) {
-              appendTrailPoint({ x: state.penPose.x, y: state.penPose.y });
-            }
           });
         } catch (error) {
           state.rosbridge = 'error';
@@ -4822,6 +4877,7 @@
       });
 
       pushFeed('UI initialized. Waiting for backend and rosbridge.', 'info');
+      syncSketchResolutionReadout();
       syncPlacementLabels();
       syncPlacementDefaults(true);
       setTextFontSource('relief_singleline');

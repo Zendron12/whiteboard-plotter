@@ -28,7 +28,7 @@ setup(
 
         # Launch / URDF / Worlds / Config
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml') + glob('config/*.xml')),
         (os.path.join('share', package_name, 'urdf'), glob('urdf/*.xacro')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*')),
         
@@ -40,6 +40,7 @@ setup(
         'setuptools',
         'fastapi',
         'uvicorn',
+        'websockets',
         'python-multipart',
         'matplotlib',
         'scikit-image',
